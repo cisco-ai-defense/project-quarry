@@ -39,7 +39,7 @@ dependencies = [
     "loguru==0.7.3",
     "orjson>=3.11.6,<4",
     "packaging==26.3",
-    "pydantic==2.13.5",
+    "pydantic==2.14.1",
     "pygments>=2.21.0",
     "pyyaml>=6.0,<7",
     "rich==15.0.0",
