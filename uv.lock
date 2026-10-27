@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -176,16 +176,16 @@ wheels = [
 
 [[package]]
 name = "build"
-version = "1.3.0"
+version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "os_name == 'nt'" },
     { name = "packaging" },
     { name = "pyproject-hooks" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/25/1c/23e33405a7c9eac261dff640926b8b5adaed6a6eb3e1767d441ed611d0c0/build-1.3.0.tar.gz", hash = "sha256:698edd0ea270bde950f53aed21f3a0135672206f3911e0176261a31e0e07b397", size = 48544, upload-time = "2025-08-01T21:27:09.268Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/67/4898a44ea4f3f8e213b0954ec0aa0a16971d62a6212d6ea3931e97115b99/build-1.6.1.tar.gz", hash = "sha256:51cc11666391ab6f092070437ac747002ff46f3e4113a3622177ee6b488bfc53", size = 113427, upload-time = "2026-09-10T07:56:00.417Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/8c/2b30c12155ad8de0cf641d76a8b396a16d2c36bc6d50b621a62b7c4567c1/build-1.3.0-py3-none-any.whl", hash = "sha256:7145f0b5061ba90a1500d60bd1b13ca0a8a4cebdd0cc16ed8adf1c0e739f43b4", size = 23382, upload-time = "2025-08-01T21:27:07.844Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/9b/9fb3585dabcd73a1b2a6267f63f62649347c9e6d072c9fde365b105abb2c/build-1.6.1-py3-none-any.whl", hash = "sha256:ecd351a4be9d35a9eaaba244a7687143c9c7d4aea6ac964e7e7ddab20cbcf4e7", size = 31179, upload-time = "2026-09-10T07:55:59.148Z" },
 ]
 
 [[package]]
@@ -302,6 +302,116 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e8/ef/6953a77c7cf2c2ff9998e6f575ab3e380119f100223381565a4f94c1f836/charset_normalizer-3.4.9-cp313-cp313-win_amd64.whl", hash = "sha256:fe2c7201c642b7c308f1675355ad7ff7b66acfe3541625efe5a3ad38f29d6115", size = 161947, upload-time = "2026-07-07T14:33:52.197Z" },
     { url = "https://files.pythonhosted.org/packages/6e/fb/d560d1d1555debbfe7849d9cac6145c1b537709d79576bf22557ed803b82/charset_normalizer-3.4.9-cp313-cp313-win_arm64.whl", hash = "sha256:611057cc5d5c0afc743ba8be6bd828c17e0aaa8643f9d0a9b9bb7dea80eb8012", size = 152594, upload-time = "2026-07-07T14:33:53.486Z" },
     { url = "https://files.pythonhosted.org/packages/98/2b/f97f1c193fb855c345d678f5077d6926034db0722df74c8f057020e05a25/charset_normalizer-3.4.9-py3-none-any.whl", hash = "sha256:68e5f26a1ad57ded6d1cfb85331d1c1a195314756471d97758c48498bb4dcdf5", size = 64538, upload-time = "2026-07-07T14:34:56.993Z" },
+]
+
+[[package]]
+name = "cisco-project-quarry"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cachetools" },
+    { name = "google-re2" },
+    { name = "lark" },
+    { name = "loguru" },
+    { name = "orjson" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "pygments" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
+
+[package.optional-dependencies]
+inference = [
+    { name = "aiohttp" },
+    { name = "anyio" },
+    { name = "boto3" },
+    { name = "certifi" },
+    { name = "filelock" },
+    { name = "httpx" },
+    { name = "idna" },
+    { name = "jsonschema" },
+    { name = "litellm" },
+    { name = "multidict" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "urllib3" },
+]
+plugin = [
+    { name = "aiohttp" },
+    { name = "anyio" },
+    { name = "boto3" },
+    { name = "certifi" },
+    { name = "filelock" },
+    { name = "httpx" },
+    { name = "idna" },
+    { name = "jsonschema" },
+    { name = "litellm" },
+    { name = "mcp" },
+    { name = "multidict" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "urllib3" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "build" },
+    { name = "coverage" },
+    { name = "hypothesis" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "tiktoken" },
+    { name = "twine" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", marker = "extra == 'inference'", specifier = ">=3.14.4" },
+    { name = "anyio", marker = "extra == 'inference'", specifier = ">=4.14.2" },
+    { name = "boto3", marker = "extra == 'inference'", specifier = "==1.43.107" },
+    { name = "cachetools", specifier = "==7.2.0" },
+    { name = "certifi", marker = "extra == 'inference'", specifier = ">=2026.10.19" },
+    { name = "cisco-project-quarry", extras = ["inference"], marker = "extra == 'plugin'" },
+    { name = "filelock", marker = "extra == 'inference'", specifier = ">=4.2.1" },
+    { name = "google-re2", specifier = "==1.1.20251105" },
+    { name = "httpx", marker = "extra == 'inference'", specifier = "==0.28.1" },
+    { name = "idna", marker = "extra == 'inference'", specifier = ">=3.15" },
+    { name = "jsonschema", marker = "extra == 'inference'", specifier = "==4.26.0" },
+    { name = "lark", specifier = "==1.3.1" },
+    { name = "litellm", marker = "extra == 'inference'", specifier = "==1.103.2" },
+    { name = "loguru", specifier = "==0.7.3" },
+    { name = "mcp", marker = "extra == 'plugin'", specifier = "==2.3.0" },
+    { name = "multidict", marker = "extra == 'inference'", specifier = ">=6.9.1" },
+    { name = "orjson", specifier = ">=3.11.6,<4" },
+    { name = "packaging", specifier = "==26.3" },
+    { name = "pydantic", specifier = "==2.13.5" },
+    { name = "pygments", specifier = ">=2.21.0" },
+    { name = "pyjwt", marker = "extra == 'plugin'", specifier = ">=2.15.0" },
+    { name = "python-dotenv", marker = "extra == 'inference'", specifier = ">=1.2.2" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "requests", marker = "extra == 'inference'", specifier = ">=2.33.0" },
+    { name = "rich", specifier = "==15.0.0" },
+    { name = "urllib3", marker = "extra == 'inference'", specifier = ">=2.8.0" },
+]
+provides-extras = ["inference", "plugin"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "build", specifier = "==1.6.1" },
+    { name = "coverage", specifier = "==7.16.2" },
+    { name = "hypothesis", specifier = "==6.168.3" },
+    { name = "pytest", specifier = "==9.1.1" },
+    { name = "pytest-asyncio", specifier = "==1.4.0" },
+    { name = "pytest-xdist", specifier = "==3.8.0" },
+    { name = "ruff", specifier = "==0.16.10" },
+    { name = "tiktoken", specifier = "==0.14.0" },
+    { name = "twine", specifier = "==6.2.0" },
+    { name = "ty", specifier = "==0.0.84" },
 ]
 
 [[package]]
@@ -1431,116 +1541,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
-]
-
-[[package]]
-name = "cisco-project-quarry"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "cachetools" },
-    { name = "google-re2" },
-    { name = "lark" },
-    { name = "loguru" },
-    { name = "orjson" },
-    { name = "packaging" },
-    { name = "pydantic" },
-    { name = "pygments" },
-    { name = "pyyaml" },
-    { name = "rich" },
-]
-
-[package.optional-dependencies]
-inference = [
-    { name = "aiohttp" },
-    { name = "anyio" },
-    { name = "boto3" },
-    { name = "certifi" },
-    { name = "filelock" },
-    { name = "httpx" },
-    { name = "idna" },
-    { name = "jsonschema" },
-    { name = "litellm" },
-    { name = "multidict" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-    { name = "urllib3" },
-]
-plugin = [
-    { name = "aiohttp" },
-    { name = "anyio" },
-    { name = "boto3" },
-    { name = "certifi" },
-    { name = "filelock" },
-    { name = "httpx" },
-    { name = "idna" },
-    { name = "jsonschema" },
-    { name = "litellm" },
-    { name = "mcp" },
-    { name = "multidict" },
-    { name = "pyjwt" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-    { name = "urllib3" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "build" },
-    { name = "coverage" },
-    { name = "hypothesis" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "tiktoken" },
-    { name = "twine" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", marker = "extra == 'inference'", specifier = ">=3.14.4" },
-    { name = "anyio", marker = "extra == 'inference'", specifier = ">=4.14.2" },
-    { name = "boto3", marker = "extra == 'inference'", specifier = "==1.43.107" },
-    { name = "cachetools", specifier = "==7.2.0" },
-    { name = "certifi", marker = "extra == 'inference'", specifier = ">=2026.10.19" },
-    { name = "filelock", marker = "extra == 'inference'", specifier = ">=4.2.1" },
-    { name = "google-re2", specifier = "==1.1.20251105" },
-    { name = "httpx", marker = "extra == 'inference'", specifier = "==0.28.1" },
-    { name = "idna", marker = "extra == 'inference'", specifier = ">=3.15" },
-    { name = "jsonschema", marker = "extra == 'inference'", specifier = "==4.26.0" },
-    { name = "lark", specifier = "==1.3.1" },
-    { name = "litellm", marker = "extra == 'inference'", specifier = "==1.103.2" },
-    { name = "loguru", specifier = "==0.7.3" },
-    { name = "mcp", marker = "extra == 'plugin'", specifier = "==2.3.0" },
-    { name = "multidict", marker = "extra == 'inference'", specifier = ">=6.9.1" },
-    { name = "orjson", specifier = ">=3.11.6,<4" },
-    { name = "packaging", specifier = "==26.3" },
-    { name = "cisco-project-quarry", extras = ["inference"], marker = "extra == 'plugin'" },
-    { name = "pydantic", specifier = "==2.13.5" },
-    { name = "pygments", specifier = ">=2.21.0" },
-    { name = "pyjwt", marker = "extra == 'plugin'", specifier = ">=2.15.0" },
-    { name = "python-dotenv", marker = "extra == 'inference'", specifier = ">=1.2.2" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "requests", marker = "extra == 'inference'", specifier = ">=2.33.0" },
-    { name = "rich", specifier = "==15.0.0" },
-    { name = "urllib3", marker = "extra == 'inference'", specifier = ">=2.8.0" },
-]
-provides-extras = ["inference", "plugin"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "build", specifier = "==1.3.0" },
-    { name = "coverage", specifier = "==7.16.2" },
-    { name = "hypothesis", specifier = "==6.168.3" },
-    { name = "pytest", specifier = "==9.1.1" },
-    { name = "pytest-asyncio", specifier = "==1.4.0" },
-    { name = "pytest-xdist", specifier = "==3.8.0" },
-    { name = "ruff", specifier = "==0.16.10" },
-    { name = "tiktoken", specifier = "==0.14.0" },
-    { name = "twine", specifier = "==6.2.0" },
-    { name = "ty", specifier = "==0.0.84" },
 ]
 
 [[package]]
