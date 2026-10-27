@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_LENGTH_MARKER followed by enough padding to exceed forty characters"
+    }
+  ]
+}

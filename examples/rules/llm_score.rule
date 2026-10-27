@@ -1,0 +1,6 @@
+rule "Conversation LLM Score"
+metadata:
+    description = "Feature: llm_score() scores a conversation against named policy text"
+    feature = "function:llm_score"
+condition:
+    llm_score("judge", text_ref("policy"), conversation()) >= 0.8

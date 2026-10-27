@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Here is the credential I found in the repo: sk-EXAMPLEKEYNOTVALID0000 please validate it."
+    }
+  ]
+}

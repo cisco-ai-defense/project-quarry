@@ -1,0 +1,9 @@
+rule "Occurrence Count"
+metadata:
+    description = "Feature: the # occurrence-count operator (count matches of a set within text)"
+    feature = "operator:hash_count"
+strings:
+    $sql = ["SELECT", "UNION", "DROP", "INSERT", "WHERE", "FROM"]
+condition:
+    any msg in user_messages where
+        #sql in msg.content >= 3

@@ -1,0 +1,8 @@
+rule "Named Boolean Variable"
+metadata:
+    description = "Feature: naming and reusing an expression in a variables block"
+    feature = "construct:variables"
+variables:
+    has_marker = user_said("QUARRY_VARIABLE_MARKER")
+condition:
+    has_marker

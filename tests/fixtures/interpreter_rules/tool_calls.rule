@@ -1,0 +1,8 @@
+rule "Tool Call Argument Access"
+metadata:
+    description = "Feature: reading tool_calls and a named argument value (call.arguments.command)"
+    feature = "accessor:tool_calls"
+condition:
+    any call in tool_calls where
+        call.name == "execute_shell" and
+        call.arguments.command contains "rm -rf"

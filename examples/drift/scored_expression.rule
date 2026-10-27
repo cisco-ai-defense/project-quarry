@@ -1,0 +1,13 @@
+rule "Scored Boolean Expression"
+metadata:
+    description = "Boolean expression over scored model variables. One model output feeds several named variables at different thresholds: `pi` and `pi_lower` both read output index 0 of the same classifier at different cutoffs, `toxic` reads index 1. A single model_classification per (model, message) is shared across all three (atom interning + classification-boundary cache). This is the authoring-sugar form of the inline `model_score(...) >= t or (...)` expression."
+    severity = "HIGH"
+    threat_type = "prompt_injection"
+    signal_channel = "surface_text"
+variables:
+    pi       = model_score("prompt_injection", msg.content, 0) >= 0.8
+    pi_lower = model_score("prompt_injection", msg.content, 0) >= 0.5
+    toxic    = model_score("prompt_injection", msg.content, 1) >= 0.6
+condition:
+    any msg in user_messages where
+        pi or (pi_lower and toxic)

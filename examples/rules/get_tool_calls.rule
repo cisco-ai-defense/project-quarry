@@ -1,0 +1,7 @@
+rule "Filtered Tool Calls"
+metadata:
+    description = "Feature: get_tool_calls() returns calls with the requested exact name"
+    feature = "function:get_tool_calls"
+condition:
+    any call in get_tool_calls("quarry_lookup") where
+        call.arguments.query contains "QUARRY_LOOKUP_MARKER"

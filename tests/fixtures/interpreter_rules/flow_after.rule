@@ -1,0 +1,10 @@
+rule "Flow After"
+metadata:
+    description = "Feature: the 'after' flow operator (A happens anywhere after B on the timeline)"
+    feature = "flow:after"
+condition:
+    any http in get_tool_calls("http_request") where
+        http.arguments.url contains "evil-corp.io"
+    after
+    any read in get_tool_calls("read_file") where
+        read.arguments.path contains_any [".env", "credentials", "secrets"]

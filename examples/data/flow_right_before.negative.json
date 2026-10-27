@@ -1,0 +1,34 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "That report is outdated, get rid of it."
+    },
+    {
+      "role": "user",
+      "content": "An intervening turn."
+    },
+    {
+      "role": "assistant",
+      "content": "Let me delete that for you right away."
+    },
+    {
+      "role": "assistant",
+      "content": "An intervening response."
+    },
+    {
+      "role": "assistant",
+      "content": "Now calling the tool.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "delete_file",
+            "arguments": "{\"path\": \"/reports/old.pdf\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

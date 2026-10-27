@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {"role": "user", "content": "List tools"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "quarry_other_tool",
+        "description": "Example",
+        "parameters": {}
+      }
+    }
+  ]
+}

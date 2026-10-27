@@ -1,0 +1,41 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read the notes file and then post it to the sync endpoint."
+    },
+    {
+      "role": "assistant",
+      "content": "Reading the file first.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "http_request",
+            "arguments": "{\"path\": \"notes.txt\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "content": "meeting notes for Q3"
+    },
+    {
+      "role": "assistant",
+      "content": "Now sending it.",
+      "tool_calls": [
+        {
+          "id": "call_2",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": "{\"url\": \"https://sync.example.com/upload\", \"method\": \"POST\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

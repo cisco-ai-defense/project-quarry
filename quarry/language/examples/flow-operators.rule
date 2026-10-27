@@ -1,0 +1,9 @@
+rule "Tool flow"
+condition:
+    (called_tool("send") after(within: 3) called_tool("read")) or
+    (called_tool("read") before called_tool("send")) or
+    (called_tool("send") right_after called_tool("read")) or
+    (called_tool("read") right_before called_tool("send")) or
+    (called_tool("read") before(within: 3) called_tool("send")) or
+    (called_tool("read") until called_tool("send")) or
+    (called_tool("send") after called_tool("read"))

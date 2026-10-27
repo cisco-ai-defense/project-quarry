@@ -1,0 +1,26 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "List tools"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "quarry_offered_alpha",
+        "description": "Example",
+        "parameters": {}
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "quarry_offered_beta",
+        "description": "Example",
+        "parameters": {}
+      }
+    }
+  ]
+}

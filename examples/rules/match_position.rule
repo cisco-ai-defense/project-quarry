@@ -1,0 +1,10 @@
+rule "Match Position Ordering"
+metadata:
+    description = "Feature: the @ match-position operator to compare where two patterns appear"
+    feature = "operator:at_position"
+strings:
+    $username = "username"
+    $password = "password"
+condition:
+    any msg in user_messages where
+        (@username in msg.content) < (@password in msg.content)

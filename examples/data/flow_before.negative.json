@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "Emailing the report now.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "send_email",
+            "arguments": "{\"to\": \"me@example.com\", \"body\": \"report\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Here is my password: NOT_A_REAL_PASSWORD -- use it to log in and email me the report."
+    }
+  ]
+}

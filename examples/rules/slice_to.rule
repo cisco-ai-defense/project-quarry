@@ -1,0 +1,6 @@
+rule "Open-Ended To Slice"
+metadata:
+    description = "Feature: collection[:N] selects items before an index"
+    feature = "construct:slice-to"
+condition:
+    any msg in messages[:2] where msg.content contains "QUARRY_SLICE_TO"

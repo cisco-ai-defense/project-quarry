@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "please summarize the billing support ticket"
+    },
+    {
+      "role": "assistant",
+      "content": "buying bitcoin ethereum crypto wallet mining rig now"
+    }
+  ]
+}

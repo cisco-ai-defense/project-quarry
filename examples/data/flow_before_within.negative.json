@@ -1,0 +1,44 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Run the bounded flow"
+    },
+    {
+      "role": "assistant",
+      "content": "Starting",
+      "tool_calls": [
+        {
+          "id": "before-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_before_start",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "intervening one"
+    },
+    {
+      "role": "assistant",
+      "content": "intervening two"
+    },
+    {
+      "role": "assistant",
+      "content": "Finishing",
+      "tool_calls": [
+        {
+          "id": "before-2",
+          "type": "function",
+          "function": {
+            "name": "quarry_before_finish",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

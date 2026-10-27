@@ -1,0 +1,31 @@
+{
+  "messages": [
+    {
+      "content": "policy",
+      "role": "system"
+    },
+    {
+      "content": "Inspect x.",
+      "role": "user"
+    },
+    {
+      "content": "Inspecting.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\":\"x\"}",
+            "name": "read"
+          },
+          "id": "call-read",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "ok",
+      "role": "tool",
+      "tool_call_id": "call-read"
+    }
+  ]
+}

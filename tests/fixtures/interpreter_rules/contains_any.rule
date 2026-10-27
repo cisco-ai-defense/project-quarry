@@ -1,0 +1,7 @@
+rule "Contains Any Of List"
+metadata:
+    description = "Feature: the contains_any operator (true if any value in the list is a substring)"
+    feature = "operator:contains_any"
+condition:
+    any msg in user_messages where
+        msg.content contains_any ["drop table", "delete from", "truncate table"]

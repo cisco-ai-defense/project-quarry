@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "SELECT name FROM users WHERE id = 1"
+    }
+  ]
+}

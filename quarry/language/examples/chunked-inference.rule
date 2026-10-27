@@ -1,0 +1,4 @@
+rule "Large chunk"
+condition:
+    any chunk in llm_split_conversation("gemma4", conversation(), 200) where
+        llm_input_tokens("gemma4", chunk) > 180

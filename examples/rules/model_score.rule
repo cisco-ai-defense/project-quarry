@@ -1,0 +1,6 @@
+rule "Message Model Score"
+metadata:
+    description = "Feature: model().score() evaluates messages against named policy text"
+    feature = "compiler_form:model.score"
+condition:
+    model("judge").score(messages, text_ref("policy")) >= 0.8

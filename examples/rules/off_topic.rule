@@ -1,0 +1,7 @@
+rule "Off-Topic Action"
+metadata:
+    description = "Feature: off_topic() compares an action with the original user intent"
+    feature = "function:off_topic"
+condition:
+    any msg in assistant_messages where
+        msg.content contains "QUARRY_OFF_TOPIC_PROBE" and off_topic(msg.content)

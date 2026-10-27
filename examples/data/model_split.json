@@ -1,0 +1,20 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_MODEL_MATCH"
+    },
+    {
+      "role": "assistant",
+      "content": "A short safe reply. Padding text keeps this turn comfortably below the token limit. Padding text keeps this turn comfortably below the token limit. "
+    },
+    {
+      "role": "user",
+      "content": "Continue with a separate ordinary request. More padding text for a second bounded conversation turn. More padding text for a second bounded conversation turn. "
+    },
+    {
+      "role": "assistant",
+      "content": "A safe response to the second request. Additional padding keeps the full input above the split limit. Additional padding keeps the full input above the split limit. "
+    }
+  ]
+}

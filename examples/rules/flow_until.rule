@@ -1,0 +1,6 @@
+rule "Flow Until"
+metadata:
+    description = "Feature: the left condition remains true until the right condition occurs"
+    feature = "construct:flow-until"
+condition:
+    user_said("QUARRY_UNTIL_WAIT") until assistant_said("QUARRY_UNTIL_DONE")

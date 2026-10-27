@@ -1,0 +1,6 @@
+rule "Message Model Completion"
+metadata:
+    description = "Feature: model().complete() returns a structured assistant message"
+    feature = "compiler_form:model.complete"
+condition:
+    model("completion").complete(messages).content contains "QUARRY_BLOCKED_COMPLETION"

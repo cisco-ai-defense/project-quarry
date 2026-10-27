@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Contact alice@example.net for details"
+    }
+  ]
+}

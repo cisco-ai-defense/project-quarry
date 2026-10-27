@@ -1,0 +1,7 @@
+rule "String Length"
+metadata:
+    description = "Feature: len() returns the length of a string"
+    feature = "compiler_form:len"
+condition:
+    any msg in user_messages where
+        msg.content contains "QUARRY_LENGTH_MARKER" and len(msg.content) > 40

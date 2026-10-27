@@ -1,0 +1,6 @@
+rule "Boolean Or"
+metadata:
+    description = "Feature: matching when either side of an 'or' expression is true"
+    feature = "construct:boolean-or"
+condition:
+    user_said("QUARRY_OR_LEFT") or assistant_said("QUARRY_OR_RIGHT")

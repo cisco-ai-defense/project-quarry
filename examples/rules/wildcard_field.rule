@@ -1,0 +1,7 @@
+rule "Wildcard Field Access"
+metadata:
+    description = "Feature: the .* wildcard to match against every value of a tool call's arguments"
+    feature = "accessor:wildcard_field"
+condition:
+    any call in tool_calls where
+        call.arguments.* contains_any ["sudo", "chmod +s", "setuid"]

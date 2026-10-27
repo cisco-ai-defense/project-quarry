@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {"role": "user", "content": "Run the sequence example"},
+    {
+      "role": "assistant",
+      "content": "Running a different call",
+      "tool_calls": [
+        {
+          "id": "sequence-other-1",
+          "type": "function",
+          "function": {"name": "quarry_sequence_other", "arguments": "{}"}
+        }
+      ]
+    }
+  ]
+}

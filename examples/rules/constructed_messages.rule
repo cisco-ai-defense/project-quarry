@@ -1,0 +1,10 @@
+rule "Constructed Model Messages"
+metadata:
+    description = "Feature: message() and add_message() build a synthetic model input"
+    feature = "function:add_message"
+condition:
+    user_said("QUARRY_CONSTRUCTED_MESSAGE") and
+    llm_input_tokens(
+        "judge",
+        message("user", "hello").add_message("assistant", "world")
+    ) > 5

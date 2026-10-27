@@ -1,0 +1,3 @@
+rule "Repeated messages"
+condition:
+    count([msg for msg in user_messages if msg.content contains "sudo"]) >= 2

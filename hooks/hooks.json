@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"${CLAUDE_PLUGIN_ROOT}\" --extra plugin --no-sync python \"${CLAUDE_PLUGIN_ROOT}/hooks/hydrate_quarry_inputs.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__(quarry|plugin_quarry_quarry)__(quarry_compile|quarry_scan)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"${CLAUDE_PLUGIN_ROOT}\" --extra plugin --no-sync python \"${CLAUDE_PLUGIN_ROOT}/hooks/hydrate_quarry_inputs.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

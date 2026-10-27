@@ -1,0 +1,11 @@
+rule "String Set Any Of"
+metadata:
+    description = "Feature: the 'any of (...)' string-set quantifier (at least one pattern matches)"
+    feature = "quantifier:any_of"
+strings:
+    $a = "reverse shell"
+    $b = "bind shell"
+    $c = "web shell"
+condition:
+    any msg in user_messages where
+        any of ($a, $b, $c) in msg.content

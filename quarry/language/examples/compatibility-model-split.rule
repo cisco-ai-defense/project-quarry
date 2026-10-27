@@ -1,0 +1,4 @@
+rule "Compatibility model split"
+condition:
+    any chunk in model_split("guard", messages, 200) where
+        model("guard").score(chunk, text_ref("policy"), tools) > 0.8

@@ -1,0 +1,6 @@
+rule "Tool Call Count"
+metadata:
+    description = "Feature: count_tool_calls() with a numeric comparison operator (>=)"
+    feature = "function:count_tool_calls"
+condition:
+    count_tool_calls("run_query") >= 3

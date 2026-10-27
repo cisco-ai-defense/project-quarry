@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {"role": "user", "content": "Please issue a refund for my purchase"},
+    {
+      "role": "assistant",
+      "content": "Issuing a refund",
+      "tool_calls": [
+        {
+          "id": "requested-action-1",
+          "type": "function",
+          "function": {"name": "issue_refund", "arguments": "{}"}
+        }
+      ]
+    }
+  ]
+}

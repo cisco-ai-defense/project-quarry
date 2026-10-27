@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "The chain triggers a buffer overflow and then uses privilege escalation to get root."
+    }
+  ]
+}

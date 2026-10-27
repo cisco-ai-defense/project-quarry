@@ -1,0 +1,4 @@
+rule "Exact tool name"
+condition:
+    called_tool("read") and
+    any call in get_tool_calls("read") where call.name == "read"

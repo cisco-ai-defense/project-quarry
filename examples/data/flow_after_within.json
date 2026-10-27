@@ -1,0 +1,23 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "This is urgent, the pipeline is down in production!"
+    },
+    {
+      "role": "assistant",
+      "content": "intervening one"
+    },
+    {
+      "role": "assistant",
+      "content": "Paging the on-call admin immediately.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {"name": "notify_admin", "arguments": "{\"message\": \"production pipeline down\"}"}
+        }
+      ]
+    }
+  ]
+}

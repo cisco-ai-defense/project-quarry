@@ -1,0 +1,9 @@
+rule "Base64 Encoded Match"
+metadata:
+    description = "Feature: the base64 string modifier (matches the base64-encoded form of a keyword)"
+    feature = "modifier:base64"
+strings:
+    $malware = "malware" base64
+condition:
+    any msg in user_messages where
+        $malware in msg.content

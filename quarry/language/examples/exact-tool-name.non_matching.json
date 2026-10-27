@@ -1,0 +1,18 @@
+{
+  "messages": [
+    {
+      "content": "",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "read_file"
+          },
+          "id": "call-1",
+          "type": "function"
+        }
+      ]
+    }
+  ]
+}

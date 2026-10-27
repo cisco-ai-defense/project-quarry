@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "please issue a refund for my order"
+    },
+    {
+      "role": "assistant",
+      "content": "ok",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "issue_refund",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

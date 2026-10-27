@@ -1,0 +1,7 @@
+rule "Tool Response Access"
+metadata:
+    description = "Feature: reading tool_responses (results returned by tools) via resp.result"
+    feature = "accessor:tool_responses"
+condition:
+    any resp in tool_responses where
+        resp.result contains "api_key"

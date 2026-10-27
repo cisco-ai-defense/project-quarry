@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_ADD_LEFT QUARRY_ADD_RIGHT QUARRY_ADD_RIGHT"
+    }
+  ]
+}

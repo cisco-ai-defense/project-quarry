@@ -1,0 +1,9 @@
+rule "Fullword Match"
+metadata:
+    description = "Feature: the fullword string modifier (matches only whole words, not substrings)"
+    feature = "modifier:fullword"
+strings:
+    $admin = "admin" fullword
+condition:
+    any msg in user_messages where
+        $admin in msg.content

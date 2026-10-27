@@ -1,0 +1,6 @@
+rule "Unrequested Consequential Action"
+metadata:
+    description = "Feature: unrequested_action() compares a tool capability with user intent"
+    feature = "function:unrequested_action"
+condition:
+    any call in tool_calls where unrequested_action(call.name)

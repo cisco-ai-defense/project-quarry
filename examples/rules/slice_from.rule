@@ -1,0 +1,6 @@
+rule "Open-Ended From Slice"
+metadata:
+    description = "Feature: collection[N:] selects items from an index onward"
+    feature = "construct:slice-from"
+condition:
+    any msg in messages[2:] where msg.content contains "QUARRY_SLICE_FROM"

@@ -1,0 +1,7 @@
+rule "Conversation LLM Split"
+metadata:
+    description = "Feature: llm_split_conversation() creates bounded conversation chunks"
+    feature = "compiler_form:llm_split_conversation"
+condition:
+    any chunk in llm_split_conversation("judge", conversation(), 200) where
+        llm_score("judge", text_ref("policy"), chunk) >= 0.8

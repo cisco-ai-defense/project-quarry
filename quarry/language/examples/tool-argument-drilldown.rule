@@ -1,0 +1,4 @@
+rule "Dangerous shell command"
+condition:
+    any call in tool_calls where
+        call.name == "shell" and call.arguments.command contains "rm -rf"

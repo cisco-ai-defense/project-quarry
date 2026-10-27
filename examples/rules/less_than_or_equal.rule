@@ -1,0 +1,8 @@
+rule "Less Than Or Equal"
+metadata:
+    description = "Feature: the <= numeric comparison operator"
+    feature = "construct:less-than-or-equal-comparison"
+condition:
+    any msg in user_messages where
+        msg.content contains "QUARRY_LTE_MARKER" and
+        count(msg.content, "QUARRY_LTE_MARKER") <= 2

@@ -1,0 +1,5 @@
+rule "Model classification"
+metadata:
+    description = "Compare a configured class probability with a literal threshold"
+condition:
+    model("guard").classify(messages) >= 0.8

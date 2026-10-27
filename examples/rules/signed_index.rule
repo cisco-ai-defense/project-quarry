@@ -1,0 +1,6 @@
+rule "Signed Message Index"
+metadata:
+    description = "Feature: a negative index selects a message relative to the collection end"
+    feature = "construct:signed-index"
+condition:
+    model_scan("classifier", user_messages[-1].content, 0.5, 0)

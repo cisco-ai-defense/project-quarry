@@ -1,0 +1,7 @@
+rule "Assistant Message Access"
+metadata:
+    description = "Feature: reading assistant_messages (the model's own turns) from the conversation"
+    feature = "accessor:assistant_messages"
+condition:
+    any msg in assistant_messages where
+        msg.content contains "disabled the safety filter"

@@ -1,0 +1,6 @@
+rule "System Message Access"
+metadata:
+    description = "Feature: reading system_messages from the conversation"
+    feature = "surface:system_messages"
+condition:
+    any msg in system_messages where msg.content contains "QUARRY_SYSTEM_MESSAGE_MARKER"

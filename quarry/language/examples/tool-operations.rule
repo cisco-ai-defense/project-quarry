@@ -1,0 +1,9 @@
+rule "Tool operations"
+condition:
+    has_tool("read") and has_tools("read", "send") and
+    called_tools("read", "send") and count_tool_calls("read") == 1 and
+    has_sequence("read", "send") and
+    any name in call_sequence() where name == "read" and
+    any result in get_tool_responses("read") where result.content contains "ok" and
+    any offered in tools where offered.name == "read" and
+    messages.called_tool("send")

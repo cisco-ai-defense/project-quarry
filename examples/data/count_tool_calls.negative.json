@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Pull the last three days of records."
+    },
+    {
+      "role": "assistant",
+      "content": "Querying each day.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "run_query",
+            "arguments": "{\"day\": \"monday\"}"
+          }
+        },
+        {
+          "id": "call_2",
+          "type": "function",
+          "function": {
+            "name": "run_query",
+            "arguments": "{\"day\": \"tuesday\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

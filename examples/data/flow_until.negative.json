@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_UNTIL_WAIT"
+    },
+    {
+      "role": "user",
+      "content": "QUARRY_UNTIL_NEUTRAL"
+    },
+    {
+      "role": "assistant",
+      "content": "QUARRY_UNTIL_DONE"
+    }
+  ]
+}

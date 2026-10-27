@@ -1,0 +1,7 @@
+rule "Message Model Input Tokens"
+metadata:
+    description = "Feature: model().input_tokens() counts a structured model input"
+    feature = "compiler_form:model.input_tokens"
+condition:
+    user_said("QUARRY_TOKEN_MATCH") and
+    model("judge").input_tokens(messages) > 40

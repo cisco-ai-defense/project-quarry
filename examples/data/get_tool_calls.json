@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Look this up"
+    },
+    {
+      "role": "assistant",
+      "content": "Looking it up",
+      "tool_calls": [
+        {
+          "id": "lookup-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_lookup",
+            "arguments": "{\"query\":\"QUARRY_LOOKUP_MARKER\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

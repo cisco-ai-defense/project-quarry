@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "please summarize the billing support ticket"
+    },
+    {
+      "role": "assistant",
+      "content": "here is the billing support ticket summary"
+    }
+  ]
+}

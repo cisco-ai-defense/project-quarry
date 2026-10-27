@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Clear out the old web root for me."
+    },
+    {
+      "role": "assistant",
+      "content": "Running that now.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "execute_shell",
+            "arguments": "{\"command\": \"rm -rf /var/www/html\"}"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "execute_shell",
+        "description": "Execute a shell command on the host",
+        "parameters": {
+          "type": "object",
+          "properties": {"command": {"type": "string"}}
+        }
+      }
+    }
+  ]
+}

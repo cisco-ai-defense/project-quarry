@@ -1,0 +1,7 @@
+rule "Legacy Model Score"
+metadata:
+    description = "Feature: model_score() exposes one classifier output as a number"
+    feature = "function:model_score"
+condition:
+    any msg in user_messages where
+        model_score("classifier", msg.content, 0) >= 0.8

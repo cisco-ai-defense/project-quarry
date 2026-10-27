@@ -1,0 +1,8 @@
+rule "Flow Before Within N"
+metadata:
+    description = "Feature: 'before(within: N)' bounds the distance to a later event"
+    feature = "construct:flow-before-within"
+condition:
+    called_tool("quarry_before_start")
+    before(within: 3)
+    called_tool("quarry_before_finish")

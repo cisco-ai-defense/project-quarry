@@ -1,0 +1,11 @@
+rule "Basic message check"
+metadata:
+    description = "Detect a greeting or blocked word"
+strings:
+    $blocked = ["root", "admin"]
+    $blocked_word = "admin" nocase fullword
+variables:
+    greeting = user_said("hello")
+condition:
+    (greeting and not assistant_said("error")) or
+    any msg in user_messages where msg.content contains_any $blocked

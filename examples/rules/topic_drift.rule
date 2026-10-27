@@ -1,0 +1,7 @@
+rule "Topic Drift Score"
+metadata:
+    description = "Feature: topic_drift() returns a score that can be thresholded"
+    feature = "function:topic_drift"
+condition:
+    any msg in assistant_messages where
+        msg.content contains "QUARRY_TOPIC_DRIFT_PROBE" and topic_drift(msg.content) > 0.7

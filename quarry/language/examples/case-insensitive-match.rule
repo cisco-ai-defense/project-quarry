@@ -1,0 +1,7 @@
+rule "Case-insensitive keyword match"
+metadata:
+    description = "Match an injection phrase regardless of letter case"
+strings:
+    $injection = "ignore previous instructions" nocase
+condition:
+    any msg in user_messages where msg.content contains $injection

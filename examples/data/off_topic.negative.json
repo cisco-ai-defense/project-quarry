@@ -1,0 +1,7 @@
+{
+  "messages": [
+    {"role": "user", "content": "Summarize the billing support ticket"},
+    {
+      "role": "assistant", "content": "QUARRY_OFF_TOPIC_PROBE summarize billing support ticket summarize billing support ticket"}
+  ]
+}

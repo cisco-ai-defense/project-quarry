@@ -1,0 +1,5 @@
+rule "Tool name comprehension"
+metadata:
+    description = "Find a named tool call"
+condition:
+    any call in tool_calls where call.name == "send_email"

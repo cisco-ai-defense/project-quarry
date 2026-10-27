@@ -1,0 +1,7 @@
+{
+  "messages": [
+    {"role": "system", "content": "QUARRY_MESSAGES_MARKER"},
+    {"role": "user", "content": "QUARRY_MESSAGES_MARKER"},
+    {"role": "assistant", "content": "QUARRY_MESSAGES_MARKER"}
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call both example tools"
+    },
+    {
+      "role": "assistant",
+      "content": "Calling both",
+      "tool_calls": [
+        {
+          "id": "called-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_called_alpha",
+            "arguments": "{}"
+          }
+        },
+        {
+          "id": "called-2",
+          "type": "function",
+          "function": {
+            "name": "quarry_called_beta",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

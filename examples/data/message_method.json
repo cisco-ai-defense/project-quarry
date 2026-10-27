@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call the method example"
+    },
+    {
+      "role": "assistant",
+      "content": "Calling it",
+      "tool_calls": [
+        {
+          "id": "method-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_method_marker",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

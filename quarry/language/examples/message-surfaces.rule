@@ -1,0 +1,6 @@
+rule "Message surfaces"
+condition:
+    (all msg in system_messages where len(msg.content) > 0) and
+    (all msg in developer_messages where len(msg.content) > 0) and
+    (all msg in assistant_messages where len(msg.content) > 0) and
+    (all msg in tool_responses where len(msg.content) > 0)

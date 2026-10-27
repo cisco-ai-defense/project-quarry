@@ -1,0 +1,6 @@
+rule "Multiple Offered Tools"
+metadata:
+    description = "Feature: has_tools() requires every named tool definition"
+    feature = "function:has_tools"
+condition:
+    has_tools("quarry_offered_alpha", "quarry_offered_beta")

@@ -1,0 +1,8 @@
+rule "All Comprehension"
+metadata:
+    description = "Feature: the 'all ... where' comprehension (every item in a non-empty collection matches)"
+    feature = "comprehension:all"
+condition:
+    count(tool_calls) > 0 and
+    all call in tool_calls where
+        call.name == "delete_file"

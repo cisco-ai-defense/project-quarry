@@ -1,0 +1,8 @@
+rule "Flow After Within N"
+metadata:
+    description = "Feature: the 'after(within: N)' flow operator (A happens within N timeline steps of B)"
+    feature = "flow:after_within"
+condition:
+    called_tool("notify_admin")
+    after(within: 3)
+    user_said("urgent")

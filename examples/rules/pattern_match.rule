@@ -1,0 +1,8 @@
+rule "Object Pattern Match"
+metadata:
+    description = "Feature: matching an object with a predicate block"
+    feature = "construct:pattern-match"
+condition:
+    any msg in messages where
+        (msg matches { role == "user" or content contains "QUARRY_PATTERN_FALLBACK" }) and
+        msg.content contains "QUARRY_PATTERN_MARKER"

@@ -1,0 +1,7 @@
+rule "Transitional Model Split"
+metadata:
+    description = "Feature: model_split() remains a compatibility spelling for model().split()"
+    feature = "compiler_form:model_split"
+condition:
+    any chunk in model_split("judge", messages, 200) where
+        model("judge").score(chunk, text_ref("policy")) >= 0.8

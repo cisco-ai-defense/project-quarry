@@ -1,0 +1,6 @@
+rule "Pattern and alias"
+condition:
+    (len(messages) as size and size > 0) and
+    any msg in messages where
+        (msg matches { role == "user" or content contains "TOKEN" }) or
+        (count(msg.content, "T") + count(msg.content, "O") > 1)

@@ -1,0 +1,31 @@
+{
+  "messages": [
+    {
+      "content": "",
+      "role": "system"
+    },
+    {
+      "content": "Developer instructions.",
+      "role": "developer"
+    },
+    {
+      "content": "Reading.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "read"
+          },
+          "id": "call-read",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "ok",
+      "role": "tool",
+      "tool_call_id": "call-read"
+    }
+  ]
+}

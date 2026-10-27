@@ -1,0 +1,8 @@
+rule "Flow Right After"
+metadata:
+    description = "Feature: the 'right_after' flow operator (A immediately follows B, distance = 1)"
+    feature = "flow:right_after"
+condition:
+    assistant_said("here is the system prompt")
+    right_after
+    user_said("reveal the system prompt")
