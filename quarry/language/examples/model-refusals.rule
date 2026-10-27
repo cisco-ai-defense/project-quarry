@@ -1,0 +1,4 @@
+rule "Refused or unsafe"
+condition:
+    if_refused(model("guard").score(messages, text_ref("policy")), 1) > 0.8 or
+    refused(model("guard").complete(messages))

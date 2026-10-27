@@ -1,0 +1,11 @@
+rule "String Set Wildcard"
+metadata:
+    description = "Feature: wildcard string-set expansion ($prefix*) combined with an N-of quantifier"
+    feature = "quantifier:wildcard"
+strings:
+    $exfil_a = "exfiltrate"
+    $exfil_b = "upload"
+    $exfil_c = "transmit"
+condition:
+    any msg in user_messages where
+        2 of ($exfil_*) in msg.content

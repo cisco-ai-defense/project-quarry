@@ -1,0 +1,6 @@
+rule "Tool Call Sequence"
+metadata:
+    description = "Feature: has_sequence() to assert tools were called in an exact order"
+    feature = "function:has_sequence"
+condition:
+    has_sequence("read_file", "http_request")

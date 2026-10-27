@@ -1,0 +1,12 @@
+rule "Text Extraction Reuse"
+metadata:
+    description = "Feature: capturing matched text with 'as' and reusing it in a later condition"
+    feature = "operator:as_capture"
+strings:
+    $token = "TKN-[0-9]{4,}" regex
+condition:
+    any msg in user_messages where
+        $token in msg.content as leaked_token
+    and
+    any reply in assistant_messages where
+        leaked_token in reply.content

@@ -1,0 +1,4 @@
+rule "Classifier"
+condition:
+    model_scan("prompt_injection", user_messages[-1].content, 0.5, 1) and
+    model_score("prompt_injection", system_prompt, 1) > 0.8

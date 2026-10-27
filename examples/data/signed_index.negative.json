@@ -1,0 +1,6 @@
+{
+  "messages": [
+    {"role": "user", "content": "QUARRY_MODEL_MATCH"},
+    {"role": "user", "content": "ordinary last message"}
+  ]
+}

@@ -1,0 +1,9 @@
+rule "Policy And Scan Parameters"
+metadata:
+    description = "Feature: policy-bound text and scan-bound numeric parameters"
+    feature = "construct:parameters"
+parameters:
+    instructions: text policy
+    threshold: number
+condition:
+    model("judge").score(messages, params.instructions) >= params.threshold

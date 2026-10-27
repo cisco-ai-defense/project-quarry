@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Ordinary request"
+    },
+    {
+      "role": "assistant",
+      "content": "QUARRY_OR_RIGHT"
+    }
+  ]
+}

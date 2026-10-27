@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "ordinary first message"
+    },
+    {
+      "role": "user",
+      "content": "QUARRY_MODEL_MATCH"
+    }
+  ]
+}

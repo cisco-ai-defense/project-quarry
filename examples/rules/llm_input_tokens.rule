@@ -1,0 +1,7 @@
+rule "Conversation LLM Input Tokens"
+metadata:
+    description = "Feature: llm_input_tokens() counts a conversation model input"
+    feature = "function:llm_input_tokens"
+condition:
+    user_said("QUARRY_TOKEN_MATCH") and
+    llm_input_tokens("judge", conversation()) > 40

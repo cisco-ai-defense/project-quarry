@@ -1,0 +1,5 @@
+rule "Model inference"
+condition:
+    llm_score("gemma4", text_ref("policy"), conversation()) > 0.8 and
+    llm_input_tokens("gemma4", message("user", "hello").add_message("assistant", "hi")) > 2 and
+    llm_complete("gemma4", conversation()) == "safe"

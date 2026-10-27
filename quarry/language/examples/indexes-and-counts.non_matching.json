@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "content": "",
+      "role": "system"
+    },
+    {
+      "content": "One message is not enough.",
+      "role": "user"
+    }
+  ]
+}

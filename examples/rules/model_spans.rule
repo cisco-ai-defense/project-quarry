@@ -1,0 +1,9 @@
+rule "Message Model Spans"
+metadata:
+    description = "Feature: model().spans() returns typed spans that messages.extract() can read"
+    feature = "compiler_form:model.spans"
+condition:
+    model("email").classify(messages) >= 0.8
+collect:
+    [span for span in model("email").spans(messages, 0.7)
+        if messages.extract(span) contains "@example.net"]

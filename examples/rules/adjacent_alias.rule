@@ -1,0 +1,7 @@
+rule "Adjacent Alias"
+metadata:
+    description = "Feature: binding an expression result with 'as' for the adjacent expression"
+    feature = "construct:adjacent-alias"
+condition:
+    (len(messages) as message_count and message_count >= 3) and
+    user_said("QUARRY_ALIAS_MARKER")

@@ -1,0 +1,7 @@
+rule "Weighted Model Classification"
+metadata:
+    description = "Feature: multiplying and adding model scores in one numeric expression"
+    feature = "construct:multiplication"
+condition:
+    0.5 * model("classifier").classify(messages) +
+        0.5 * model("classifier").classify(messages) >= 0.8

@@ -1,0 +1,3981 @@
+{
+  "compiler_version": "compiler-7",
+  "examples": [
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "function:capability_tags",
+        "function:off_topic",
+        "function:topic_drift",
+        "function:unrequested_action"
+      ],
+      "id": "example:agent-probers",
+      "requires_backend": true,
+      "rule_path": "examples/agent-probers.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/capture.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/capture.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:capture"
+      ],
+      "id": "example:capture",
+      "requires_backend": false,
+      "rule_path": "examples/capture.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/case-insensitive-match.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/case-insensitive-match.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:any-comprehension",
+        "construct:contains",
+        "construct:field-access",
+        "construct:metadata",
+        "construct:rule",
+        "construct:string-modifiers",
+        "construct:string-variable-reference",
+        "construct:strings",
+        "surface:user_messages"
+      ],
+      "id": "example:case-insensitive-match",
+      "requires_backend": false,
+      "rule_path": "examples/case-insensitive-match.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:llm_split_conversation"
+      ],
+      "id": "example:chunked-inference",
+      "requires_backend": true,
+      "rule_path": "examples/chunked-inference.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:model_split"
+      ],
+      "id": "example:compatibility-model-split",
+      "requires_backend": true,
+      "rule_path": "examples/compatibility-model-split.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/exact-tool-name.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/exact-tool-name.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:equal-comparison",
+        "function:called_tool",
+        "function:get_tool_calls",
+        "surface:tool_calls"
+      ],
+      "id": "example:exact-tool-name",
+      "requires_backend": false,
+      "rule_path": "examples/exact-tool-name.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/filter-count.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/filter-count.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:filter-comprehension"
+      ],
+      "id": "example:filter-count",
+      "requires_backend": false,
+      "rule_path": "examples/filter-count.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/flow-operators.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/flow-operators.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:flow-after",
+        "construct:flow-after-within",
+        "construct:flow-before",
+        "construct:flow-before-within",
+        "construct:flow-right-after",
+        "construct:flow-right-before",
+        "construct:flow-until"
+      ],
+      "id": "example:flow-operators",
+      "requires_backend": false,
+      "rule_path": "examples/flow-operators.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/indexes-and-counts.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/indexes-and-counts.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "compiler_form:count",
+        "compiler_form:len",
+        "construct:greater-than-comparison",
+        "construct:greater-than-or-equal-comparison",
+        "construct:less-than-comparison",
+        "construct:not-equal-comparison",
+        "construct:slice-all",
+        "construct:slice-from",
+        "construct:slice-range",
+        "construct:slice-to",
+        "construct:wildcard-field-access",
+        "surface:system_prompt"
+      ],
+      "id": "example:indexes-and-counts",
+      "requires_backend": false,
+      "rule_path": "examples/indexes-and-counts.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:join",
+        "construct:map-comprehension"
+      ],
+      "id": "example:joined-tool-commands",
+      "requires_backend": true,
+      "rule_path": "examples/joined-tool-commands.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/language-basics.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/language-basics.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:any-comprehension",
+        "construct:array-literal",
+        "construct:boolean-and",
+        "construct:boolean-not",
+        "construct:boolean-or",
+        "construct:contains-any",
+        "construct:field-access",
+        "construct:function-call",
+        "construct:metadata",
+        "construct:rule",
+        "construct:string-modifiers",
+        "construct:string-variable-reference",
+        "construct:strings",
+        "construct:variables",
+        "function:assistant_said",
+        "function:user_said",
+        "surface:assistant_messages",
+        "surface:user_messages"
+      ],
+      "id": "example:language-basics",
+      "requires_backend": false,
+      "rule_path": "examples/language-basics.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/message-surfaces.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/message-surfaces.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:all-comprehension",
+        "surface:developer_messages",
+        "surface:system_messages"
+      ],
+      "id": "example:message-surfaces",
+      "requires_backend": false,
+      "rule_path": "examples/message-surfaces.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "construct:signed-index",
+        "function:model_scan",
+        "function:model_score"
+      ],
+      "id": "example:model-classification",
+      "requires_backend": true,
+      "rule_path": "examples/model-classification.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:conversation",
+        "compiler_form:message",
+        "compiler_form:text_ref",
+        "function:add_message",
+        "function:llm_complete",
+        "function:llm_input_tokens",
+        "function:llm_score"
+      ],
+      "id": "example:model-inference",
+      "requires_backend": true,
+      "rule_path": "examples/model-inference.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:model",
+        "compiler_form:model.classify",
+        "compiler_form:model.complete",
+        "compiler_form:model.input_tokens",
+        "compiler_form:model.score",
+        "compiler_form:model.split",
+        "construct:multiplication",
+        "construct:parameter-declaration",
+        "construct:parameters"
+      ],
+      "id": "example:model-interface",
+      "requires_backend": true,
+      "rule_path": "examples/model-interface.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:if_refused",
+        "compiler_form:refused"
+      ],
+      "id": "example:model-refusals",
+      "requires_backend": true,
+      "rule_path": "examples/model-refusals.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:model.spans",
+        "construct:typed-collection",
+        "function:extract"
+      ],
+      "id": "example:model-spans",
+      "requires_backend": true,
+      "rule_path": "examples/model-spans.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/patterns-and-aliases.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/patterns-and-aliases.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:addition",
+        "construct:adjacent-alias",
+        "construct:pattern-block",
+        "construct:pattern-match",
+        "construct:pattern-predicate"
+      ],
+      "id": "example:patterns-and-aliases",
+      "requires_backend": false,
+      "rule_path": "examples/patterns-and-aliases.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/string-operations.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/string-operations.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:less-than-or-equal-comparison",
+        "construct:membership",
+        "construct:regex-match",
+        "construct:string-count",
+        "construct:string-position",
+        "construct:string-set",
+        "construct:subtraction"
+      ],
+      "id": "example:string-operations",
+      "requires_backend": false,
+      "rule_path": "examples/string-operations.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/tool-argument-drilldown.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/tool-argument-drilldown.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:any-comprehension",
+        "construct:boolean-and",
+        "construct:contains",
+        "construct:equal-comparison",
+        "construct:field-access",
+        "surface:tool_calls"
+      ],
+      "id": "example:tool-argument-drilldown",
+      "requires_backend": false,
+      "rule_path": "examples/tool-argument-drilldown.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/tool-operations.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/tool-operations.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:contains",
+        "construct:method-call",
+        "function:call_sequence",
+        "function:called_tools",
+        "function:count_tool_calls",
+        "function:get_tool_responses",
+        "function:has_sequence",
+        "function:has_tool",
+        "function:has_tools",
+        "surface:messages",
+        "surface:tool_responses",
+        "surface:tools"
+      ],
+      "id": "example:tool-operations",
+      "requires_backend": false,
+      "rule_path": "examples/tool-operations.rule"
+    }
+  ],
+  "format_version": "1.1",
+  "items": [
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Select the complete conversation, including offered tool definitions.",
+      "id": "compiler_form:conversation",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "conversation",
+      "parameters": [],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_input",
+      "signature": "conversation() -> model_input",
+      "source": "quarry.engine.compiler._Compiler._compile_conversation_selector",
+      "summary": "Select the complete conversation, including offered tool definitions.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [
+        "chunk_count"
+      ],
+      "deprecated": false,
+      "description": "Return the size of a collection or text, or count a pattern in text.\n\n`count(value)` measures a supported collection or text value. `count(text, pattern)`\ncounts occurrences of literal pattern text. When `value` is a filtered timeline\ncollection, compare the result with an integer from 0 through 8.",
+      "id": "compiler_form:count",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "count",
+      "parameters": [
+        {
+          "accepted_types": [
+            "collection",
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "value",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "pattern",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "integer",
+      "signature": "count(value: collection | string, pattern: string = null) -> integer",
+      "source": "quarry.engine.compiler._Compiler._bind_count_arguments",
+      "summary": "Return the size of a collection or text, or count a pattern in text.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return `value`, or `fallback` when a model call in `value` was refused.\n\n`if_refused(model(\"guard\").score(messages, text_ref(\"policy\")), 1) > 0.5` counts a\nrefusal as a score of 1; `if_refused(model(\"guard\").complete(messages).content, \"\")`\nreads a refused completion as empty text. `fallback` is a literal or a parameter of\nthe same kind as `value`. In a `model().split()` score predicate it may wrap only the\nchunk's score call.\n\nQuarry does not make a call whose model input has no content, so that call is not\nrefused. Then a boolean `value` is false, and a `not` around it is true.",
+      "id": "compiler_form:if_refused",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "if_refused",
+      "parameters": [
+        {
+          "accepted_types": [
+            "boolean",
+            "number",
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "value",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "boolean",
+            "number",
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "fallback",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean | number | string",
+      "signature": "if_refused(value: boolean | number | string, fallback: boolean | number | string) -> boolean | number | string",
+      "source": "quarry.engine.compiler._Compiler._bind_if_refused",
+      "summary": "Return `value`, or `fallback` when a model call in `value` was refused.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Combine (concatenate) the text values of a map comprehension with a separator.\n\n`separator` goes between two values. Use `join()` as `message()` content in a version 2\nmodel input. For example, `message(\"user\", join([c.arguments.command for c in\nmessages[-1].tool_calls if $risky in c.arguments.*], \"\\n\"))` gives the commands of the\nrisky calls in the newest message to the model as one input.\n\n`join()` combines the values in the order of the collection, each rendered as the same\ntext the same test in a rule step reads from it: a list is its elements joined with\n`\"\\n\"`, and a number or a boolean is its text. It leaves out a value that is missing,\nnull, or empty, and keeps a value that is only whitespace. One value gives that value\nunchanged.\n\nWhen no value stays, the model input has no content. Quarry does not call the model, and\nthe comparison that reads the result is false.\n\nWhen Quarry enforces its limits, `join()` counts the encoded bytes of the text it makes\nas it builds it. A text at or under `max_tool_argument_size` bytes does not change. A\nlonger text fails the rule, rather than truncating it: a benign value must not be able to\npush a risky value out of the judge's input unnoticed.",
+      "id": "compiler_form:join",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "join",
+      "parameters": [
+        {
+          "accepted_types": [
+            "collection<string>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "values",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "separator",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "string",
+      "signature": "join(values: collection<string>, separator: string) -> string",
+      "source": "quarry.engine.compiler._Compiler._bind_join",
+      "summary": "Combine (concatenate) the text values of a map comprehension with a separator.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [
+        "chunk_count"
+      ],
+      "deprecated": false,
+      "description": "Return the size of a supported collection or the length of text.\n\nWhen `value` is a filtered timeline collection, compare the result with an integer\nfrom 0 through 8.",
+      "id": "compiler_form:len",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "len",
+      "parameters": [
+        {
+          "accepted_types": [
+            "collection",
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "value",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "integer",
+      "signature": "len(value: collection | string) -> integer",
+      "source": "quarry.engine.compiler._Compiler._bind_len_argument",
+      "summary": "Return the size of a supported collection or the length of text.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [
+        "chunk_source"
+      ],
+      "deprecated": false,
+      "description": "Split model input into chunks no larger than `max_input_tokens`.\n\nUse this only after `in` in a documented `any` or `all` chunk check, or in a\nfiltered chunk list passed to `count` or `len`.",
+      "id": "compiler_form:llm_split_conversation",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "llm_split_conversation",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "input",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 1,
+          "name": "max_input_tokens",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "token",
+      "return_type": "collection<model_input>",
+      "signature": "llm_split_conversation(model: string, input: model_input, max_input_tokens: integer) -> collection<model_input>",
+      "source": "quarry.engine.compiler._Compiler._compile_llm_split_conversation",
+      "summary": "Split model input into chunks no larger than `max_input_tokens`.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Build a one-message model input from a role and literal or field-backed content.\n\nIn a version 2 model expression, `content` can also be the text that `join()` gives.",
+      "id": "compiler_form:message",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "message",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [
+            "system",
+            "developer",
+            "user",
+            "assistant"
+          ],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "role",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "content",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_input",
+      "signature": "message(role: string, content: string) -> model_input",
+      "source": "quarry.engine.compiler._Compiler._compile_message",
+      "summary": "Build a one-message model input from a role and literal or field-backed content.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Select a configured model by its literal alias for a following method call.\n\nUse this as the start of a model operation, such as\n`model(\"guard\").score(messages, \"policy\")`. `model(...)` is not a condition by itself.",
+      "id": "compiler_form:model",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "model",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "alias",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_reference",
+      "signature": "model(alias: string) -> model_reference",
+      "source": "quarry.dsl.transformer.DSLTransformer._bind_model_reference",
+      "summary": "Select a configured model by its literal alias for a following method call.",
+      "syntax": "model(\"alias\").operation(...)"
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return the configured classifier head's probability for these messages.\n\nThe model alias comes from the surrounding `model(\"alias\")` reference. Pass the bare\n`tools` value only when the classifier should also see offered tool definitions.",
+      "id": "compiler_form:model.classify",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.classify",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "collection<tool_definition>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "tools",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "model",
+      "return_type": "number",
+      "signature": "model.classify(messages: model_input, tools: collection<tool_definition> = null) -> number",
+      "source": "quarry.engine.compiler._Compiler._bind_model_classify",
+      "summary": "Return the configured classifier head's probability for these messages.",
+      "syntax": "model(\"alias\").classify(messages[, tools])"
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Generate one assistant message from the supplied messages.\n\nRead fields such as `.content`, `.refusal`, or `.tool_calls` from the result. Pass the\nbare `tools` value only when the model may call offered tools. When the alias declares\n`complete.response_schema`, read the reply's fields by name with `.json.<field>`; a\nreply that does not match the schema is a refused call.",
+      "id": "compiler_form:model.complete",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.complete",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "collection<tool_definition>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "tools",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "completion",
+      "return_type": "message",
+      "signature": "model.complete(messages: model_input, tools: collection<tool_definition> = null) -> message",
+      "source": "quarry.engine.compiler._Compiler._bind_model_complete",
+      "summary": "Generate one assistant message from the supplied messages.",
+      "syntax": "model(\"alias\").complete(messages[, tools])"
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return the model-specific token count for the supplied messages and optional tools.",
+      "id": "compiler_form:model.input_tokens",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.input_tokens",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "collection<tool_definition>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "tools",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "token",
+      "return_type": "integer",
+      "signature": "model.input_tokens(messages: model_input, tools: collection<tool_definition> = null) -> integer",
+      "source": "quarry.engine.compiler._Compiler._bind_model_input_tokens",
+      "summary": "Return the model-specific token count for the supplied messages and optional tools.",
+      "syntax": "model(\"alias\").input_tokens(messages[, tools])"
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Score messages against policy text and return a number from 0 through 1.\n\nThe model alias comes from the surrounding `model(\"alias\")` reference. `constitution`\nmay be literal policy text or a `text_ref(\"name\")`. Pass the bare `tools` value only\nwhen the model should also see the request's offered tools.",
+      "id": "compiler_form:model.score",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.score",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string",
+            "text_reference"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "constitution",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "collection<tool_definition>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "tools",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "score",
+      "return_type": "number",
+      "signature": "model.score(messages: model_input, constitution: string | text_reference, tools: collection<tool_definition> = null) -> number",
+      "source": "quarry.engine.compiler._Compiler._bind_model_score",
+      "summary": "Score messages against policy text and return a number from 0 through 1.",
+      "syntax": "model(\"alias\").score(messages, constitution[, tools])"
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return original-conversation spans from the alias-configured span operation.\n\n`messages` must be the root conversation or one of its views. Quarry reuses the raw\nclassifier response cached for the same model input. The adapter owns span decoding and\nhow the required `threshold` is applied.",
+      "id": "compiler_form:model.spans",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.spans",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "number"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "name": "threshold",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "model",
+      "return_type": "collection<span>",
+      "signature": "model.spans(messages: model_input, threshold: number) -> collection<span>",
+      "source": "quarry.engine.compiler._Compiler._bind_model_spans",
+      "summary": "Return original-conversation spans from the alias-configured span operation.",
+      "syntax": "model(\"alias\").spans(messages, threshold)"
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Partition messages into model-sized chunks for one non-nested `any` score check.\n\nEach chunk is one span of the conversation within `max_input_tokens`, and nothing is\nrepeated by default; a message longer than the limit is cut into ranges. The optional\narguments keep the order `overlap`, `context` and either may be left out: `overlap` is\nthe most tokens repeated from the end of the previous chunk, and `context` a view\nsuch as `system_messages` repeated at the start of every chunk. Tools are not\nmessages: pass them to the chunk's score, outside the limit.",
+      "id": "compiler_form:model.split",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "model.split",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 1,
+          "name": "max_input_tokens",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 0,
+          "name": "overlap",
+          "required": false,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "context",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "token",
+      "return_type": "collection<model_input>",
+      "signature": "model.split(messages: model_input, max_input_tokens: integer, overlap: integer = null, context: model_input = null) -> collection<model_input>",
+      "source": "quarry.engine.compiler._Compiler._bind_model_split",
+      "summary": "Partition messages into model-sized chunks for one non-nested `any` score check.",
+      "syntax": "model(\"alias\").split(messages, max_input_tokens[, overlap][, context])"
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": true,
+      "description": "Compatibility spelling for `model(\"alias\").split(...)` in version 2 rules.\n\nThis spelling remains available during migration. New rules should use the model method.",
+      "id": "compiler_form:model_split",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "model_split",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 1,
+          "name": "max_input_tokens",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": "model(\"alias\").split(messages, max_input_tokens)",
+      "resource_group": "token",
+      "return_type": "collection<model_input>",
+      "signature": "model_split(model: string, messages: model_input, max_input_tokens: integer) -> collection<model_input>",
+      "source": "quarry.engine.compiler._Compiler._compile_transitional_model_split",
+      "summary": "Compatibility spelling for `model(\"alias\").split(...)` in version 2 rules.",
+      "syntax": "model_split(\"alias\", messages, max_input_tokens)"
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether a `model(\"alias\").score(...)` or `.complete(...)` call in `value` was refused.\n\nA call is refused when a guardrail fired, so the provider stopped the reply or\nrejected the request, or when the reply is not in the format the operation asked for,\nsuch as a score reply that is not a configured verdict token. A completion that says\nno in its own words is an answer, not a refusal; read it from `.refusal` or\n`.content`. `refused()` reads the call's own request, so it sends none of its own.\n\nWithout `refused()` or `if_refused()`, a refused call fails the rule. A rule that reads\na call inside them must read it there everywhere, so no unguarded read can fail first.",
+      "id": "compiler_form:refused",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "refused",
+      "parameters": [
+        {
+          "accepted_types": [
+            "boolean",
+            "number",
+            "string",
+            "message"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "value",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "refused(value: boolean | number | string | message) -> boolean",
+      "source": "quarry.engine.compiler._Compiler._bind_refused",
+      "summary": "Return whether a `model(\"alias\").score(...)` or `.complete(...)` call in `value` was refused.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Refer to configured policy text by its exact resource name.\n\nThe DSL accepts this only where an inference function expects policy text. A reference remains\na distinct type until the resource manager resolves it, preventing an unresolved name from\nbeing mistaken for the policy itself.",
+      "id": "compiler_form:text_ref",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "text_ref",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "text_reference",
+      "signature": "text_ref(name: string) -> text_reference",
+      "source": "quarry.types.text_resources.TextRef",
+      "summary": "Refer to configured policy text by its exact resource name.",
+      "syntax": null
+    },
+    {
+      "description": "Add two numeric values.",
+      "handler": "add_op",
+      "id": "construct:addition",
+      "kind": "construct",
+      "name": "addition",
+      "source": "quarry.dsl.transformer.DSLTransformer.add_op",
+      "summary": "Add two numeric values.",
+      "syntax": "arith_expr: arith_expr \"+\" product_expr"
+    },
+    {
+      "description": "Name a value for use in the clause immediately joined by the same `and`.",
+      "handler": "assignment",
+      "id": "construct:adjacent-alias",
+      "kind": "construct",
+      "name": "adjacent-alias",
+      "source": "quarry.dsl.transformer.DSLTransformer.assignment",
+      "summary": "Name a value for use in the clause immediately joined by the same `and`.",
+      "syntax": "in_expr: arith_expr \"as\" IDENTIFIER"
+    },
+    {
+      "description": "Match when every item in a collection satisfies a condition.\n\nA part of the condition that does not read the item is checked over the whole\nconversation. An empty collection always matches.",
+      "handler": "all_comp",
+      "id": "construct:all-comprehension",
+      "kind": "construct",
+      "name": "all-comprehension",
+      "source": "quarry.dsl.transformer.DSLTransformer.all_comp",
+      "summary": "Match when every item in a collection satisfies a condition.",
+      "syntax": "all_comp: \"all\" IDENTIFIER \"in\" expr \"where\" expr"
+    },
+    {
+      "description": "Match when at least one item in a collection satisfies a condition.\n\nA part of the condition that does not read the item, such as `called_tool(\"x\")` or\na comprehension over another collection, is checked over the whole conversation, not\nonly after the item. Over `tools`, every test in the condition reads one tool\ndefinition. An empty collection never matches.\n\nOne item can take part in several flows, and a flow operand can be another\ncomprehension joined to the item (`any c in tool_calls where c.arguments.cmd\ncontains m.content`). Three shapes are checked item by item, for at most 256 items of\nthe collection per scan, where a scan with more items and no match is incomplete: a\nflow operand joined to the item, the item's own condition next to other alternatives\non the left of `until`, and an event before the item whose condition relates later\nevents.",
+      "handler": "any_comp",
+      "id": "construct:any-comprehension",
+      "kind": "construct",
+      "name": "any-comprehension",
+      "source": "quarry.dsl.transformer.DSLTransformer.any_comp",
+      "summary": "Match when at least one item in a collection satisfies a condition.",
+      "syntax": "any_comp: \"any\" IDENTIFIER \"in\" expr \"where\" expr"
+    },
+    {
+      "description": "Write an ordered literal list between brackets.",
+      "handler": "array",
+      "id": "construct:array-literal",
+      "kind": "construct",
+      "name": "array-literal",
+      "source": "quarry.dsl.transformer.DSLTransformer.array",
+      "summary": "Write an ordered literal list between brackets.",
+      "syntax": "array: \"[\" [value (\",\" value)*] \"]\""
+    },
+    {
+      "description": "Match when every operand is true.",
+      "handler": "and_expr",
+      "id": "construct:boolean-and",
+      "kind": "construct",
+      "name": "boolean-and",
+      "source": "quarry.dsl.transformer.DSLTransformer.and_expr",
+      "summary": "Match when every operand is true.",
+      "syntax": "and_expr: not_expr (\"and\" not_expr)*"
+    },
+    {
+      "description": "Invert one boolean expression.",
+      "handler": "not_op",
+      "id": "construct:boolean-not",
+      "kind": "construct",
+      "name": "boolean-not",
+      "source": "quarry.dsl.transformer.DSLTransformer.not_op",
+      "summary": "Invert one boolean expression.",
+      "syntax": "not_expr: \"not\" not_expr"
+    },
+    {
+      "description": "Match when at least one operand is true.",
+      "handler": "or_expr",
+      "id": "construct:boolean-or",
+      "kind": "construct",
+      "name": "boolean-or",
+      "source": "quarry.dsl.transformer.DSLTransformer.or_expr",
+      "summary": "Match when at least one operand is true.",
+      "syntax": "or_expr: and_expr (\"or\" and_expr)*"
+    },
+    {
+      "description": "Capture matched text under a name for comparison elsewhere in the rule.\n\nThe rule matches when some captured value satisfies every place that uses it, or when\nit holds with no value captured, every place that uses the value then being false. The\ncapture itself cannot appear under `not` or inside an `all` comprehension; such a\nrule fails to load. A place that uses the value may appear there.",
+      "handler": "in_op_with_capture",
+      "id": "construct:capture",
+      "kind": "construct",
+      "name": "capture",
+      "source": "quarry.dsl.transformer.DSLTransformer.in_op_with_capture",
+      "summary": "Capture matched text under a name for comparison elsewhere in the rule.",
+      "syntax": "in_expr: arith_expr \"in\" arith_expr \"as\" IDENTIFIER"
+    },
+    {
+      "description": "Test whether text or a collection contains a supplied value.\n\nText comparison is case-sensitive. To match text regardless of letter case, declare the\nvalue in a `strings:` block with the `nocase` modifier and reference it here.",
+      "handler": "contains_op",
+      "id": "construct:contains",
+      "kind": "construct",
+      "name": "contains",
+      "source": "quarry.dsl.transformer.DSLTransformer.contains_op",
+      "summary": "Test whether text or a collection contains a supplied value.",
+      "syntax": "in_expr: arith_expr \"contains\" arith_expr"
+    },
+    {
+      "description": "Match when text contains at least one value from a literal or named array.\n\nComparison against a literal array is case-sensitive and has no case option. For\ncase-insensitive matching, declare a `nocase` pattern in a `strings:` block --\nuse a `regex` alternation such as `\"alpha|beta\" nocase regex` for several\nalternatives -- and match it with `contains`.",
+      "handler": "contains_any_op",
+      "id": "construct:contains-any",
+      "kind": "construct",
+      "name": "contains-any",
+      "source": "quarry.dsl.transformer.DSLTransformer.contains_any_op",
+      "summary": "Match when text contains at least one value from a literal or named array.",
+      "syntax": "in_expr: arith_expr \"contains_any\" (array | STRING_VAR)"
+    },
+    {
+      "description": "Match when the two values are equal.",
+      "handler": "eq_op",
+      "id": "construct:equal-comparison",
+      "kind": "construct",
+      "name": "equal-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.eq_op",
+      "summary": "Match when the two values are equal.",
+      "syntax": "comparison: in_expr \"==\" in_expr"
+    },
+    {
+      "description": "Read a named field with dot syntax, such as `msg.content`.",
+      "handler": "attr_postfix",
+      "id": "construct:field-access",
+      "kind": "construct",
+      "name": "field-access",
+      "source": "quarry.dsl.transformer.DSLTransformer.attr_postfix",
+      "summary": "Read a named field with dot syntax, such as `msg.content`.",
+      "syntax": "postfix: \".\" IDENTIFIER"
+    },
+    {
+      "description": "Keep collection items that satisfy a condition.\n\nIn `[msg for msg in user_messages if msg.content contains \"sudo\"]`, the result\ncontains only user messages whose content contains `sudo`. Use the same item name\nbefore and after `for`.",
+      "handler": "filter_comp",
+      "id": "construct:filter-comprehension",
+      "kind": "construct",
+      "name": "filter-comprehension",
+      "source": "quarry.dsl.transformer.DSLTransformer.filter_comp",
+      "summary": "Keep collection items that satisfy a condition.",
+      "syntax": "filter_comp: \"[\" IDENTIFIER \"for\" IDENTIFIER \"in\" expr \"if\" expr \"]\""
+    },
+    {
+      "description": "Match when the left event occurs sometime after the right event.",
+      "handler": "after_op",
+      "id": "construct:flow-after",
+      "kind": "construct",
+      "name": "flow-after",
+      "source": "quarry.dsl.transformer.DSLTransformer.after_op",
+      "summary": "Match when the left event occurs sometime after the right event.",
+      "syntax": "flow_expr: comparison \"after\" comparison"
+    },
+    {
+      "description": "Match when the left event occurs after the right event within a bounded distance.\n\n`N` counts timeline steps and must be at least 1. The window compiles to about\n`N` automaton states; a single window beyond about 14,000 steps exceeds the compiler's\nwork budget and fails to load.",
+      "handler": "after_within_op",
+      "id": "construct:flow-after-within",
+      "kind": "construct",
+      "name": "flow-after-within",
+      "source": "quarry.dsl.transformer.DSLTransformer.after_within_op",
+      "summary": "Match when the left event occurs after the right event within a bounded distance.",
+      "syntax": "flow_expr: comparison \"after\" \"(\" \"within\" \":\" NUMBER \")\" comparison"
+    },
+    {
+      "description": "Match when the left event occurs sometime before the right event.",
+      "handler": "before_op",
+      "id": "construct:flow-before",
+      "kind": "construct",
+      "name": "flow-before",
+      "source": "quarry.dsl.transformer.DSLTransformer.before_op",
+      "summary": "Match when the left event occurs sometime before the right event.",
+      "syntax": "flow_expr: comparison \"before\" comparison"
+    },
+    {
+      "description": "Match when the left event occurs before the right event within a bounded distance.\n\n`N` counts timeline steps and must be at least 1. The window compiles to about\n`N` automaton states; a single window beyond about 14,000 steps exceeds the compiler's\nwork budget and fails to load.",
+      "handler": "before_within_op",
+      "id": "construct:flow-before-within",
+      "kind": "construct",
+      "name": "flow-before-within",
+      "source": "quarry.dsl.transformer.DSLTransformer.before_within_op",
+      "summary": "Match when the left event occurs before the right event within a bounded distance.",
+      "syntax": "flow_expr: comparison \"before\" \"(\" \"within\" \":\" NUMBER \")\" comparison"
+    },
+    {
+      "description": "Match when the left event occurs immediately after the right event.",
+      "handler": "right_after_op",
+      "id": "construct:flow-right-after",
+      "kind": "construct",
+      "name": "flow-right-after",
+      "source": "quarry.dsl.transformer.DSLTransformer.right_after_op",
+      "summary": "Match when the left event occurs immediately after the right event.",
+      "syntax": "flow_expr: comparison \"right_after\" comparison"
+    },
+    {
+      "description": "Match when the left event occurs immediately before the right event.",
+      "handler": "right_before_op",
+      "id": "construct:flow-right-before",
+      "kind": "construct",
+      "name": "flow-right-before",
+      "source": "quarry.dsl.transformer.DSLTransformer.right_before_op",
+      "summary": "Match when the left event occurs immediately before the right event.",
+      "syntax": "flow_expr: comparison \"right_before\" comparison"
+    },
+    {
+      "description": "Match when the left condition remains true until the right event occurs.\n\nThe left condition must hold at every event of its own kind before the right event:\nevery tool call for `called_tool(...)`, every user message for `user_said(...)`, or\nevery element of a comprehension's collection. Events of other kinds do not break it.\nIf the right event is the first one, the left condition need not hold at all.",
+      "handler": "until_op",
+      "id": "construct:flow-until",
+      "kind": "construct",
+      "name": "flow-until",
+      "source": "quarry.dsl.transformer.DSLTransformer.until_op",
+      "summary": "Match when the left condition remains true until the right event occurs.",
+      "syntax": "flow_expr: comparison \"until\" comparison"
+    },
+    {
+      "description": "Call a public Quarry function with positional arguments.",
+      "handler": "function_call",
+      "id": "construct:function-call",
+      "kind": "construct",
+      "name": "function-call",
+      "source": "quarry.dsl.transformer.DSLTransformer.function_call",
+      "summary": "Call a public Quarry function with positional arguments.",
+      "syntax": "function_call: IDENTIFIER \"(\" [arguments] \")\""
+    },
+    {
+      "description": "Match when the left number is greater than the right number.",
+      "handler": "gt_op",
+      "id": "construct:greater-than-comparison",
+      "kind": "construct",
+      "name": "greater-than-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.gt_op",
+      "summary": "Match when the left number is greater than the right number.",
+      "syntax": "comparison: in_expr \">\" in_expr"
+    },
+    {
+      "description": "Match when the left number is greater than or equal to the right number.",
+      "handler": "gte_op",
+      "id": "construct:greater-than-or-equal-comparison",
+      "kind": "construct",
+      "name": "greater-than-or-equal-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.gte_op",
+      "summary": "Match when the left number is greater than or equal to the right number.",
+      "syntax": "comparison: in_expr \">=\" in_expr"
+    },
+    {
+      "description": "Match when the left number is less than the right number.",
+      "handler": "lt_op",
+      "id": "construct:less-than-comparison",
+      "kind": "construct",
+      "name": "less-than-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.lt_op",
+      "summary": "Match when the left number is less than the right number.",
+      "syntax": "comparison: in_expr \"<\" in_expr"
+    },
+    {
+      "description": "Match when the left number is less than or equal to the right number.",
+      "handler": "lte_op",
+      "id": "construct:less-than-or-equal-comparison",
+      "kind": "construct",
+      "name": "less-than-or-equal-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.lte_op",
+      "summary": "Match when the left number is less than or equal to the right number.",
+      "syntax": "comparison: in_expr \"<=\" in_expr"
+    },
+    {
+      "description": "Project each selected item for use as the first argument of `join()`.\n\nThe map is supported in `message()` content of a version 2 model input.\nIts value and optional filter cannot call a model.",
+      "handler": "map_comp",
+      "id": "construct:map-comprehension",
+      "kind": "construct",
+      "name": "map-comprehension",
+      "source": "quarry.dsl.transformer.DSLTransformer.map_comp",
+      "summary": "Project each selected item for use as the first argument of `join()`.",
+      "syntax": "map_comp: \"[\" expr \"for\" IDENTIFIER \"in\" expr \"]\" | \"[\" expr \"for\" IDENTIFIER \"in\" expr \"if\" expr \"]\""
+    },
+    {
+      "description": "Test whether a value or text pattern occurs in another value.",
+      "handler": "in_op",
+      "id": "construct:membership",
+      "kind": "construct",
+      "name": "membership",
+      "source": "quarry.dsl.transformer.DSLTransformer.in_op",
+      "summary": "Test whether a value or text pattern occurs in another value.",
+      "syntax": "in_expr: arith_expr \"in\" arith_expr"
+    },
+    {
+      "description": "Attach string metadata fields to a rule.",
+      "handler": "metadata_block",
+      "id": "construct:metadata",
+      "kind": "construct",
+      "name": "metadata",
+      "source": "quarry.dsl.transformer.DSLTransformer.metadata_block",
+      "summary": "Attach string metadata fields to a rule.",
+      "syntax": "metadata_block: \"metadata:\" metadata_item+"
+    },
+    {
+      "description": "Call a supported Quarry function on the value written before the dot.\n\nFor example, `messages.called_tool(\"read\")` checks the complete message collection.\nA `message(...)` model input can use `.add_message(...)` to append another message.\nOther values cannot use method-call syntax.",
+      "handler": "method_postfix",
+      "id": "construct:method-call",
+      "kind": "construct",
+      "name": "method-call",
+      "source": "quarry.dsl.transformer.DSLTransformer.method_postfix",
+      "summary": "Call a supported Quarry function on the value written before the dot.",
+      "syntax": "postfix: \".\" IDENTIFIER \"(\" [arguments] \")\""
+    },
+    {
+      "description": "Multiply two numeric values.",
+      "handler": "mul_op",
+      "id": "construct:multiplication",
+      "kind": "construct",
+      "name": "multiplication",
+      "source": "quarry.dsl.transformer.DSLTransformer.mul_op",
+      "summary": "Multiply two numeric values.",
+      "syntax": "product_expr: product_expr \"*\" atom"
+    },
+    {
+      "description": "Match when the two values are not equal.",
+      "handler": "neq_op",
+      "id": "construct:not-equal-comparison",
+      "kind": "construct",
+      "name": "not-equal-comparison",
+      "source": "quarry.dsl.transformer.DSLTransformer.neq_op",
+      "summary": "Match when the two values are not equal.",
+      "syntax": "comparison: in_expr \"!=\" in_expr"
+    },
+    {
+      "description": "Declare a per-scan value, or a policy-bound value when marked `policy`.",
+      "handler": "parameter_def",
+      "id": "construct:parameter-declaration",
+      "kind": "construct",
+      "name": "parameter-declaration",
+      "source": "quarry.dsl.transformer.DSLTransformer.parameter_def",
+      "summary": "Declare a per-scan value, or a policy-bound value when marked `policy`.",
+      "syntax": "parameter_def: PARAM_NAME \":\" PARAM_TYPE POLICY_BOUND?"
+    },
+    {
+      "description": "Declare typed policy-bound or scan-bound inputs as the last block before `condition:`.",
+      "handler": "parameters_block",
+      "id": "construct:parameters",
+      "kind": "construct",
+      "name": "parameters",
+      "source": "quarry.dsl.transformer.DSLTransformer.parameters_block",
+      "summary": "Declare typed policy-bound or scan-bound inputs as the last block before `condition:`.",
+      "syntax": "parameters_block: \"parameters:\" parameter_def+"
+    },
+    {
+      "description": "Group alternative field checks between braces.",
+      "handler": "pattern_block",
+      "id": "construct:pattern-block",
+      "kind": "construct",
+      "name": "pattern-block",
+      "source": "quarry.dsl.transformer.DSLTransformer.pattern_block",
+      "summary": "Group alternative field checks between braces.",
+      "syntax": "pattern_block: \"{\" pattern_expr (\"or\" pattern_expr)* \"}\""
+    },
+    {
+      "description": "Test one value against a block containing alternative field predicates.",
+      "handler": "matches_op",
+      "id": "construct:pattern-match",
+      "kind": "construct",
+      "name": "pattern-match",
+      "source": "quarry.dsl.transformer.DSLTransformer.matches_op",
+      "summary": "Test one value against a block containing alternative field predicates.",
+      "syntax": "in_expr: arith_expr \"matches\" pattern_block"
+    },
+    {
+      "description": "Check one field inside a pattern block.",
+      "handler": "pattern_expr",
+      "id": "construct:pattern-predicate",
+      "kind": "construct",
+      "name": "pattern-predicate",
+      "source": "quarry.dsl.transformer.DSLTransformer.pattern_expr",
+      "summary": "Check one field inside a pattern block.",
+      "syntax": "pattern_expr: atom PATTERN_OPERATOR value | IDENTIFIER PATTERN_OPERATOR value"
+    },
+    {
+      "description": "Match text with an RE2-compatible regular expression.\n\nMatching is case-sensitive. For case-insensitive matching, declare the pattern in a\n`strings:` block with `regex nocase` and match it with `in`.",
+      "handler": "regex_op",
+      "id": "construct:regex-match",
+      "kind": "construct",
+      "name": "regex-match",
+      "source": "quarry.dsl.transformer.DSLTransformer.regex_op",
+      "summary": "Match text with an RE2-compatible regular expression.",
+      "syntax": "in_expr: arith_expr \"~\" arith_expr"
+    },
+    {
+      "description": "Define one named rule with a required condition and optional metadata, strings,\nvariables, parameters, and typed collection output.",
+      "handler": "rule",
+      "id": "construct:rule",
+      "kind": "construct",
+      "name": "rule",
+      "source": "quarry.dsl.transformer.DSLTransformer.rule",
+      "summary": "Define one named rule with a required condition and optional metadata, strings, variables, parameters, and typed collection output.",
+      "syntax": "rule: \"rule\" STRING metadata_block? strings_block? variables_block? parameters_block? \"condition:\" condition collect_block?"
+    },
+    {
+      "description": "Select one collection item by position, such as `messages[-1]`.\n\nNegative positions count backward from the end of the collection.",
+      "handler": "signed_index_postfix",
+      "id": "construct:signed-index",
+      "kind": "construct",
+      "name": "signed-index",
+      "source": "quarry.dsl.transformer.DSLTransformer.signed_index_postfix",
+      "summary": "Select one collection item by position, such as `messages[-1]`.",
+      "syntax": "postfix: \"[\" SIGNED_INT \"]\""
+    },
+    {
+      "description": "`[:]` \u2014 the whole surface as a window (identity slice).",
+      "handler": "slice_all_postfix",
+      "id": "construct:slice-all",
+      "kind": "construct",
+      "name": "slice-all",
+      "source": "quarry.dsl.transformer.DSLTransformer.slice_all_postfix",
+      "summary": "`[:]` \u2014 the whole surface as a window (identity slice).",
+      "syntax": "postfix: \"[\" \":\" \"]\""
+    },
+    {
+      "description": "`[start:]` \u2014 from `start` to the end.",
+      "handler": "slice_from_postfix",
+      "id": "construct:slice-from",
+      "kind": "construct",
+      "name": "slice-from",
+      "source": "quarry.dsl.transformer.DSLTransformer.slice_from_postfix",
+      "summary": "`[start:]` \u2014 from `start` to the end.",
+      "syntax": "postfix: \"[\" SIGNED_INT \":\" \"]\""
+    },
+    {
+      "description": "`[start:stop]` \u2014 a bounded window.",
+      "handler": "slice_range_postfix",
+      "id": "construct:slice-range",
+      "kind": "construct",
+      "name": "slice-range",
+      "source": "quarry.dsl.transformer.DSLTransformer.slice_range_postfix",
+      "summary": "`[start:stop]` \u2014 a bounded window.",
+      "syntax": "postfix: \"[\" SIGNED_INT \":\" SIGNED_INT \"]\""
+    },
+    {
+      "description": "`[:stop]` \u2014 from the beginning to `stop`.",
+      "handler": "slice_to_postfix",
+      "id": "construct:slice-to",
+      "kind": "construct",
+      "name": "slice-to",
+      "source": "quarry.dsl.transformer.DSLTransformer.slice_to_postfix",
+      "summary": "`[:stop]` \u2014 from the beginning to `stop`.",
+      "syntax": "postfix: \"[\" \":\" SIGNED_INT \"]\""
+    },
+    {
+      "description": "Count occurrences of a declared string pattern in the inspected text.\n\nWrite `#name` for a pattern declared as `$name`. Add `*` to include every\ndeclared pattern whose name starts with the supplied prefix. The pattern's modifiers\napply, so a `nocase` pattern counts matches in any letter case.",
+      "handler": "string_count",
+      "id": "construct:string-count",
+      "kind": "construct",
+      "name": "string-count",
+      "source": "quarry.dsl.transformer.DSLTransformer.string_count",
+      "summary": "Count occurrences of a declared string pattern in the inspected text.",
+      "syntax": "string_count: \"#\" IDENTIFIER WILDCARD?"
+    },
+    {
+      "description": "Change a declared pattern with `nocase`, `fullword`, `base64`, or `regex`.\n\n`nocase` matches the pattern regardless of letter case. Text matching is otherwise\ncase-sensitive, so `nocase` is the mechanism for case-insensitive `contains` and\n`contains_any` checks. Modifiers apply to a single pattern or an array of patterns,\nand to every use of the pattern, including `#name` counts and `@name` positions.",
+      "handler": "string_modifiers",
+      "id": "construct:string-modifiers",
+      "kind": "construct",
+      "name": "string-modifiers",
+      "source": "quarry.dsl.transformer.DSLTransformer.string_modifiers",
+      "summary": "Change a declared pattern with `nocase`, `fullword`, `base64`, or `regex`.",
+      "syntax": "string_modifiers: MODIFIER+"
+    },
+    {
+      "description": "Return the position of a declared string pattern in the inspected text.\n\nWrite `@name` for a pattern declared as `$name`. Add `*` to include every\ndeclared pattern whose name starts with the supplied prefix. The pattern's modifiers\napply. Positions of patterns with different modifiers cannot be compared; such a rule\nfails to load.",
+      "handler": "string_position",
+      "id": "construct:string-position",
+      "kind": "construct",
+      "name": "string-position",
+      "source": "quarry.dsl.transformer.DSLTransformer.string_position",
+      "summary": "Return the position of a declared string pattern in the inspected text.",
+      "syntax": "string_position: \"@\" IDENTIFIER WILDCARD?"
+    },
+    {
+      "description": "Match when any, all, or a requested number of declared patterns occurs in text.\n\n`any of` needs one listed pattern, `all of` needs every listed pattern, and\n`N of` needs at least `N`. Each pattern keeps its own modifiers.",
+      "handler": "string_set_expr",
+      "id": "construct:string-set",
+      "kind": "construct",
+      "name": "string-set",
+      "source": "quarry.dsl.transformer.DSLTransformer.string_set_expr",
+      "summary": "Match when any, all, or a requested number of declared patterns occurs in text.",
+      "syntax": "string_set_expr: quantifier \"of\" \"(\" string_list \")\""
+    },
+    {
+      "description": "Refer to a pattern declared in the `strings:` block by its `$name`.",
+      "handler": "string_var_ref",
+      "id": "construct:string-variable-reference",
+      "kind": "construct",
+      "name": "string-variable-reference",
+      "source": "quarry.dsl.transformer.DSLTransformer.string_var_ref",
+      "summary": "Refer to a pattern declared in the `strings:` block by its `$name`.",
+      "syntax": "primary: STRING_VAR"
+    },
+    {
+      "description": "Declare reusable literal or regular-expression patterns and their modifiers.",
+      "handler": "strings_block",
+      "id": "construct:strings",
+      "kind": "construct",
+      "name": "strings",
+      "source": "quarry.dsl.transformer.DSLTransformer.strings_block",
+      "summary": "Declare reusable literal or regular-expression patterns and their modifiers.",
+      "syntax": "strings_block: \"strings:\" string_def+"
+    },
+    {
+      "description": "Subtract the right numeric value from the left value.",
+      "handler": "sub_op",
+      "id": "construct:subtraction",
+      "kind": "construct",
+      "name": "subtraction",
+      "source": "quarry.dsl.transformer.DSLTransformer.sub_op",
+      "summary": "Subtract the right numeric value from the left value.",
+      "syntax": "arith_expr: arith_expr \"-\" product_expr"
+    },
+    {
+      "description": "Return every item that survives one exhaustive collection filter.\n\nThe rule's Boolean condition runs first. A false condition skips collection work;\na true condition matches only when this block returns at least one item. The filter may\ncall models and remains subject to the rule timeout and model-call budget.",
+      "handler": "collect_block",
+      "id": "construct:typed-collection",
+      "kind": "construct",
+      "name": "typed-collection",
+      "source": "quarry.dsl.transformer.DSLTransformer.collect_block",
+      "summary": "Return every item that survives one exhaustive collection filter.",
+      "syntax": "collect_block: \"collect:\" filter_comp"
+    },
+    {
+      "description": "Declare reusable expressions that are expanded before validation and compilation.\n\nA binding may use another binding. Inside a comprehension, the loop variable hides a\nbinding with the same name, so `any y in user_messages where y.content ...` reads\nthe element even when a binding named `y` exists.",
+      "handler": "variables_block",
+      "id": "construct:variables",
+      "kind": "construct",
+      "name": "variables",
+      "source": "quarry.dsl.transformer.DSLTransformer.variables_block",
+      "summary": "Declare reusable expressions that are expanded before validation and compilation.",
+      "syntax": "variables_block: \"variables:\" variable_def+"
+    },
+    {
+      "description": "Select wildcard child values with a final `.*` field step.",
+      "handler": "wildcard_postfix",
+      "id": "construct:wildcard-field-access",
+      "kind": "construct",
+      "name": "wildcard-field-access",
+      "source": "quarry.dsl.transformer.DSLTransformer.wildcard_postfix",
+      "summary": "Select wildcard child values with a final `.*` field step.",
+      "syntax": "wildcard_postfix: \".\" WILDCARD"
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Append one text message to a model input created with `message(...)`.\n\nUse this only after a model-input value, for example\n`message(\"user\", \"hello\").add_message(\"assistant\", \"hi\")`.",
+      "id": "function:add_message",
+      "implicit_receiver_count": 1,
+      "kind": "function",
+      "name": "add_message",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [
+            "system",
+            "developer",
+            "user",
+            "assistant"
+          ],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "role",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "content",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_input",
+      "signature": "add_message(role: string, content: string) -> model_input",
+      "source": "quarry.types.messages.Messages.add_message",
+      "summary": "Append one text message to a model input created with `message(...)`.",
+      "syntax": ".add_message(\"role\", content)"
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "flow_operand",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether any assistant message contains the supplied text.\n\nMatching is case-insensitive by default. Pass `true` as the second argument to require\nthe same letter case.",
+      "id": "function:assistant_said",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "assistant_said",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "boolean"
+          ],
+          "allowed_values": [],
+          "default": false,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "case_sensitive",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "assistant_said(text: string, case_sensitive: boolean = false) -> boolean",
+      "source": "quarry.types.messages.Messages.assistant_said",
+      "summary": "Return whether any assistant message contains the supplied text.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return assistant tool-call names in chronological order.",
+      "id": "function:call_sequence",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "call_sequence",
+      "parameters": [],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "collection<string>",
+      "signature": "call_sequence() -> collection<string>",
+      "source": "quarry.types.messages.Messages.call_sequence",
+      "summary": "Return assistant tool-call names in chronological order.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "flow_operand",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether the assistant called a tool with this exact name.\n\nThis checks calls that occurred. It does not check tools that were merely offered in the\nrequest.",
+      "id": "function:called_tool",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "called_tool",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "called_tool(name: string) -> boolean",
+      "source": "quarry.types.messages.Messages.called_tool",
+      "summary": "Return whether the assistant called a tool with this exact name.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "flow_operand",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether the assistant called every named tool.\n\nAt least one exact tool name is required. This test does not impose an order.",
+      "id": "function:called_tools",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "called_tools",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "names",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "called_tools(*names: string) -> boolean",
+      "source": "quarry.types.messages.Messages.called_tools",
+      "summary": "Return whether the assistant called every named tool.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether `text` describes the capability named by `tag`.\n\nThe built-in classifier recognizes `external_communication`, `private_data_access`,\n`code_execution`, `state_modification`, and `untrusted_ingress`. A configured\nclassifier may support additional tags. This function requires a configured capability\nclassifier.",
+      "id": "function:capability_tags",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "capability_tags",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "tag",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "capability_classifier",
+      "return_type": "boolean",
+      "signature": "capability_tags(tag: string, text: string) -> boolean",
+      "source": "quarry.dsl.functions.capability_tags",
+      "summary": "Return whether `text` describes the capability named by `tag`.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Count assistant calls to the tool with this exact name.",
+      "id": "function:count_tool_calls",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "count_tool_calls",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "integer",
+      "signature": "count_tool_calls(name: string) -> integer",
+      "source": "quarry.types.messages.Messages.count_tool_calls",
+      "summary": "Count assistant calls to the tool with this exact name.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return one span plus bounded context from its canonical source message.\n\n`left` and `right` default to zero and clamp at that message's boundaries.",
+      "id": "function:extract",
+      "implicit_receiver_count": 1,
+      "kind": "function",
+      "name": "extract",
+      "parameters": [
+        {
+          "accepted_types": [
+            "span"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "span",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": 0,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": 0,
+          "name": "left",
+          "required": false,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": 0,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": 0,
+          "name": "right",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "string",
+      "signature": "extract(span: span, left: integer = 0, right: integer = 0) -> string",
+      "source": "quarry.types.messages.Messages.extract",
+      "summary": "Return one span plus bounded context from its canonical source message.",
+      "syntax": "messages.extract(span[, left[, right]])"
+    },
+    {
+      "accessor_filter": "name",
+      "accessor_surface": "tool_calls",
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return assistant calls to the tool with this exact name.\n\nUse the result as a comprehension collection or count it.",
+      "id": "function:get_tool_calls",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "get_tool_calls",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "collection<tool_call>",
+      "signature": "get_tool_calls(name: string) -> collection<tool_call>",
+      "source": "quarry.types.messages.Messages.get_tool_calls",
+      "summary": "Return assistant calls to the tool with this exact name.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": "name",
+      "accessor_surface": "tool_responses",
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return results linked to calls of the tool with this exact name.\n\nThe call/result relationship is resolved through `tool_call_id`; unrelated tool\nresults are excluded.",
+      "id": "function:get_tool_responses",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "get_tool_responses",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "collection<tool_response>",
+      "signature": "get_tool_responses(name: string) -> collection<tool_response>",
+      "source": "quarry.types.messages.Messages.get_tool_responses",
+      "summary": "Return results linked to calls of the tool with this exact name.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether these names occur contiguously in the tool-call order.\n\nOther messages and tool results may appear between the calls, but another tool call\nbetween two requested names breaks the sequence.",
+      "id": "function:has_sequence",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "has_sequence",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "names",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "has_sequence(*names: string) -> boolean",
+      "source": "quarry.types.messages.Messages.has_sequence",
+      "summary": "Return whether these names occur contiguously in the tool-call order.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether a tool with this exact name was offered to the model.\n\nThis checks the request's tool definitions, not the tool calls made by the assistant.",
+      "id": "function:has_tool",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "has_tool",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "has_tool(name: string) -> boolean",
+      "source": "quarry.core.conversation.Conversation.has_tool",
+      "summary": "Return whether a tool with this exact name was offered to the model.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether every named tool was offered to the model.\n\nAt least one name is required. This checks availability, not whether the assistant used\nthe tools.",
+      "id": "function:has_tools",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "has_tools",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "names",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "has_tools(*names: string) -> boolean",
+      "source": "quarry.core.conversation.Conversation.has_tools",
+      "summary": "Return whether every named tool was offered to the model.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [
+        "complete_comparison"
+      ],
+      "deprecated": false,
+      "description": "Generate text from model input for comparison with a literal string or regex.\n\nWrite this function on the left of `==` or `~`. A bare call is not a true-or-false\ncondition.",
+      "id": "function:llm_complete",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "llm_complete",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "input",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "completion",
+      "return_type": "string",
+      "signature": "llm_complete(model: string, input: model_input) -> string",
+      "source": "quarry.dsl.functions.llm_complete",
+      "summary": "Generate text from model input for comparison with a literal string or regex.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [
+        "score_external",
+        "whole_conversation_inference",
+        "chunk_scalar"
+      ],
+      "deprecated": false,
+      "description": "Return the model-specific token count for the supplied model input.",
+      "id": "function:llm_input_tokens",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "llm_input_tokens",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "input",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "token",
+      "return_type": "integer",
+      "signature": "llm_input_tokens(model: string, input: model_input) -> integer",
+      "source": "quarry.dsl.functions.llm_input_tokens",
+      "summary": "Return the model-specific token count for the supplied model input.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [
+        "score_external",
+        "whole_conversation_inference",
+        "chunk_scalar"
+      ],
+      "deprecated": false,
+      "description": "Score model input against policy text and return a number from 0 through 1.\n\nThe policy may be written directly or loaded by name with `text_ref(\"name\")`.",
+      "id": "function:llm_score",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "llm_score",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string",
+            "text_reference"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "constitution",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "input",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "score",
+      "return_type": "number",
+      "signature": "llm_score(model: string, constitution: string | text_reference, input: model_input) -> number",
+      "source": "quarry.dsl.functions.llm_score",
+      "summary": "Score model input against policy text and return a number from 0 through 1.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "comprehension_body"
+      ],
+      "compiler_tags": [
+        "score_external"
+      ],
+      "deprecated": false,
+      "description": "Return whether a classifier score is greater than a required threshold.\n\n`model` names the configured classifier. `text` is the field being\nclassified, and `class_index` selects the model output whose probability is tested.",
+      "id": "function:model_scan",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "model_scan",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "number"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "threshold",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 0,
+          "name": "class_index",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "model",
+      "return_type": "boolean",
+      "signature": "model_scan(model: string, text: string, threshold: number, class_index: integer) -> boolean",
+      "source": "quarry.dsl.functions.model_scan",
+      "summary": "Return whether a classifier score is greater than a required threshold.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [
+        "score_external"
+      ],
+      "deprecated": false,
+      "description": "Return a classifier probability for the selected output class.\n\n`model` names the configured classifier. Compare the returned value with\na numeric threshold in the rule. `class_index` is mandatory in the DSL.",
+      "id": "function:model_score",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "model_score",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "model",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": 0,
+          "name": "class_index",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "model",
+      "return_type": "number",
+      "signature": "model_score(model: string, text: string, class_index: integer) -> number",
+      "source": "quarry.dsl.functions.model_score",
+      "summary": "Return a classifier probability for the selected output class.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "comprehension_body"
+      ],
+      "compiler_tags": [
+        "field_first_external"
+      ],
+      "deprecated": false,
+      "description": "Return whether `text` has moved too far from the first user message.\n\nThis function requires a configured topic-analysis backend.",
+      "id": "function:off_topic",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "off_topic",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "topic_prober",
+      "return_type": "boolean",
+      "signature": "off_topic(text: string) -> boolean",
+      "source": "quarry.dsl.functions.off_topic",
+      "summary": "Return whether `text` has moved too far from the first user message.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [],
+      "compiler_tags": [
+        "field_first_external",
+        "score_external"
+      ],
+      "deprecated": false,
+      "description": "Return how far `text` has moved from the first user message, from 0 through 1.\n\nA result of 0 means on-topic and 1 means fully off-topic. This function requires a\nconfigured topic-analysis backend.",
+      "id": "function:topic_drift",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "topic_drift",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "topic_prober",
+      "return_type": "number",
+      "signature": "topic_drift(text: string) -> number",
+      "source": "quarry.dsl.functions.topic_drift",
+      "summary": "Return how far `text` has moved from the first user message, from 0 through 1.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "comprehension_body"
+      ],
+      "compiler_tags": [
+        "field_first_external"
+      ],
+      "deprecated": false,
+      "description": "Return whether `text` describes an action not requested in the first user message.\n\nPass a tool name, description, or arguments field as `text`. This function requires a\nconfigured capability classifier.",
+      "id": "function:unrequested_action",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "unrequested_action",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": true,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": "capability_classifier",
+      "return_type": "boolean",
+      "signature": "unrequested_action(text: string) -> boolean",
+      "source": "quarry.dsl.functions.unrequested_action",
+      "summary": "Return whether `text` describes an action not requested in the first user message.",
+      "syntax": null
+    },
+    {
+      "accessor_filter": null,
+      "accessor_surface": null,
+      "allowed_uses": [
+        "condition",
+        "flow_operand",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Return whether any user message contains the supplied text.\n\nMatching is case-insensitive by default. Pass `true` as the second argument to require\nthe same letter case.",
+      "id": "function:user_said",
+      "implicit_receiver_count": 0,
+      "kind": "function",
+      "name": "user_said",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "text",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "boolean"
+          ],
+          "allowed_values": [],
+          "default": false,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "case_sensitive",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "boolean",
+      "signature": "user_said(text: string, case_sensitive: boolean = false) -> boolean",
+      "source": "quarry.types.messages.Messages.user_said",
+      "summary": "Return whether any user message contains the supplied text.",
+      "syntax": null
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "Assistant-role messages from the selected conversation, in source order.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "Assistant refusal text when supplied by the provider; otherwise null.",
+          "name": "refusal",
+          "type": "string | null"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        },
+        {
+          "description": "Calls emitted with this assistant message. Use the `tool_calls` surface to iterate over calls; this field can be measured with `len(...)`.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
+        }
+      ],
+      "fields": [
+        "content",
+        "refusal",
+        "role",
+        "tool_calls"
+      ],
+      "id": "surface:assistant_messages",
+      "kind": "surface",
+      "model_input": true,
+      "name": "assistant_messages",
+      "public_type": "collection<message>",
+      "source": "quarry.types.messages.Messages.assistant_messages",
+      "summary": "Assistant-role messages from the selected conversation, in source order."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "Developer-role messages from the selected conversation, in source order.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "content",
+        "role"
+      ],
+      "id": "surface:developer_messages",
+      "kind": "surface",
+      "model_input": true,
+      "name": "developer_messages",
+      "public_type": "collection<message>",
+      "source": "quarry.types.messages.Messages.developer_messages",
+      "summary": "Developer-role messages from the selected conversation, in source order."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "All messages in the inspected conversation, in chronological order.\n\nThe collection contains system, developer, user, assistant, and tool-result messages. Use\nthe bare `messages` surface in rule logic and as tools-free model input.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "content",
+        "role"
+      ],
+      "id": "surface:messages",
+      "kind": "surface",
+      "model_input": true,
+      "name": "messages",
+      "public_type": "collection<message>",
+      "source": "quarry.types.messages.Messages",
+      "summary": "All messages in the inspected conversation, in chronological order."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "System-role messages from the selected conversation, in source order.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "content",
+        "role"
+      ],
+      "id": "surface:system_messages",
+      "kind": "surface",
+      "model_input": true,
+      "name": "system_messages",
+      "public_type": "collection<message>",
+      "source": "quarry.types.messages.Messages.system_messages",
+      "summary": "System-role messages from the selected conversation, in source order."
+    },
+    {
+      "allowed_uses": [],
+      "description": "Text content of the leading system message.",
+      "domain": "static",
+      "field_details": [],
+      "fields": [],
+      "id": "surface:system_prompt",
+      "kind": "surface",
+      "model_input": false,
+      "name": "system_prompt",
+      "public_type": "string",
+      "source": "quarry.core.conversation.Conversation.system_prompt",
+      "summary": "Text content of the leading system message."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "Assistant tool calls in chronological order.\n\nEach item exposes its call ID, exact function name, and decoded arguments.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Decoded JSON arguments. Read a key with a path such as `call.arguments.command`, or all values with `call.arguments.*`.",
+          "name": "arguments",
+          "type": "object"
+        },
+        {
+          "description": "Provider-assigned tool-call ID.",
+          "name": "id",
+          "type": "string"
+        },
+        {
+          "description": "Exact called function name.",
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "description": "Original JSON argument text.",
+          "name": "raw_arguments",
+          "type": "string"
+        },
+        {
+          "description": "Linked tool response, or null when no response exists. Continue with a field such as `call.response.result`.",
+          "name": "response",
+          "type": "tool_response | null"
+        },
+        {
+          "description": "Tool-call type; currently `function`.",
+          "name": "type",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "arguments",
+        "id",
+        "name",
+        "raw_arguments",
+        "response",
+        "type"
+      ],
+      "id": "surface:tool_calls",
+      "kind": "surface",
+      "model_input": false,
+      "name": "tool_calls",
+      "public_type": "collection<tool_call>",
+      "source": "quarry.types.messages.Messages.tool_calls",
+      "summary": "Assistant tool calls in chronological order."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "Tool-result messages linked to assistant calls by `tool_call_id`.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Originating call. Continue with a field such as `response.call.name`.",
+          "name": "call",
+          "type": "tool_call"
+        },
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "Alias for `tool_call_id`.",
+          "name": "id",
+          "type": "string"
+        },
+        {
+          "description": "Exact name of the called function.",
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "description": "Tool-result text; alias for `content`.",
+          "name": "result",
+          "type": "string"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        },
+        {
+          "description": "ID of the call this message answers.",
+          "name": "tool_call_id",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "call",
+        "content",
+        "id",
+        "name",
+        "result",
+        "role",
+        "tool_call_id"
+      ],
+      "id": "surface:tool_responses",
+      "kind": "surface",
+      "model_input": true,
+      "name": "tool_responses",
+      "public_type": "collection<tool_response>",
+      "source": "quarry.types.messages.Messages.tool_responses",
+      "summary": "Tool-result messages linked to assistant calls by `tool_call_id`."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "Tools offered to the model in the inspected request.\n\nThis static collection describes what the model was allowed to call. It does not\nindicate that the assistant actually called any of those tools.",
+      "domain": "static",
+      "field_details": [
+        {
+          "description": "Description shown to the model.",
+          "name": "description",
+          "type": "string"
+        },
+        {
+          "description": "Exact offered function name.",
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "description": "JSON Schema for the function arguments.",
+          "name": "parameters",
+          "type": "object"
+        },
+        {
+          "description": "Offered tool type; currently `function`.",
+          "name": "type",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "description",
+        "name",
+        "parameters",
+        "type"
+      ],
+      "id": "surface:tools",
+      "kind": "surface",
+      "model_input": false,
+      "name": "tools",
+      "public_type": "collection<tool_definition>",
+      "source": "quarry.core.conversation.Conversation.tools",
+      "summary": "Tools offered to the model in the inspected request."
+    },
+    {
+      "allowed_uses": [
+        "comprehension_source"
+      ],
+      "description": "User-role messages from the selected conversation, in source order.",
+      "domain": "event",
+      "field_details": [
+        {
+          "description": "Flattened message text. For multimodal input, this contains text parts only.",
+          "name": "content",
+          "type": "string"
+        },
+        {
+          "description": "OpenAI message role.",
+          "name": "role",
+          "type": "string"
+        }
+      ],
+      "fields": [
+        "content",
+        "role"
+      ],
+      "id": "surface:user_messages",
+      "kind": "surface",
+      "model_input": true,
+      "name": "user_messages",
+      "public_type": "collection<message>",
+      "source": "quarry.types.messages.Messages.user_messages",
+      "summary": "User-role messages from the selected conversation, in source order."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:after",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "after",
+      "summary": "Quarry flow word `after`."
+    },
+    {
+      "category": "operator",
+      "id": "token:all",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "all",
+      "summary": "Quarry operator `all`."
+    },
+    {
+      "category": "operator",
+      "id": "token:and",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "and",
+      "summary": "Quarry operator `and`."
+    },
+    {
+      "category": "operator",
+      "id": "token:any",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "any",
+      "summary": "Quarry operator `any`."
+    },
+    {
+      "category": "operator",
+      "id": "token:as",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "as",
+      "summary": "Quarry operator `as`."
+    },
+    {
+      "category": "operator",
+      "id": "token:assign",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "=",
+      "summary": "Quarry operator `=`."
+    },
+    {
+      "category": "modifier",
+      "id": "token:base64",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "base64",
+      "summary": "Quarry modifier `base64`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:before",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "before",
+      "summary": "Quarry flow word `before`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:collect",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "collect:",
+      "summary": "Quarry block keyword `collect:`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:colon",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ":",
+      "summary": "Quarry punctuation `:`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:comma",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ",",
+      "summary": "Quarry punctuation `,`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:condition",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "condition:",
+      "summary": "Quarry block keyword `condition:`."
+    },
+    {
+      "category": "operator",
+      "id": "token:contains",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "contains",
+      "summary": "Quarry operator `contains`."
+    },
+    {
+      "category": "operator",
+      "id": "token:contains-any",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "contains_any",
+      "summary": "Quarry operator `contains_any`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:dot",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ".",
+      "summary": "Quarry punctuation `.`."
+    },
+    {
+      "category": "operator",
+      "id": "token:equal-comparison",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "==",
+      "summary": "Quarry operator `==`."
+    },
+    {
+      "category": "literal",
+      "id": "token:false",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "false",
+      "summary": "Quarry literal `false`."
+    },
+    {
+      "category": "operator",
+      "id": "token:for",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "for",
+      "summary": "Quarry operator `for`."
+    },
+    {
+      "category": "modifier",
+      "id": "token:fullword",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "fullword",
+      "summary": "Quarry modifier `fullword`."
+    },
+    {
+      "category": "operator",
+      "id": "token:greater-than",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ">",
+      "summary": "Quarry operator `>`."
+    },
+    {
+      "category": "operator",
+      "id": "token:greater-than-or-equal",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ">=",
+      "summary": "Quarry operator `>=`."
+    },
+    {
+      "category": "operator",
+      "id": "token:if",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "if",
+      "summary": "Quarry operator `if`."
+    },
+    {
+      "category": "operator",
+      "id": "token:in",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "in",
+      "summary": "Quarry operator `in`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:left-brace",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "{",
+      "summary": "Quarry punctuation `{`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:left-bracket",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "[",
+      "summary": "Quarry punctuation `[`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:left-parenthesis",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "(",
+      "summary": "Quarry punctuation `(`."
+    },
+    {
+      "category": "operator",
+      "id": "token:less-than",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "<",
+      "summary": "Quarry operator `<`."
+    },
+    {
+      "category": "operator",
+      "id": "token:less-than-or-equal",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "<=",
+      "summary": "Quarry operator `<=`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:line-comment",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "//",
+      "summary": "Quarry punctuation `//`."
+    },
+    {
+      "category": "operator",
+      "id": "token:matches",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "matches",
+      "summary": "Quarry operator `matches`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:metadata",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "metadata:",
+      "summary": "Quarry block keyword `metadata:`."
+    },
+    {
+      "category": "operator",
+      "id": "token:minus",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "-",
+      "summary": "Quarry operator `-`."
+    },
+    {
+      "category": "modifier",
+      "id": "token:nocase",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "nocase",
+      "summary": "Quarry modifier `nocase`."
+    },
+    {
+      "category": "operator",
+      "id": "token:not",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "not",
+      "summary": "Quarry operator `not`."
+    },
+    {
+      "category": "operator",
+      "id": "token:not-equal",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "!=",
+      "summary": "Quarry operator `!=`."
+    },
+    {
+      "category": "literal",
+      "id": "token:null",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "null",
+      "summary": "Quarry literal `null`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:number",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "number",
+      "summary": "Quarry block keyword `number`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:of",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "of",
+      "summary": "Quarry flow word `of`."
+    },
+    {
+      "category": "operator",
+      "id": "token:or",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "or",
+      "summary": "Quarry operator `or`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:parameters",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "parameters:",
+      "summary": "Quarry block keyword `parameters:`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:params",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "params",
+      "summary": "Quarry block keyword `params`."
+    },
+    {
+      "category": "operator",
+      "id": "token:plus",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "+",
+      "summary": "Quarry operator `+`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:policy",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "policy",
+      "summary": "Quarry block keyword `policy`."
+    },
+    {
+      "category": "modifier",
+      "id": "token:regex",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "regex",
+      "summary": "Quarry modifier `regex`."
+    },
+    {
+      "category": "operator",
+      "id": "token:regex-match",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "~",
+      "summary": "Quarry operator `~`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:right-after",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "right_after",
+      "summary": "Quarry flow word `right_after`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:right-before",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "right_before",
+      "summary": "Quarry flow word `right_before`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:right-brace",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "}",
+      "summary": "Quarry punctuation `}`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:right-bracket",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "]",
+      "summary": "Quarry punctuation `]`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:right-parenthesis",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": ")",
+      "summary": "Quarry punctuation `)`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:rule",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "rule",
+      "summary": "Quarry block keyword `rule`."
+    },
+    {
+      "category": "operator",
+      "id": "token:string-count-prefix",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "#",
+      "summary": "Quarry operator `#`."
+    },
+    {
+      "category": "operator",
+      "id": "token:string-position-prefix",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "@",
+      "summary": "Quarry operator `@`."
+    },
+    {
+      "category": "punctuation",
+      "id": "token:string-variable-prefix",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "$",
+      "summary": "Quarry punctuation `$`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:strings",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "strings:",
+      "summary": "Quarry block keyword `strings:`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:text",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "text",
+      "summary": "Quarry block keyword `text`."
+    },
+    {
+      "category": "literal",
+      "id": "token:true",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "true",
+      "summary": "Quarry literal `true`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:until",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "until",
+      "summary": "Quarry flow word `until`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:variables",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "variables:",
+      "summary": "Quarry block keyword `variables:`."
+    },
+    {
+      "category": "operator",
+      "id": "token:where",
+      "kind": "token",
+      "reserved_for_variables": true,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "where",
+      "summary": "Quarry operator `where`."
+    },
+    {
+      "category": "operator",
+      "id": "token:wildcard",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "*",
+      "summary": "Quarry operator `*`."
+    },
+    {
+      "category": "flow_word",
+      "id": "token:within",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "within",
+      "summary": "Quarry flow word `within`."
+    }
+  ],
+  "language_version": "0.1.0",
+  "operator_precedence": [
+    {
+      "associativity": "left",
+      "description": "Evaluated after `and`.",
+      "family": "boolean or",
+      "operators": [
+        "or"
+      ],
+      "precedence": 1
+    },
+    {
+      "associativity": "left",
+      "description": "Evaluated before `or`.",
+      "family": "boolean and",
+      "operators": [
+        "and"
+      ],
+      "precedence": 2
+    },
+    {
+      "associativity": "right",
+      "description": "Applies to the expression immediately after it.",
+      "family": "boolean not",
+      "operators": [
+        "not"
+      ],
+      "precedence": 3
+    },
+    {
+      "associativity": "none",
+      "description": "Relates two event conditions. Each operand is one event: a single condition, an `any` comprehension, `and`/`or`/`not` over the element of an enclosing comprehension, or an `or` of such operands. `all` is allowed only on the sustained side of `until`. Chain flow operators only with parentheses.",
+      "family": "flow",
+      "operators": [
+        "before",
+        "before(within:N)",
+        "right_before",
+        "after",
+        "after(within:N)",
+        "right_after",
+        "until"
+      ],
+      "precedence": 4
+    },
+    {
+      "associativity": "none",
+      "description": "Compares two values. Chain comparisons only with parentheses.",
+      "family": "comparison",
+      "operators": [
+        "==",
+        "!=",
+        ">",
+        "<",
+        ">=",
+        "<="
+      ],
+      "precedence": 5
+    },
+    {
+      "associativity": "none",
+      "description": "Tests text or membership and binds captures.",
+      "family": "text and membership",
+      "operators": [
+        "contains",
+        "contains_any",
+        "~",
+        "matches",
+        "in",
+        "as"
+      ],
+      "precedence": 6
+    },
+    {
+      "associativity": "left",
+      "description": "Adds or subtracts numeric values.",
+      "family": "addition",
+      "operators": [
+        "+",
+        "-"
+      ],
+      "precedence": 7
+    },
+    {
+      "associativity": "left",
+      "description": "Multiplies numeric values.",
+      "family": "multiplication",
+      "operators": [
+        "*"
+      ],
+      "precedence": 8
+    },
+    {
+      "associativity": "left",
+      "description": "Reads fields, calls methods, indexes, slices, or expands object values.",
+      "family": "postfix access",
+      "operators": [
+        ".field",
+        ".method(...)",
+        "[index]",
+        "[slice]",
+        ".*"
+      ],
+      "precedence": 9
+    }
+  ],
+  "rejected_spellings": [
+    {
+      "rejected_by": "parse",
+      "rejected_call": null,
+      "replacement": "any call in tool_calls where call.name == \"shell\"",
+      "source_form": "any call in tool_calls where call.name = \"shell\""
+    },
+    {
+      "rejected_by": "parse",
+      "rejected_call": null,
+      "replacement": "any msg in user_messages where msg matches { role == \"user\" }",
+      "source_form": "any msg in user_messages where msg matches { role = \"user\" }"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "llm_score(\"m\", \"policy\", conversation()) > 0.5",
+      "source_form": "llm_score(\"m\", \"policy\", conversation) > 0.5"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "messages",
+      "replacement": "messages",
+      "source_form": "messages()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "tools",
+      "replacement": "tools",
+      "source_form": "tools()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "tool_calls",
+      "replacement": "tool_calls",
+      "source_form": "tool_calls()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "tool_responses",
+      "replacement": "tool_responses",
+      "source_form": "tool_responses()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "user_messages",
+      "replacement": "user_messages",
+      "source_form": "user_messages()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "assistant_messages",
+      "replacement": "assistant_messages",
+      "source_form": "assistant_messages()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "system_messages",
+      "replacement": "system_messages",
+      "source_form": "system_messages()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "developer_messages",
+      "replacement": "developer_messages",
+      "source_form": "developer_messages()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "system_prompt",
+      "replacement": "system_prompt",
+      "source_form": "system_prompt()"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "first",
+      "replacement": "tool_calls[0]",
+      "source_form": "first(tool_calls)"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "last",
+      "replacement": "tool_calls[-1]",
+      "source_form": "last(tool_calls)"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "regex_match",
+      "replacement": "any msg in messages where msg.content ~ \"pattern\"",
+      "source_form": "any msg in messages where regex_match(msg.content, \"pattern\")"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "regex_match_case",
+      "replacement": null,
+      "source_form": "regex_match_case(\"text\", \"pattern\")"
+    },
+    {
+      "rejected_by": "link",
+      "rejected_call": "regex_extract",
+      "replacement": null,
+      "source_form": "regex_extract(\"text\", \"pattern\")"
+    },
+    {
+      "rejected_by": "parse",
+      "rejected_call": null,
+      "replacement": "user_said(\"IGNORE\", true)",
+      "source_form": "user_said(\"IGNORE\", case_sensitive=True)"
+    },
+    {
+      "rejected_by": "parse",
+      "rejected_call": null,
+      "replacement": "assistant_said(\"IGNORE\", true)",
+      "source_form": "assistant_said(\"IGNORE\", case_sensitive=True)"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "model_score(\"m\", system_prompt, 1) > 0.5",
+      "source_form": "model_score(\"m\", system_prompt, 1)"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "topic_drift(system_prompt) > 0.5",
+      "source_form": "topic_drift(system_prompt)"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "llm_score(\"m\", \"policy\", conversation()) > 0.5",
+      "source_form": "llm_score(\"m\", \"policy\", conversation())"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "llm_input_tokens(\"m\", conversation()) > 100",
+      "source_form": "llm_input_tokens(\"m\", conversation())"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": null,
+      "source_form": "model_score(\"m\", get_tool_calls(\"read\")[0].arguments, 1)"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": null,
+      "source_form": "model_score(\"m\", get_tool_responses(\"read\")[0].content, 1)"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": null,
+      "source_form": "[msg.content for msg in user_messages]"
+    },
+    {
+      "rejected_by": "compile",
+      "rejected_call": null,
+      "replacement": "msg matches { content contains \"sudo\" }",
+      "source_form": "msg.content matches { content contains \"sudo\" }"
+    }
+  ],
+  "reserved_variable_names": [
+    "all",
+    "and",
+    "any",
+    "as",
+    "assistant_messages",
+    "collect",
+    "developer_messages",
+    "false",
+    "get_tool_calls",
+    "get_tool_responses",
+    "in",
+    "messages",
+    "not",
+    "null",
+    "or",
+    "params",
+    "system_messages",
+    "system_prompt",
+    "tool_calls",
+    "tool_responses",
+    "tools",
+    "true",
+    "user_messages",
+    "where"
+  ],
+  "type_conversions": [
+    {
+      "description": "A message of the conversation, such as `user_messages[-1]` or the element `m` of `any m in messages`, is the model input that holds only that message. A message the conversation does not have is an empty model input, which makes no model call.",
+      "from": "message",
+      "to": "model_input"
+    }
+  ]
+}

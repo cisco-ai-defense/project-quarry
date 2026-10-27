@@ -1,0 +1,11 @@
+rule "Match Position Arithmetic"
+metadata:
+    description = "Feature: arithmetic on @ match positions (patterns within N characters of each other)"
+    feature = "operator:position_arithmetic"
+strings:
+    $user = "user"
+    $pass = "pass"
+condition:
+    any msg in user_messages where
+        (@user in msg.content) < (@pass in msg.content) and
+        ((@pass in msg.content) - (@user in msg.content)) < 40

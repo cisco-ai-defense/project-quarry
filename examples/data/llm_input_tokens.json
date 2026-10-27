@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_TOKEN_MATCH makes this input deliberately longer than forty counted characters."
+    }
+  ]
+}

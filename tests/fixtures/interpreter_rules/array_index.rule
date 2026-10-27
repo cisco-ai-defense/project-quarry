@@ -1,0 +1,7 @@
+rule "Array Index Access"
+metadata:
+    description = "Feature: indexing into an array-valued field (call.arguments.paths[0])"
+    feature = "accessor:array_index"
+condition:
+    any call in tool_calls where
+        call.arguments.paths[0] contains "/etc"

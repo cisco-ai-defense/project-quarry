@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "summarize the ticket"
+    },
+    {
+      "role": "assistant",
+      "content": "ok",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "get_ticket",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

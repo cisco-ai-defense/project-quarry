@@ -1,0 +1,6 @@
+# The team must be visible and have write access for these entries to work.
+* @cisco-ai-defense/project-quarry-maintainers
+
+# Keep repository policy and CI changes under the same required review gate.
+/.github/CODEOWNERS @cisco-ai-defense/project-quarry-maintainers
+/.github/workflows/ @cisco-ai-defense/project-quarry-maintainers

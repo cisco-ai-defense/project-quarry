@@ -1,0 +1,6 @@
+rule "All-Items Slice"
+metadata:
+    description = "Feature: collection[:] selects the complete collection"
+    feature = "construct:slice-all"
+condition:
+    any msg in messages[:] where msg.content contains "QUARRY_SLICE_ALL"

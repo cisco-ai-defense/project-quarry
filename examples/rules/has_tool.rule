@@ -1,0 +1,6 @@
+rule "Offered Tool"
+metadata:
+    description = "Feature: has_tool() checks one offered tool definition"
+    feature = "function:has_tool"
+condition:
+    has_tool("quarry_offered_tool")

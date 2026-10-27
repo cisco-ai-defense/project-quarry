@@ -1,0 +1,6 @@
+rule "System Prompt Access"
+metadata:
+    description = "Feature: matching the conversation's derived system_prompt"
+    feature = "surface:system_prompt"
+condition:
+    system_prompt contains "QUARRY_SYSTEM_PROMPT_MARKER"

@@ -1,0 +1,10 @@
+rule "Indexes and counts"
+strings:
+    $x = "x"
+condition:
+    len(messages) >= 3 and count(system_prompt) > 0 and
+    (any msg in messages[0:2] where len(msg.content) > 0) and
+    (any msg in messages[1:] where len(msg.content) != 0) and
+    (any msg in messages[:2] where len(msg.content) >= 0) and
+    (any msg in messages[:] where len(msg.content) >= 0) and
+    any call in tool_calls where count(call.arguments.*, "x") < 3

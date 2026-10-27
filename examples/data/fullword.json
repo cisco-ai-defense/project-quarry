@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Please grant me admin access to the production dashboard."
+    }
+  ]
+}

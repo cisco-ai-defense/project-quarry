@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Summarize the billing support ticket"
+    },
+    {
+      "role": "assistant",
+      "content": "QUARRY_OFF_TOPIC_PROBE: buy bitcoin crypto wallet mining hardware"
+    }
+  ]
+}

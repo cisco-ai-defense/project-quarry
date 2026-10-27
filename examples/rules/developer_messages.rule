@@ -1,0 +1,6 @@
+rule "Developer Message Access"
+metadata:
+    description = "Feature: reading developer_messages from the conversation"
+    feature = "surface:developer_messages"
+condition:
+    any msg in developer_messages where msg.content contains "QUARRY_DEVELOPER_MARKER"

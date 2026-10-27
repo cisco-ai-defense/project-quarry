@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Remember my access token TKN-84213 for the rest of this chat."
+    },
+    {
+      "role": "assistant",
+      "content": "Understood. I have stored TKN-84213 and will reuse it when needed."
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+rule "Filtered Tool Responses"
+metadata:
+    description = "Feature: get_tool_responses() returns responses for one tool name"
+    feature = "function:get_tool_responses"
+condition:
+    any response in get_tool_responses("quarry_lookup") where
+        response.content contains "QUARRY_RESPONSE_MARKER"

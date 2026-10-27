@@ -1,0 +1,7 @@
+rule "Capability Tag Classification"
+metadata:
+    description = "Feature: capability_tags() classifies the capability exercised by a tool call"
+    feature = "function:capability_tags"
+condition:
+    any call in tool_calls where
+        capability_tags("external_communication", call.name)

@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Send the summary to the two stakeholders and log the run."
+    },
+    {
+      "role": "assistant",
+      "content": "Sending the emails and logging.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "write_log",
+            "arguments": "{\"line\": \"started\"}"
+          }
+        },
+        {
+          "id": "call_2",
+          "type": "function",
+          "function": {
+            "name": "send_email",
+            "arguments": "{\"to\": \"alice@example.com\", \"body\": \"summary\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

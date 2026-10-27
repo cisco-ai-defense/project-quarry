@@ -1,0 +1,12 @@
+rule "Model interface"
+parameters:
+    instructions: text policy
+    threshold: number
+condition:
+    model("guard").score(messages, params.instructions, tools) > params.threshold and
+    0.5 * model("head").classify(messages) +
+        0.5 * model("head").classify(messages) > 0.8 and
+    model("guard").complete(messages).content ~ "safe" and
+    model("guard").input_tokens(messages, tools) > 0 and
+    any chunk in model("guard").split(messages, 200) where
+        model("guard").score(chunk, text_ref("policy"), tools) > 0.8

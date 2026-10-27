@@ -1,0 +1,6 @@
+rule "Filter Comprehension"
+metadata:
+    description = "Feature: counting a filtered collection ([tc for tc in ... if ...])"
+    feature = "comprehension:filter"
+condition:
+    count([tc for tc in tool_calls if tc.name == "send_email"]) >= 2

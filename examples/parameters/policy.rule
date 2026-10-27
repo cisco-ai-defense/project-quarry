@@ -1,0 +1,8 @@
+rule "Policy threshold"
+metadata:
+    description = "Compare a model score with a typed scan parameter"
+parameters:
+    instructions: text policy
+    threshold: number
+condition:
+    model("guard").score(messages, params.instructions) >= params.threshold

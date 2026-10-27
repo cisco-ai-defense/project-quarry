@@ -1,0 +1,13 @@
+{
+  "name": "quarry",
+  "version": "0.2.0",
+  "description": "Find Quarry language features, compile rules, and scan single or batched conversations.",
+  "author": {
+    "name": "Cisco AI Software and Platform Group",
+    "url": "https://github.com/cisco-ai-defense"
+  },
+  "homepage": "https://github.com/cisco-ai-defense/project-quarry",
+  "repository": "https://github.com/cisco-ai-defense/project-quarry",
+  "license": "Apache-2.0",
+  "keywords": ["quarry", "policy", "agents", "mcp"]
+}

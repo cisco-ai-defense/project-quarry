@@ -1,0 +1,8 @@
+rule "Flow Before"
+metadata:
+    description = "Feature: the 'before' flow operator (A happens anywhere before B on the timeline)"
+    feature = "flow:before"
+condition:
+    user_said("here is my password")
+    before
+    called_tool("send_email")

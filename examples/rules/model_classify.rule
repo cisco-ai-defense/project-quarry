@@ -1,0 +1,6 @@
+rule "Message Model Classification"
+metadata:
+    description = "Feature: model().classify() scores structured messages"
+    feature = "compiler_form:model.classify"
+condition:
+    model("classifier").classify(messages) >= 0.8

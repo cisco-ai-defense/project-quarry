@@ -1,0 +1,6 @@
+rule "All Message Access"
+metadata:
+    description = "Feature: reading every role through the messages surface"
+    feature = "surface:messages"
+condition:
+    count([msg for msg in messages if msg.content contains "QUARRY_MESSAGES_MARKER"]) == 2

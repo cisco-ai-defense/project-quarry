@@ -1,0 +1,7 @@
+rule "Boolean Not"
+metadata:
+    description = "Feature: negating a boolean expression with 'not'"
+    feature = "construct:boolean-not"
+condition:
+    user_said("QUARRY_NOT_TRIGGER") and
+    not assistant_said("QUARRY_NOT_CANCEL")

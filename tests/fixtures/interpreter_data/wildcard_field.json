@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Install the package for me."
+    },
+    {
+      "role": "assistant",
+      "content": "Sure, escalating privileges first.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "run_command",
+            "arguments": "{\"command\": \"sudo apt-get install nginx\", \"cwd\": \"/tmp\"}"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "run_command",
+        "description": "Run a command",
+        "parameters": {
+          "type": "object",
+          "properties": {"command": {"type": "string"}, "cwd": {"type": "string"}}
+        }
+      }
+    }
+  ]
+}

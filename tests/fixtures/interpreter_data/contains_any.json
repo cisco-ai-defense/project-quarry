@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Please run drop table users and clean everything up afterwards."
+    }
+  ]
+}

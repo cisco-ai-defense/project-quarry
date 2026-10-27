@@ -1,0 +1,18 @@
+{
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "Reading the requested files.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "read_files",
+            "arguments": "{\"paths\": [\"/etc/passwd\", \"/tmp/notes.txt\"]}"
+          }
+        }
+      ]
+    }
+  ]
+}

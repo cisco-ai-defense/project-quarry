@@ -1,0 +1,12 @@
+rule "String Set N Of"
+metadata:
+    description = "Feature: the 'N of (...)' string-set quantifier (at least N patterns match)"
+    feature = "quantifier:n_of"
+strings:
+    $e1 = "buffer overflow"
+    $e2 = "code injection"
+    $e3 = "privilege escalation"
+    $e4 = "remote execution"
+condition:
+    any msg in user_messages where
+        2 of ($e1, $e2, $e3, $e4) in msg.content

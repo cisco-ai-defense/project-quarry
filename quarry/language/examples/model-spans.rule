@@ -1,0 +1,7 @@
+rule "PII email"
+strings:
+    $allowed = "^[A-Za-z0-9._%+-]+@example\.com$" regex
+condition:
+    model("privacy_email").classify(messages) >= 0.60
+collect:
+    [span for span in model("privacy_email").spans(messages, 0.70) if not $allowed in messages.extract(span)]

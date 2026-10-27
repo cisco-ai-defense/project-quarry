@@ -1,0 +1,27 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Look this up"
+    },
+    {
+      "role": "assistant",
+      "content": "Looking it up",
+      "tool_calls": [
+        {
+          "id": "response-other-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_lookup_other",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "response-other-1",
+      "content": "QUARRY_RESPONSE_MARKER"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+rule "Flow Right Before"
+metadata:
+    description = "Feature: the 'right_before' flow operator (A immediately precedes B, distance = 1)"
+    feature = "flow:right_before"
+condition:
+    assistant_said("let me delete that for you")
+    right_before
+    called_tool("delete_file")

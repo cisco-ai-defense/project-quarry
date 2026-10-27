@@ -1,0 +1,6 @@
+rule "Conversation LLM Completion"
+metadata:
+    description = "Feature: llm_complete() runs inference over a constructed message sequence"
+    feature = "function:llm_complete"
+condition:
+    llm_complete("judge", conversation()) == "QUARRY_BLOCKED_COMPLETION"

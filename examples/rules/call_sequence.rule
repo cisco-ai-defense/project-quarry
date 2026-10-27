@@ -1,0 +1,6 @@
+rule "Call Sequence Collection"
+metadata:
+    description = "Feature: reading ordered tool names from call_sequence()"
+    feature = "function:call_sequence"
+condition:
+    any name in call_sequence() where name == "quarry_sequence_marker"

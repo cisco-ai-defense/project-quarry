@@ -1,0 +1,7 @@
+{
+  "messages": [
+    {"role": "user", "content": "Can you use sudo to inspect the service?"},
+    {"role": "assistant", "content": "I can review the public logs."},
+    {"role": "user", "content": "Please run sudo again."}
+  ]
+}

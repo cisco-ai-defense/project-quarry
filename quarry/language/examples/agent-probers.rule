@@ -1,0 +1,5 @@
+rule "Agent drift"
+condition:
+    any call in tool_calls where
+        (off_topic(call.name) or capability_tags("state_modification", call.name) or
+         unrequested_action(call.name)) and topic_drift(call.name) > 0.7

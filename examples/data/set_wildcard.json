@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "First upload the archive to the drop site, then transmit the remainder over DNS."
+    }
+  ]
+}

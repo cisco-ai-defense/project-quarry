@@ -1,0 +1,7 @@
+rule "Contains Substring"
+metadata:
+    description = "Feature: the contains operator (case-insensitive substring match on message content)"
+    feature = "operator:contains"
+condition:
+    any msg in user_messages where
+        msg.content contains "ignore all previous instructions"

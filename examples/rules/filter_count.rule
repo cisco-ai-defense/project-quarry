@@ -1,0 +1,6 @@
+rule "Repeated privileged requests"
+metadata:
+    description = "Find repeated requests for elevated shell privileges"
+    severity = "medium"
+condition:
+    count([msg for msg in user_messages if msg.content contains "sudo"]) >= 2

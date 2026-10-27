@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "QUARRY_SYSTEM_PROMPT_MARKER"
+    }
+  ]
+}

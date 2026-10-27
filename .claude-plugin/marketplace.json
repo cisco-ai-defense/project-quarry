@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-plugin-marketplace.json",
+  "name": "project-quarry",
+  "description": "Quarry language reference, rule compilation, and conversation scanning tools.",
+  "owner": {
+    "name": "Cisco AI Software and Platform Group",
+    "url": "https://github.com/cisco-ai-defense"
+  },
+  "plugins": [
+    {
+      "name": "quarry",
+      "source": "./",
+      "description": "Find Quarry language features, compile rules, and scan single or batched conversations.",
+      "version": "0.2.0"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Can you help me plan a small birthday party for my friend this weekend?"
+    },
+    {
+      "role": "assistant",
+      "content": "Of course! Let's begin with a guest list, a theme, and a simple menu."
+    }
+  ]
+}

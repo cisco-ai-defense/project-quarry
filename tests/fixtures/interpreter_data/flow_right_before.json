@@ -1,0 +1,19 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "That report is outdated, get rid of it."
+    },
+    {
+      "role": "assistant",
+      "content": "Let me delete that for you right away.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {"name": "delete_file", "arguments": "{\"path\": \"/reports/old.pdf\"}"}
+        }
+      ]
+    }
+  ]
+}

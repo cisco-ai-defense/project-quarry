@@ -1,0 +1,9 @@
+rule "Case Insensitive Match"
+metadata:
+    description = "Feature: the nocase string modifier (matches regardless of letter case)"
+    feature = "modifier:nocase"
+strings:
+    $password = "password" nocase
+condition:
+    any msg in user_messages where
+        $password in msg.content

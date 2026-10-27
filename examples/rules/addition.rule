@@ -1,0 +1,7 @@
+rule "Numeric Addition"
+metadata:
+    description = "Feature: adding two numeric expressions"
+    feature = "construct:addition"
+condition:
+    any msg in user_messages where
+        count(msg.content, "QUARRY_ADD_LEFT") + count(msg.content, "QUARRY_ADD_RIGHT") == 2

@@ -1,0 +1,7 @@
+rule "Regex Operator Match"
+metadata:
+    description = "Feature: the ~ regex operator matching message content against a pattern"
+    feature = "operator:regex"
+condition:
+    any msg in user_messages where
+        msg.content ~ "sk-[A-Za-z0-9]{16,}"

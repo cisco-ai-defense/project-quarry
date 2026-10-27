@@ -1,0 +1,7 @@
+rule "Legacy Model Scan"
+metadata:
+    description = "Feature: model_scan() thresholds one classifier output"
+    feature = "function:model_scan"
+condition:
+    any msg in user_messages where
+        model_scan("classifier", msg.content, 0.5, 0)

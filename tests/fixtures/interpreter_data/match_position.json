@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Enter your username first, and only afterwards enter your password."
+    }
+  ]
+}

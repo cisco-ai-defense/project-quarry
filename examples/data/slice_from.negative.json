@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Zero"
+    },
+    {
+      "role": "user",
+      "content": "QUARRY_SLICE_FROM"
+    },
+    {
+      "role": "assistant",
+      "content": "After the slice"
+    }
+  ]
+}

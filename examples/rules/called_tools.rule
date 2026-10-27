@@ -1,0 +1,6 @@
+rule "Multiple Called Tools"
+metadata:
+    description = "Feature: called_tools() requires every named tool to have been called"
+    feature = "function:called_tools"
+condition:
+    called_tools("quarry_called_alpha", "quarry_called_beta")

@@ -1,0 +1,20 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Zero"
+    },
+    {
+      "role": "user",
+      "content": "In range"
+    },
+    {
+      "role": "assistant",
+      "content": "After the selected range"
+    },
+    {
+      "role": "assistant",
+      "content": "QUARRY_SLICE_RANGE"
+    }
+  ]
+}

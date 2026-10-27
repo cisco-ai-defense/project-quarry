@@ -1,0 +1,7 @@
+rule "Nested Field Access"
+metadata:
+    description = "Feature: deep dotted field access into a tool's JSON schema (parameters.properties.*)"
+    feature = "accessor:nested_field"
+condition:
+    any tool in tools where
+        tool.parameters.properties.hidden != null

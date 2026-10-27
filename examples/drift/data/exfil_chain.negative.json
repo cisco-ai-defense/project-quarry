@@ -1,0 +1,41 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "look up the customer"
+    },
+    {
+      "role": "assistant",
+      "content": "ok",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "type": "function",
+          "function": {
+            "name": "http_post",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "ok",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "type": "function",
+          "function": {
+            "name": "query_db",
+            "arguments": "{}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "c1",
+      "content": "query_db rows"
+    }
+  ]
+}

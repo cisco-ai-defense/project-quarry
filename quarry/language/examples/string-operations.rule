@@ -1,0 +1,10 @@
+rule "String operations"
+strings:
+    $user = "user"
+    $pass = "pass"
+condition:
+    any msg in user_messages where
+        ((@user in msg.content) - (@pass in msg.content)) <= 10 or
+        #user in msg.content > 1 or
+        any of ($user, $pass) in msg.content or
+        msg.content ~ "p.ss"

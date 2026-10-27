@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "QUARRY_ALIAS_MARKER"
+    },
+    {
+      "role": "assistant",
+      "content": "Acknowledged"
+    }
+  ]
+}

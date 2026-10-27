@@ -1,0 +1,6 @@
+rule "Bounded Slice"
+metadata:
+    description = "Feature: collection[N:M] selects one bounded range"
+    feature = "construct:slice-range"
+condition:
+    any msg in messages[1:3] where msg.content contains "QUARRY_SLICE_RANGE"

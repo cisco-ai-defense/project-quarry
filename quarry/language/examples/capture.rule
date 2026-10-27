@@ -1,0 +1,4 @@
+rule "Capture text"
+condition:
+    any msg in user_messages where
+        ("TOKEN" in msg.content as found) and msg.content contains found

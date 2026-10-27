@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {"role": "user", "content": "Call the method example"},
+    {
+      "role": "assistant",
+      "content": "Calling a different tool",
+      "tool_calls": [
+        {
+          "id": "method-other-1",
+          "type": "function",
+          "function": {"name": "quarry_method_other", "arguments": "{}"}
+        }
+      ]
+    }
+  ]
+}

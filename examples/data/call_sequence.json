@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Run the sequence example"
+    },
+    {
+      "role": "assistant",
+      "content": "Running it",
+      "tool_calls": [
+        {
+          "id": "sequence-1",
+          "type": "function",
+          "function": {
+            "name": "quarry_sequence_marker",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

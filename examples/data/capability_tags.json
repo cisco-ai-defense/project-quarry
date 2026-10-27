@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Send the report"
+    },
+    {
+      "role": "assistant",
+      "content": "Sending",
+      "tool_calls": [
+        {
+          "id": "capability-1",
+          "type": "function",
+          "function": {
+            "name": "http_post",
+            "arguments": "{}"
+          }
+        }
+      ]
+    }
+  ]
+}

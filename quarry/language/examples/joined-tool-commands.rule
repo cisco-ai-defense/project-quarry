@@ -1,0 +1,17 @@
+rule "Risky commands in the newest message"
+strings:
+    $wipe = "rm -rf" regex
+    $pipe = "curl .*\| *sh" regex
+variables:
+    risky = $wipe in c.arguments.* or $pipe in c.arguments.*
+parameters:
+    threshold: number
+condition:
+    model("guard").score(
+        message("user", join(
+            [c.arguments.command for c in messages[-1].tool_calls if risky], "\n")),
+        text_ref("policy")) >= params.threshold
+    or model("guard").score(
+        message("user", join(
+            [c.arguments.cmd for c in messages[-1].tool_calls if risky], "\n")),
+        text_ref("policy")) >= params.threshold

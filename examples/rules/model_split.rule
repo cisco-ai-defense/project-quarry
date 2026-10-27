@@ -1,0 +1,7 @@
+rule "Message Model Split"
+metadata:
+    description = "Feature: model().split() creates bounded message chunks for nested inference"
+    feature = "compiler_form:model.split"
+condition:
+    any chunk in model("judge").split(messages, 200) where
+        model("judge").score(chunk, text_ref("policy")) >= 0.8

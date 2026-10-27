@@ -1,0 +1,7 @@
+rule "Tool Definition Access"
+metadata:
+    description = "Feature: reading tool definitions and their description text (tool.description)"
+    feature = "accessor:tools"
+condition:
+    any tool in tools where
+        tool.description contains_any ["ALWAYS EXECUTE", "ignore other tools", "run this first"]

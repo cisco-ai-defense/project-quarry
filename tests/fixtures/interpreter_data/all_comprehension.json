@@ -1,0 +1,24 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Remove both temporary files."
+    },
+    {
+      "role": "assistant",
+      "content": "Deleting them now.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {"name": "delete_file", "arguments": "{\"path\": \"/tmp/a.log\"}"}
+        },
+        {
+          "id": "call_2",
+          "type": "function",
+          "function": {"name": "delete_file", "arguments": "{\"path\": \"/tmp/b.log\"}"}
+        }
+      ]
+    }
+  ]
+}

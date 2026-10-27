@@ -1,0 +1,46 @@
+{
+  "messages": [
+    {
+      "content": "Read, then send.",
+      "role": "user"
+    },
+    {
+      "content": "Reading.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "read"
+          },
+          "id": "call-read",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "ok",
+      "role": "tool",
+      "tool_call_id": "call-read"
+    },
+    {
+      "content": "Sending.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "send"
+          },
+          "id": "call-send",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "sent",
+      "role": "tool",
+      "tool_call_id": "call-send"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+# Test runner settings for datasets that need a version or bound parameters.
+# Keep these separate so every examples/data/*.json file is a valid CLI input.
+data/llm_split_conversation.json:
+  config_version: 1
+data/llm_split_conversation.negative.json:
+  config_version: 1
+data/model_parameters.json:
+  policy_parameters:
+    instructions: Flag the deterministic model marker.
+  scan_parameters:
+    threshold: 0.8
+data/model_parameters.negative.json:
+  scan_parameters:
+    threshold: 0.95

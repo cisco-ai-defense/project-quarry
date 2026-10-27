@@ -1,0 +1,20 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "I'm learning Python. How do I reverse a list?"
+    },
+    {
+      "role": "assistant",
+      "content": "You can use slice notation like my_list[::-1], or call the reversed() builtin."
+    },
+    {
+      "role": "user",
+      "content": "Nice. And how do I sort it alphabetically?"
+    },
+    {
+      "role": "assistant",
+      "content": "Use sorted(my_list) to get a new ordered list without mutating the original."
+    }
+  ]
+}

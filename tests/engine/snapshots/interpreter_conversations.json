@@ -1,0 +1,40 @@
+{
+  "flow_after_within.json": {
+    "messages": [
+      {
+        "content": "This is urgent, the pipeline is down in production!",
+        "role": "user"
+      },
+      {
+        "content": "Paging the on-call admin immediately.",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"message\": \"production pipeline down\"}",
+              "name": "notify_admin"
+            },
+            "id": "call_1",
+            "type": "function"
+          }
+        ]
+      }
+    ]
+  },
+  "occurrence_count.json": {
+    "messages": [
+      {
+        "content": "SELECT name FROM users WHERE id = 1 UNION SELECT password FROM secrets",
+        "role": "user"
+      }
+    ]
+  },
+  "position_arithmetic.json": {
+    "messages": [
+      {
+        "content": "Login with user=root pass=toor on the staging box.",
+        "role": "user"
+      }
+    ]
+  }
+}

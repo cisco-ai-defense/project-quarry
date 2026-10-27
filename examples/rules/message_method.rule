@@ -1,0 +1,6 @@
+rule "Message Collection Method"
+metadata:
+    description = "Feature: calling a tool helper as a method on messages"
+    feature = "construct:method-call"
+condition:
+    messages.called_tool("quarry_method_marker")
