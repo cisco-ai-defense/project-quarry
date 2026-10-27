@@ -75,7 +75,7 @@ plugin = [
 dev = [
     "build==1.6.1",
     "coverage==7.17.0",
-    "hypothesis==6.168.3",
+    "hypothesis==6.170.9",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-xdist==3.8.0",
