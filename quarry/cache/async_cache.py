@@ -23,7 +23,7 @@ import math
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, MutableMapping
+from collections.abc import Callable, Generator, Iterator, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -45,7 +45,7 @@ _scan = ContextVar[object]("quarry_scan", default=None)
 
 
 @contextmanager
-def scan_scope(scan: object = None) -> Iterator[object]:
+def scan_scope(scan: object = None) -> Generator[object, None, None]:
     """Run one scan, or resume ``scan`` (as its deferred evidence does): the calls it starts
     are its own."""
 
