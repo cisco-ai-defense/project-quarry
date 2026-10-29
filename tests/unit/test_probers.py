@@ -159,6 +159,29 @@ def test_valid_drift_scores_keep_their_verdicts(
 @pytest.mark.parametrize(
     "score",
     [
+        Decimal("0.50000000000000000001"),
+        Fraction(2**54 + 1, 2**55),
+    ],
+    ids=["decimal", "fraction"],
+)
+def test_precise_drift_scores_keep_their_threshold_semantics(
+    score: Decimal | Fraction,
+) -> None:
+    result = _scan_drift(score)
+
+    assert (result.rule_matches, result.completion_state) == (["Drift"], "complete")
+
+
+def test_a_small_positive_drift_score_does_not_underflow_to_zero() -> None:
+    rule = 'rule "Drift" condition: any c in tool_calls where topic_drift(c.name) > 0'
+    result = _scan_drift(Decimal("1E-10000"), rule)
+
+    assert (result.rule_matches, result.completion_state) == (["Drift"], "complete")
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
         False,
         -1.0,
         1.1,

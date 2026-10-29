@@ -452,7 +452,7 @@ def _require_boolean_backend_result(value: object, operation: str) -> bool:
     return value
 
 
-def _require_drift_backend_result(value: object) -> float:
+def _require_drift_backend_result(value: object) -> Real | Decimal:
     """Accept only a finite drift score in the documented unit interval."""
 
     detail = (
@@ -462,14 +462,11 @@ def _require_drift_backend_result(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (Real, Decimal)):
         raise ModelError(detail)
     try:
-        if operator.lt(value, 0) or operator.gt(value, 1):
+        if not math.isfinite(value) or operator.lt(value, 0) or operator.gt(value, 1):
             raise ModelError(detail)
-        score = float(value)
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ModelError(detail) from exc
-    if not math.isfinite(score) or not 0 <= score <= 1:
-        raise ModelError(detail)
-    return score
+    return value
 
 
 @dsl_function(
@@ -480,7 +477,7 @@ def _require_drift_backend_result(value: object) -> float:
 async def topic_drift(
     ctx: Annotated[Any, DSLParameter(hidden=True)],
     text: Annotated[str, DSLParameter(field_only=True)],
-) -> float:
+) -> Real | Decimal:
     """Return how far ``text`` has moved from the first user message, from 0 through 1.
 
     A result of 0 means on-topic and 1 means fully off-topic. The configured topic-analysis
