@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import sleep as _sleep
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from time import monotonic
@@ -86,7 +86,9 @@ _current_model_call_budget = ContextVar[ModelCallBudget | None](
 
 
 @contextmanager
-def model_call_budget(max_calls_per_alias: int | None) -> Iterator[ModelCallBudget | None]:
+def model_call_budget(
+    max_calls_per_alias: int | None,
+) -> Generator[ModelCallBudget | None, None, None]:
     """Install one task-local cost budget inherited by every rule in a scan."""
 
     budget = ModelCallBudget(max_calls_per_alias) if max_calls_per_alias is not None else None

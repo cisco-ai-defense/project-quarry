@@ -32,7 +32,7 @@ copies the context) each count their own visits.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -77,7 +77,7 @@ current = ContextVar[WorkBudget | None]("quarry_work_budget", default=None)
 
 
 @contextmanager
-def spending(budget: WorkBudget) -> Iterator[WorkBudget]:
+def spending(budget: WorkBudget) -> Generator[WorkBudget, None, None]:
     """Charge the visits made inside the block to ``budget``."""
     token = current.set(budget)
     try:

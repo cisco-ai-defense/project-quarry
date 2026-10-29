@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -102,7 +102,7 @@ def clamp_to_evaluation_deadline(seconds: float | None) -> float | None:
 @contextmanager
 def evaluation_deadline(
     seconds: float | None, error_message: str = "Evaluation timeout"
-) -> Iterator[EvaluationDeadline | None]:
+) -> Generator[EvaluationDeadline | None, None, None]:
     """Install a nested, task-local absolute deadline.
 
     The earliest nested deadline remains authoritative. This context is
@@ -131,7 +131,7 @@ def evaluation_deadline(
 @contextmanager
 def scan_deadline(
     seconds: float | None, error_message: str = "Scan deadline exceeded"
-) -> Iterator[EvaluationDeadline | None]:
+) -> Generator[EvaluationDeadline | None, None, None]:
     """Install a scan-wide deadline inherited by every rule task."""
 
     if seconds is None:
@@ -153,7 +153,7 @@ def scan_deadline(
 
 
 @contextmanager
-def without_rule_deadline() -> Iterator[None]:
+def without_rule_deadline() -> Generator[None, None, None]:
     """Clear only the caller's rule deadline while retaining the scan cap."""
 
     token = _current_rule_deadline.set(None)
@@ -164,7 +164,7 @@ def without_rule_deadline() -> Iterator[None]:
 
 
 @contextmanager
-def evidence_deadline(seconds: float) -> Iterator[EvaluationDeadline]:
+def evidence_deadline(seconds: float) -> Generator[EvaluationDeadline, None, None]:
     """Bound post-verdict evidence without extending the caller's scan deadline."""
 
     candidate = EvaluationDeadline(time.monotonic() + seconds, "Evidence budget exhausted")
