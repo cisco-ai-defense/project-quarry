@@ -38,13 +38,11 @@ uv run --frozen quarry scan --config examples/config.yaml --target examples/data
 ```
 
 `examples/config.yaml` selects fourteen local rules that run without model credentials.
-Four semantic rules use deterministic keyword stubs via an explicit config opt-in;
-these stubs are for examples and tests, not production decisions.
-To see a match, scan `examples/data/tool_calls.json` with the same
-config. You can also target `examples/data/` to scan every conversation file; a
-successful scan with matches exits `1`. The full example rule collection is exercised
-by `uv run --frozen python scripts/e2e_signature_test.py`, which supplies deterministic
-model and prober implementations in process.
+Four semantic rules use deterministic keyword stubs via an explicit config opt-in; these stubs are for examples and tests, not production decisions.
+
+To see a match, scan `examples/data/tool_calls.json` with the same config. You can also target `examples/data/` to scan every conversation file; a successful scan with matches exits `1`.
+
+The full example rule collection is exercised by `uv run --frozen python scripts/e2e_signature_test.py`, which supplies deterministic model and prober implementations in process.
 
 A YAML configuration file loads your own rules:
 
@@ -65,6 +63,35 @@ condition:
 ```
 
 Pass an OpenAI-shaped conversation as JSON with a `messages` array. The CLI exits `0` for a complete clean scan, `1` for a complete match, and `2` when the scan is invalid or incomplete.
+
+## Rule Structure
+
+A `.rule` file contains one named rule. Quarry parses, validates, links, and compiles it when the scanner loads. The [generated language reference](quarry/language/reference.md) lists current functions, fields, operators, and runnable examples.
+
+```text
+rule "Suspicious request"
+metadata:
+    severity = "medium"
+strings:
+    $blocked = ["reveal a secret", "ignore the policy"] nocase
+variables:
+    has_blocked_text = any msg in user_messages where msg.content contains_any $blocked
+condition:
+    has_blocked_text
+```
+
+Optional blocks appear in this order: `metadata`, `strings`, `variables`, `parameters`. Every rule needs `condition:`. A model span rule can also have a `collect:` block after `condition:`. Use `//` for line comments; `#name` is the occurrence-count operator.
+
+Use `=` to define values in `metadata:`, `strings:`, and `variables:`. Use `==` to compare values in `condition:` expressions, including predicates inside `matches { ... }`. Other comparisons remain `!=`, `<`, `<=`, `>`, and `>=`.
+
+```text
+rule "Shell call"
+strings:
+    $needle = "sudo"
+condition:
+    any call in tool_calls where call.name == "Bash"
+       and $needle in call.arguments.*
+```
 
 ## Python API
 
