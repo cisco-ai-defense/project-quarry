@@ -24,10 +24,16 @@ The DSL-level drift signatures are exercised in ``tests/engine/test_corpus.py``.
 
 from __future__ import annotations
 
+from decimal import Decimal
+from fractions import Fraction
+
 import pytest
 
+from quarry.config import QuarryConfig
 from quarry.integrations.resources import ResourcePreparationError
 from quarry.probers import CapabilityClassifier, TopicProber
+from quarry.scanner import DSLScanner
+from quarry.types.exceptions import IncompleteScanError
 from tests.conftest import scanner_from_rules
 
 _TOPIC_RULE = 'rule "Topic" condition: any m in assistant_messages where off_topic(m.content)'
@@ -36,6 +42,15 @@ _CAPABILITY_RULE = (
     'capability_tags("code_execution", c.name)'
 )
 _INTENT = "please summarize the billing support ticket"
+_THREE_DETECTORS = """rule "Reject unsafe action"
+condition:
+    any call in tool_calls where (
+        off_topic(call.name)
+        or capability_tags("state_modification", call.name)
+        or unrequested_action(call.name)
+    )
+"""
+_DRIFT_RULE = 'rule "Drift" condition: any c in tool_calls where topic_drift(c.name) > 0.5'
 
 
 @pytest.mark.parametrize(
@@ -61,6 +76,203 @@ def _turn(reply: str, tool: str) -> dict:
             },
         ]
     }
+
+
+class _FixedTopicReply:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def off_topic(self, intent: str, action: str) -> object:
+        assert (intent, action) == (_INTENT, "delete_account")
+        return self.value
+
+
+class _FixedDriftReply:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def drift_score(self, intent: str, action: str) -> object:
+        assert (intent, action) == (_INTENT, "delete_account")
+        return self.value
+
+
+class _FixedCapabilityReply:
+    def __init__(self, tag: object, unrequested: object) -> None:
+        self.tag = tag
+        self.unrequested = unrequested
+
+    def has_tag(self, action: str, tag: str) -> object:
+        assert (action, tag) == ("delete_account", "state_modification")
+        return self.tag
+
+    def unrequested_capability(self, action: str, intent: str) -> object:
+        assert (action, intent) == ("delete_account", _INTENT)
+        return self.unrequested
+
+
+def _scan_three_detectors(topic: object, tag: object, unrequested: object):
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(_THREE_DETECTORS,),
+            allow_stub_probers=True,
+        )
+    )
+    scanner.resource_manager.topic_prober = _FixedTopicReply(topic)
+    scanner.resource_manager.capability_classifier = _FixedCapabilityReply(tag, unrequested)
+    return scanner.scan_data(_turn("", "delete_account"))
+
+
+def _scan_drift(value: object, rule: str = _DRIFT_RULE):
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(rule,),
+            allow_stub_probers=True,
+        )
+    )
+    scanner.resource_manager.topic_prober = _FixedDriftReply(value)
+    return scanner.scan_data(_turn("", "delete_account"))
+
+
+@pytest.mark.parametrize(
+    ("score", "matches"),
+    [
+        (0, []),
+        (0.0, []),
+        (0.5, []),
+        (Decimal("0.5"), []),
+        (Fraction(1, 2), []),
+        (1.0, ["Drift"]),
+        (Decimal("1"), ["Drift"]),
+        (1, ["Drift"]),
+    ],
+)
+def test_valid_drift_scores_keep_their_verdicts(
+    score: int | float | Decimal | Fraction, matches: list[str]
+) -> None:
+    result = _scan_drift(score)
+
+    assert (result.rule_matches, result.completion_state) == (matches, "complete")
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        Decimal("0.50000000000000000001"),
+        Fraction(2**54 + 1, 2**55),
+    ],
+    ids=["decimal", "fraction"],
+)
+def test_precise_drift_scores_keep_their_threshold_semantics(
+    score: Decimal | Fraction,
+) -> None:
+    result = _scan_drift(score)
+
+    assert (result.rule_matches, result.completion_state) == (["Drift"], "complete")
+
+
+def test_a_small_positive_drift_score_does_not_underflow_to_zero() -> None:
+    rule = 'rule "Drift" condition: any c in tool_calls where topic_drift(c.name) > 0'
+    result = _scan_drift(Decimal("1E-10000"), rule)
+
+    assert (result.rule_matches, result.completion_state) == (["Drift"], "complete")
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        False,
+        -1.0,
+        1.1,
+        Fraction(-1, 2**1075),
+        Fraction(2**54 + 1, 2**54),
+        Decimal("-1E-10000"),
+        Decimal("1.00000000000000000001"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        None,
+        "0.9",
+    ],
+    ids=[
+        "bool",
+        "negative",
+        "above-one",
+        "fraction-rounds-to-negative-zero",
+        "fraction-rounds-to-one",
+        "decimal-rounds-to-negative-zero",
+        "decimal-rounds-to-one",
+        "decimal-nan",
+        "decimal-inf",
+        "nan",
+        "inf",
+        "negative-inf",
+        "none",
+        "str",
+    ],
+)
+def test_malformed_drift_score_fails_the_rule(score: object) -> None:
+    result = _scan_drift(score)
+
+    assert (result.rule_matches, result.completion_state) == ([], "incomplete")
+    assert "expected a finite non-boolean number in [0, 1]" in result.evaluation_errors["Drift"]
+    with pytest.raises(IncompleteScanError):
+        result.raise_for_status()
+
+
+def test_nan_drift_cannot_complete_a_less_than_policy() -> None:
+    rule = 'rule "Drift" condition: any c in tool_calls where topic_drift(c.name) < 0.5'
+    result = _scan_drift(float("nan"), rule)
+
+    assert (result.rule_matches, result.completion_state) == ([], "incomplete")
+    assert "expected a finite non-boolean number in [0, 1]" in result.evaluation_errors["Drift"]
+
+
+@pytest.mark.parametrize(
+    ("topic", "tag", "unrequested", "matches"),
+    [
+        (False, False, False, []),
+        (True, False, False, ["Reject unsafe action"]),
+        (False, True, False, ["Reject unsafe action"]),
+        (False, False, True, ["Reject unsafe action"]),
+    ],
+)
+def test_valid_boolean_semantic_replies_keep_their_verdicts(
+    topic: bool, tag: bool, unrequested: bool, matches: list[str]
+) -> None:
+    result = _scan_three_detectors(topic, tag, unrequested)
+
+    assert (result.rule_matches, result.completion_state) == (matches, "complete")
+
+
+@pytest.mark.parametrize("value", [None, 0, [], 1], ids=["none", "zero", "empty", "one"])
+@pytest.mark.parametrize("detector", ["off_topic", "capability_tags", "unrequested_action"])
+def test_malformed_semantic_reply_fails_the_rule(detector: str, value: object) -> None:
+    replies = {
+        "off_topic": False,
+        "capability_tags": False,
+        "unrequested_action": False,
+    }
+    replies[detector] = value
+
+    result = _scan_three_detectors(
+        replies["off_topic"], replies["capability_tags"], replies["unrequested_action"]
+    )
+
+    assert (result.rule_matches, result.completion_state) == ([], "incomplete")
+    assert "expected bool" in result.evaluation_errors["Reject unsafe action"]
+    with pytest.raises(IncompleteScanError):
+        result.raise_for_status()
+
+
+def test_three_falsey_malformed_replies_cannot_bypass_redundant_policy() -> None:
+    result = _scan_three_detectors(None, None, None)
+
+    assert (result.rule_matches, result.completion_state) == ([], "incomplete")
+    assert "expected bool" in result.evaluation_errors["Reject unsafe action"]
 
 
 @pytest.mark.parametrize(

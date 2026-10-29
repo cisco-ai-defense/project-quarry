@@ -1966,7 +1966,7 @@
       ],
       "compiler_tags": [],
       "deprecated": false,
-      "description": "Return whether `text` describes the capability named by `tag`.\n\nThe built-in classifier recognizes `external_communication`, `private_data_access`,\n`code_execution`, `state_modification`, and `untrusted_ingress`. A configured\nclassifier may support additional tags. This function requires a configured capability\nclassifier.",
+      "description": "Return whether `text` describes the capability named by `tag`.\n\nThe built-in classifier recognizes `external_communication`, `private_data_access`,\n`code_execution`, `state_modification`, and `untrusted_ingress`. A configured\nclassifier may support additional tags. This function requires a configured capability\nclassifier whose `has_tag` method returns a Python `bool`.",
       "id": "function:capability_tags",
       "implicit_receiver_count": 0,
       "kind": "function",
@@ -2625,7 +2625,7 @@
         "field_first_external"
       ],
       "deprecated": false,
-      "description": "Return whether `text` has moved too far from the first user message.\n\nThis function requires a configured topic-analysis backend.",
+      "description": "Return whether `text` has moved too far from the first user message.\n\nThis function requires a configured topic-analysis backend whose `off_topic` method\nreturns a Python `bool`.",
       "id": "function:off_topic",
       "implicit_receiver_count": 0,
       "kind": "function",
@@ -2663,7 +2663,7 @@
         "score_external"
       ],
       "deprecated": false,
-      "description": "Return how far `text` has moved from the first user message, from 0 through 1.\n\nA result of 0 means on-topic and 1 means fully off-topic. This function requires a\nconfigured topic-analysis backend.",
+      "description": "Return how far `text` has moved from the first user message, from 0 through 1.\n\nA result of 0 means on-topic and 1 means fully off-topic. The configured topic-analysis\nbackend must return a finite, non-boolean number in [0, 1].",
       "id": "function:topic_drift",
       "implicit_receiver_count": 0,
       "kind": "function",
@@ -2703,7 +2703,7 @@
         "field_first_external"
       ],
       "deprecated": false,
-      "description": "Return whether `text` describes an action not requested in the first user message.\n\nPass a tool name, description, or arguments field as `text`. This function requires a\nconfigured capability classifier.",
+      "description": "Return whether `text` describes an action not requested in the first user message.\n\nPass a tool name, description, or arguments field as `text`. This function requires a\nconfigured capability classifier whose `unrequested_capability` method returns a Python\n`bool`.",
       "id": "function:unrequested_action",
       "implicit_receiver_count": 0,
       "kind": "function",
