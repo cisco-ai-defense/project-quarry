@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager, suppress
 from time import monotonic
 
@@ -129,7 +129,7 @@ class LLMRateLimiter:
         self._lock = threading.Lock()
 
     @asynccontextmanager
-    async def limit(self, model: str) -> AsyncIterator[float]:
+    async def limit(self, model: str) -> AsyncGenerator[float, None]:
         """Enforce the limits configured for an upstream model API."""
 
         limiter = self._get_or_create_limiter(model)
