@@ -87,9 +87,10 @@ Use `=` to define values in `metadata:`, `strings:`, and `variables:`. Use `==` 
 ```text
 rule "Shell call"
 strings:
-    $needle = "shell"
+    $needle = "sudo"
 condition:
-    any call in tool_calls where call.name == "shell"
+    any call in tool_calls where call.name == "Bash"
+       and $needle in call.arguments.*
 ```
 
 ## Python API
