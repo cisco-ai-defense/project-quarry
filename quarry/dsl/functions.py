@@ -23,6 +23,9 @@ than another registry in this module.
 
 import asyncio
 import math
+import operator
+from decimal import Decimal
+from numbers import Real
 from typing import Annotated, Any
 
 from quarry.language.metadata import DSLParameter, Use, dsl_function
@@ -441,6 +444,34 @@ def _capability_classifier(ctx):
     return clf
 
 
+def _require_boolean_backend_result(value: object, operation: str) -> bool:
+    """Reject malformed semantic backend replies before they become policy facts."""
+
+    if type(value) is not bool:
+        raise ModelError(f"{operation} returned {type(value).__name__}; expected bool")
+    return value
+
+
+def _require_drift_backend_result(value: object) -> float:
+    """Accept only a finite drift score in the documented unit interval."""
+
+    detail = (
+        "topic_prober.drift_score returned an invalid value; "
+        "expected a finite non-boolean number in [0, 1]"
+    )
+    if isinstance(value, bool) or not isinstance(value, (Real, Decimal)):
+        raise ModelError(detail)
+    try:
+        if operator.lt(value, 0) or operator.gt(value, 1):
+            raise ModelError(detail)
+        score = float(value)
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ModelError(detail) from exc
+    if not math.isfinite(score) or not 0 <= score <= 1:
+        raise ModelError(detail)
+    return score
+
+
 @dsl_function(
     return_type="number",
     resource_group="topic_prober",
@@ -452,10 +483,12 @@ async def topic_drift(
 ) -> float:
     """Return how far ``text`` has moved from the first user message, from 0 through 1.
 
-    A result of 0 means on-topic and 1 means fully off-topic. This function requires a
-    configured topic-analysis backend.
+    A result of 0 means on-topic and 1 means fully off-topic. The configured topic-analysis
+    backend must return a finite, non-boolean number in [0, 1].
     """
-    return _topic_prober(ctx).drift_score(intent_baseline(ctx), str(text))
+    return _require_drift_backend_result(
+        _topic_prober(ctx).drift_score(intent_baseline(ctx), str(text))
+    )
 
 
 @dsl_function(
@@ -470,9 +503,13 @@ async def off_topic(
 ) -> bool:
     """Return whether ``text`` has moved too far from the first user message.
 
-    This function requires a configured topic-analysis backend.
+    This function requires a configured topic-analysis backend whose ``off_topic`` method
+    returns a Python ``bool``.
     """
-    return _topic_prober(ctx).off_topic(intent_baseline(ctx), str(text))
+    return _require_boolean_backend_result(
+        _topic_prober(ctx).off_topic(intent_baseline(ctx), str(text)),
+        "topic_prober.off_topic",
+    )
 
 
 @dsl_function(
@@ -490,9 +527,12 @@ async def capability_tags(
     The built-in classifier recognizes ``external_communication``, ``private_data_access``,
     ``code_execution``, ``state_modification``, and ``untrusted_ingress``. A configured
     classifier may support additional tags. This function requires a configured capability
-    classifier.
+    classifier whose ``has_tag`` method returns a Python ``bool``.
     """
-    return _capability_classifier(ctx).has_tag(str(text), str(tag))
+    return _require_boolean_backend_result(
+        _capability_classifier(ctx).has_tag(str(text), str(tag)),
+        "capability_classifier.has_tag",
+    )
 
 
 @dsl_function(
@@ -508,9 +548,13 @@ async def unrequested_action(
     """Return whether ``text`` describes an action not requested in the first user message.
 
     Pass a tool name, description, or arguments field as ``text``. This function requires a
-    configured capability classifier.
+    configured capability classifier whose ``unrequested_capability`` method returns a Python
+    ``bool``.
     """
-    return _capability_classifier(ctx).unrequested_capability(str(text), intent_baseline(ctx))
+    return _require_boolean_backend_result(
+        _capability_classifier(ctx).unrequested_capability(str(text), intent_baseline(ctx)),
+        "capability_classifier.unrequested_capability",
+    )
 
 
 EXTERNAL_FUNCTIONS = {
