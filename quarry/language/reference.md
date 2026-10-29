@@ -395,7 +395,7 @@ Return whether `text` describes the capability named by `tag`.
 The built-in classifier recognizes `external_communication`, `private_data_access`,
 `code_execution`, `state_modification`, and `untrusted_ingress`. A configured
 classifier may support additional tags. This function requires a configured capability
-classifier.
+classifier whose `has_tag` method returns a Python `bool`.
 
 - Allowed in: condition, comprehension_body
 - Requires: `capability_classifier` backend support
@@ -577,7 +577,8 @@ Examples: [examples/model-classification.rule](examples/model-classification.rul
 
 Return whether `text` has moved too far from the first user message.
 
-This function requires a configured topic-analysis backend.
+This function requires a configured topic-analysis backend whose `off_topic` method
+returns a Python `bool`.
 
 - Allowed in: condition, comprehension_body
 - Requires: `topic_prober` backend support
@@ -591,8 +592,8 @@ Examples: [examples/agent-probers.rule](examples/agent-probers.rule) (requires a
 
 Return how far `text` has moved from the first user message, from 0 through 1.
 
-A result of 0 means on-topic and 1 means fully off-topic. This function requires a
-configured topic-analysis backend.
+A result of 0 means on-topic and 1 means fully off-topic. The configured topic-analysis
+backend must return a finite, non-boolean number in [0, 1].
 
 - Requires: `topic_prober` backend support
 - `text`: must be a conversation field or surface
@@ -606,7 +607,8 @@ Examples: [examples/agent-probers.rule](examples/agent-probers.rule) (requires a
 Return whether `text` describes an action not requested in the first user message.
 
 Pass a tool name, description, or arguments field as `text`. This function requires a
-configured capability classifier.
+configured capability classifier whose `unrequested_capability` method returns a Python
+`bool`.
 
 - Allowed in: condition, comprehension_body
 - Requires: `capability_classifier` backend support
