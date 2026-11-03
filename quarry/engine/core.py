@@ -46,7 +46,9 @@ class Events:
 
 @dataclass(frozen=True)
 class AllEvents:
-    """Every timeline event; used only to lift a static condition onto events."""
+    """Events on the selected surfaces; defaults to canonical conversation steps."""
+
+    surfaces: tuple[str, ...] = ("messages", "tool_calls")
 
 
 @dataclass(frozen=True)
@@ -136,12 +138,16 @@ class Or:
 @dataclass(frozen=True)
 class Rel:
     """Positions strictly on ``side`` (``"after"`` or ``"before"``) of ``of_var``'s
-    position, at a distance of ``lo`` to ``hi`` steps (``hi=None`` is unbounded)."""
+    position, at a distance of ``lo`` to ``hi`` steps (``hi=None`` is unbounded).
+    A conversation relation counts only canonical conversation events even when the
+    enclosing rule also reads registered extension events on the shared timeline.
+    A timeline relation counts every supplied manifest item."""
 
     of_var: str
     side: str
     lo: int = 1
     hi: int | None = None
+    clock: str = "timeline"
 
 
 @dataclass(frozen=True)

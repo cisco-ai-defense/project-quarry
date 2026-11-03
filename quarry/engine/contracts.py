@@ -42,7 +42,9 @@ if TYPE_CHECKING:
 # Bump when compilation or admission semantics change in a way that must invalidate
 # previously produced artifacts. Compiler-6 admitted colliding `variables:`/`as`
 # bindings and referenced captures on the sustained side of `until`.
-COMPILER_VERSION = "compiler-7"
+# Compiler-8 records per-flow clocks so extension events cannot change a
+# conversation-only bounded flow.
+COMPILER_VERSION = "compiler-8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +63,24 @@ class ClosedPlan:
     automaton matches over that run's events, oracle and binding."""
 
     dfa: DFA
+
+
+@dataclass(frozen=True, slots=True)
+class FlowCandidate:
+    """One event operand's compiled Boolean test at its own event."""
+
+    surface: str
+    formula: Formula | None  # None means its predicate cannot be decided before the verdict.
+
+
+@dataclass(frozen=True, slots=True)
+class FlowRequirement:
+    """Candidate operands and other event surfaces whose relative order may matter."""
+
+    candidates: tuple[FlowCandidate, ...]
+    ambient_surfaces: tuple[str, ...] = ()
+    static_formula: Formula | None = None
+    static_sustained: tuple[Formula, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +197,7 @@ class CompiledRuleArtifact:
     # is deliberately structural rather than an AST object reference so compiled artifacts
     # remain independent of the mutable parser objects and can be serialized later.
     node_atom_ids: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    flow_requirements: tuple[FlowRequirement, ...] = ()
     temporal: bool = False
     notes: tuple[str, ...] = ()
     # Value capture (``... as v`` / cross-field join): the recipe the executor uses

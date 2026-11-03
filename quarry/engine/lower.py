@@ -48,18 +48,24 @@ from quarry.engine.contracts import (
     ClosedPlan,
     CompiledRuleArtifact,
     DecisionTree,
+    FlowCandidate,
+    FlowRequirement,
     TreeNode,
 )
 from quarry.engine.decision import Parts, boot_diagram_is_decided, reads
 from quarry.engine.desugar import (
     Desugarer,
+    FlowProbe,
     ValueTest,
+    _ElementAlt,
+    _EventAlt,
     bind_candidate,
     described,
     hoist,
     source_name,
 )
 from quarry.engine.diagnostics import Diagnostics, ErrorCategory, SourceRef, UnsupportedConstruct
+from quarry.engine.extension_surfaces import EVENT_SURFACES
 from quarry.engine.symbolic_dfa import DFA, PAST_PREFIX, PastDef, compile_dfa
 from quarry.types.dsl import (
     AllComprehension,
@@ -336,17 +342,23 @@ class _Past:
     defs: list[PastDef] = field(default_factory=list)
     by_key: dict[tuple, str] = field(default_factory=dict)
 
-    def token(self, op: str, operand: T.Formula, bound: int | None = None) -> T.Formula:
+    def token(
+        self,
+        op: str,
+        operand: T.Formula,
+        bound: int | None = None,
+        tick: T.Formula | None = None,
+    ) -> T.Formula:
         """Return the token for the operation."""
         operand = T.simplify(operand)
         if T.is_const_false(operand):
             return T.FALSE
-        key = (op, T.canonical(operand), bound)
+        key = (op, T.canonical(operand), bound, T.canonical(tick) if tick is not None else None)
         token = self.by_key.get(key)
         if token is None:
             token = f"{PAST_PREFIX}{len(self.defs)}"
             self.by_key[key] = token
-            self.defs.append(PastDef(token, op, operand, bound))
+            self.defs.append(PastDef(token, op, operand, bound, tick))
         return T.Atom(token)
 
 
@@ -428,8 +440,9 @@ class _Bound:
 
 
 class _Lowerer:
-    def __init__(self, factory):
+    def __init__(self, factory, *, mixed_clock_possible: bool = False):
         self._f = factory
+        self._mixed_clock_possible = mixed_clock_possible
         self._past = _Past()
         self.bound: _Bound | None = None
         # Each closed part's atom: the formula its automaton decides, with its past tokens.
@@ -437,6 +450,25 @@ class _Lowerer:
         # Each closed body lowered so far, by object: expansion repeats one body in every
         # branch, and it is lowered once.
         self._closed_atoms: dict[int, tuple[C.Formula, T.Formula]] = {}
+        self._conversation_tick: T.Formula | None = None
+        self.static_tools_by_source: dict[int, T.Formula] = {}
+
+    def conversation_tick(self) -> T.Formula:
+        """One canonical conversation step on a mixed timeline."""
+        if self._conversation_tick is None:
+            self._conversation_tick = T.Or(
+                self._f._on_surface_atom("messages"),
+                self._f._on_surface_atom("tool_calls"),
+            )
+        return self._conversation_tick
+
+    @staticmethod
+    def next_on_clock(body: T.Formula, tick: T.Formula | None) -> T.Formula:
+        return T.Next(T.ClockedEventually(body, 0, tick)) if tick is not None else T.Next(body)
+
+    @staticmethod
+    def weak_next_on_clock(body: T.Formula, tick: T.Formula | None) -> T.Formula:
+        return T.Not(_Lowerer.next_on_clock(T.Not(body), tick))
 
     def root(self, formula: C.Formula) -> T.Formula:
         """Return the root formula."""
@@ -481,6 +513,8 @@ class _Lowerer:
                         kind="any" if q == "exists" else "all",
                         source_start=source_start,
                     )
+                    if src is not None:
+                        self.static_tools_by_source[id(src)] = atom
                     return atom
             case C.ChunkQuant(q, var, collection, body):
                 syntax = cast(ConditionNode, collection)
@@ -523,12 +557,16 @@ class _Lowerer:
             past, self._past = self._past, outer
         defs = tuple(past.defs)
         by_id = {s.atom_id: s for s in self._f.atoms.specs}
-        reads = set(T.atoms_of(formula)).union(*(T.atoms_of(d.operand) for d in defs))
+        reads = set(T.atoms_of(formula)).union(
+            *(T.atoms_of(part) for d in defs for part in (d.operand, d.tick) if part is not None)
+        )
         cost = max(
             (by_id[a].cost for a in reads if a in by_id), key=lambda c: c.rank, default=Cost.PURE
         )
         identity = T.canonical(formula) + "".join(
-            f"|{d.token}={d.op}{d.bound}:{T.canonical(d.operand)}" for d in defs
+            f"|{d.token}={d.op}{d.bound}:{T.canonical(d.operand)}"
+            f":{T.canonical(d.tick) if d.tick is not None else ''}"
+            for d in defs
         )
         spec = self._f._intern_atom(
             make_atom(
@@ -597,8 +635,10 @@ class _Lowerer:
     def gate(self, coll: C.Events | C.AllEvents) -> T.Formula:
         """Return the gate for the collection."""
         if isinstance(coll, C.AllEvents):
-            return T.Or(
-                self._f._on_surface_atom("messages"), self._f._on_surface_atom("tool_calls")
+            return _fold(
+                T.Or,
+                [self._f._on_surface_atom(surface) for surface in coll.surfaces],
+                T.FALSE,
             )
         with self._f._in_window(coll.surface, coll.window, coll.index):
             if coll.name is None:
@@ -638,7 +678,13 @@ class _Lowerer:
             )
 
         reads = [T.Atom(a) for a in T.atoms_of(f)]
-        reads += [T.Atom(a) for d in past for a in T.atoms_of(d.operand)]
+        reads += [
+            T.Atom(a)
+            for d in past
+            for part in (d.operand, d.tick)
+            if part is not None
+            for a in T.atoms_of(part)
+        ]
         if all(static(r) for r in reads):
             return f
 
@@ -711,26 +757,50 @@ class _Lowerer:
         self._require_current(f.anchor.of_var, at)
         lo, hi = f.anchor.lo, f.anchor.hi
         width = None if hi is None else hi - lo
+        # A rule that never reads extension events receives the canonical conversation
+        # word even when its scanner has registered extensions. Keep its original
+        # compact lowering; projected clocks are needed only on a mixed event word.
+        tick = (
+            self.conversation_tick()
+            if f.anchor.clock == "conversation" and self._mixed_clock_possible
+            else None
+        )
         if f.anchor.side == "after":
             if f.q == "exists":
-                reach = T.Eventually(inner) if width is None else T.BoundedEventually(inner, width)
+                reach = (
+                    T.Eventually(inner)
+                    if width is None
+                    else T.ClockedEventually(inner, width, tick)
+                    if tick is not None
+                    else T.BoundedEventually(inner, width)
+                )
             else:
-                reach = T.Globally(inner) if width is None else _bounded_globally(inner, width)
+                reach = (
+                    T.Globally(inner)
+                    if width is None
+                    else T.Not(T.ClockedEventually(T.Not(inner), width, tick))
+                    if tick is not None
+                    else _bounded_globally(inner, width)
+                )
             for _ in range(lo):
-                reach = T.Next(reach) if f.q == "exists" else _weak_next(reach)
+                reach = (
+                    self.next_on_clock(reach, tick)
+                    if f.q == "exists"
+                    else self.weak_next_on_clock(reach, tick)
+                )
             return reach
         # Before the anchor: a past token over a propositional body.
         if not T.is_propositional(inner):
             raise NeedsBinding(f.anchor.of_var)
         if f.q == "exists":
-            reach = self._past.token("O", inner, width)
+            reach = self._past.token("O", inner, width, tick)
         else:
-            reach = T.Not(self._past.token("O", T.Not(inner), width))
+            reach = T.Not(self._past.token("O", T.Not(inner), width, tick))
         for _ in range(lo):
             reach = (
-                self._past.token("Y", reach)
+                self._past.token("Y", reach, tick=tick)
                 if f.q == "exists"
-                else T.Not(self._past.token("Y", T.Not(reach)))
+                else T.Not(self._past.token("Y", T.Not(reach), tick=tick))
             )
         return reach
 
@@ -1130,13 +1200,17 @@ def _bounded_globally(f: T.Formula, bound: int) -> T.Formula:
     return T.Not(T.BoundedEventually(T.Not(f), bound))
 
 
-def _desugar(condition, c):
+def _desugar(condition, c, *, probes_out: list[FlowProbe] | None = None):
     """The rule's strategy-neutral semantic core and the factory that will lower it."""
     explicit = _explicit_capture_var(c, condition)
     if explicit is not None:
         c._reject_capture_outside_positive_existentials(condition, explicit)
         c._capture_var = explicit
-    return c, Desugarer(_Tables(c), value_var=explicit).condition(condition)
+    desugarer = Desugarer(_Tables(c), value_var=explicit)
+    core = desugarer.condition(condition)
+    if probes_out is not None:
+        probes_out.extend(desugarer.flow_probes)
+    return c, core
 
 
 def _execution_core(c, core: C.Formula) -> C.Formula:
@@ -1282,6 +1356,78 @@ def _compile(
         return CompileResult(name, None, diagnostics), False, []
 
 
+def _flow_requirements(
+    c,
+    probes: list[FlowProbe],
+    live_nodes: Mapping[int, tuple[str, ...]],
+    lowerer: _Lowerer,
+) -> tuple[FlowRequirement, ...]:
+    """Lower each live flow operand's own-event test with the rule's atom factory."""
+
+    def tool_only(formula: C.Formula, var: str) -> bool:
+        """A pure per-tool body stays one quantifier through hoisting."""
+        match formula:
+            case C.Const():
+                return True
+            case C.Pred(var=used):
+                return used == var
+            case C.Not(body):
+                return tool_only(body, var)
+            case C.And(parts) | C.Or(parts):
+                return all(tool_only(part, var) for part in parts)
+        return False
+
+    def compiled_tool_only(formula: C.Formula) -> T.Formula | None:
+        if (
+            isinstance(formula, C.ToolsExists)
+            and formula.src is not None
+            and tool_only(formula.body, formula.var)
+        ):
+            return lowerer.static_tools_by_source.get(id(formula.src))
+        return None
+
+    requirements: list[FlowRequirement] = []
+    for probe in probes:
+        source_indices = (
+            c._source_node_indices.get((id(authored), 0))
+            for authored in c._node_aliases.authored(probe.source)
+        )
+        if not any(live_nodes.get(index) for index in source_indices):
+            continue  # e.g. a flow discarded by `true or ...`
+        candidates: list[FlowCandidate] = []
+        for alt in probe.candidates:
+            surface = alt.coll.surface if isinstance(alt, _EventAlt) else alt.surface
+            if isinstance(alt, _ElementAlt):
+                # An enclosing element can carry a capture or join binding. Without its
+                # candidate binding, its mere surface presence is the safe preflight.
+                candidates.append(FlowCandidate(surface, None))
+                continue
+            candidate_lowerer = _Lowerer(c)
+            try:
+                with c._in_window(surface, alt.coll.window, alt.coll.index):
+                    body = candidate_lowerer.lower(alt.body, alt.var)
+                    formula = candidate_lowerer.gated(alt.coll, body)
+                if not T.is_propositional(formula):
+                    formula = None
+            except (DFAConstructionLimit, NeedsBinding, UnsupportedConstruct):
+                formula = None
+            candidates.append(FlowCandidate(surface, formula))
+        static_formula = (
+            compiled_tool_only(probe.static_body) if probe.static_body is not None else None
+        )
+        static_sustained = tuple(
+            formula
+            for body in probe.static_sustained
+            if (formula := compiled_tool_only(body)) is not None
+        )
+        requirements.append(
+            FlowRequirement(
+                tuple(candidates), probe.ambient_surfaces, static_formula, static_sustained
+            )
+        )
+    return tuple(requirements)
+
+
 def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[str, str] | None):
     """One compilation, with ``bind`` decided per candidate when given. Returns the result,
     whether it failed at a construction limit, and the elements a retry may decide per
@@ -1300,6 +1446,11 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
     semantic_core: C.Formula | None = None
     execution: C.Formula | None = None
     lowerer: _Lowerer | None = None
+    extension_events = EVENT_SURFACES.get()
+    mixed_clock_possible = bool(extension_events) and any(
+        isinstance(node, Identifier) and node.name in extension_events
+        for node in walk_condition_nodes(condition)
+    )
 
     def at_limit(exc: DFAConstructionLimit):
         c.diagnostics.error(str(exc), ErrorCategory.UNSUPPORTED, source)
@@ -1318,12 +1469,15 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
         return CompileResult(c.rule_name, None, c.diagnostics), True, retry
 
     try:
+        c.reject_unsupported_extension_state_functions(condition)
+        c.reject_unsupported_extension_state_functions(getattr(rule, "collect", None))
         reject_unguarded_refusal_reads(condition)
-        c, semantic_core = _desugar(condition, c)
+        flow_probes: list[FlowProbe] = []
+        c, semantic_core = _desugar(condition, c, probes_out=flow_probes)
         execution = _execution_core(c, semantic_core)
         split_root = decompose and bind is None and not c._capture_var
         collect_plan = c.compile_collect(rule.collect) if getattr(rule, "collect", None) else None
-        lowerer = _Lowerer(c)
+        lowerer = _Lowerer(c, mixed_clock_possible=mixed_clock_possible)
         try:
             if bind is not None:
                 rebound, coll, own_step = bind_candidate(execution, bind)
@@ -1346,7 +1500,7 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
             c = _Compiler(rule, response_schemas)
             if collect_plan is not None:
                 collect_plan = c.compile_collect(rule.collect)
-            lowerer = _Lowerer(c)
+            lowerer = _Lowerer(c, mixed_clock_possible=mixed_clock_possible)
             rebound, coll, own_step = bind_candidate(execution, need.var)
             lowerer.bind(need.var, coll, own_step)
             try:
@@ -1450,6 +1604,9 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
         },
     )
     node_atom_ids = c.final_node_atom_ids(set(dfa.atoms) | tool_body_atoms | closed_atoms)
+    assert lowerer is not None
+    flow_requirements = _flow_requirements(c, flow_probes, node_atom_ids, lowerer)
+    specs = {s.atom_id: s for s in c.atoms.specs}
     decomposed = (
         split_root
         and bound is None
@@ -1474,6 +1631,7 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
         dfa_hash=dfa_hash(dfa, COMPILER_VERSION),
         atom_specs=specs,
         node_atom_ids=node_atom_ids,
+        flow_requirements=flow_requirements,
         temporal=c.temporal,
         notes=tuple(notes),
         capture_plan=capture_plan,
@@ -1623,6 +1781,8 @@ def _needs_full_trace_proof(
                 return not negative or visit(child, negative)
             case T.Eventually(child):
                 return negative or visit(child, negative)
+            case T.ClockedEventually(child, _, tick):
+                return negative or visit(child, negative) or visit(tick, negative)
             case T.Next(child):
                 return visit(child, negative)
         return False
@@ -1648,7 +1808,10 @@ def _for_domain_analysis(f: T.Formula, past: dict[str, PastDef]) -> T.Formula:
         if not ready:
             pending.append((node, True))
             if isinstance(node, T.Atom) and node.name in past:
-                pending.append((past[node.name].operand, False))
+                definition = past[node.name]
+                pending.append((definition.operand, False))
+                if definition.tick is not None:
+                    pending.append((definition.tick, False))
             else:
                 for fl in fields(node):
                     child = getattr(node, fl.name)
@@ -1658,9 +1821,18 @@ def _for_domain_analysis(f: T.Formula, past: dict[str, PastDef]) -> T.Formula:
         if isinstance(node, T.Atom) and node.name in past:
             definition = past[node.name]
             operand = rewritten[id(definition.operand)][1]
+            if definition.tick is not None:
+                tick = rewritten[id(definition.tick)][1]
+                operand = T.And(tick, operand)
+                if definition.op == "Y":
+                    result = T.Next(T.ClockedEventually(operand, 0, tick))
+                    rewritten[key] = (node, result)
+                    continue
             result = T.Eventually(operand) if definition.op == "O" else T.Next(operand)
         elif isinstance(node, T.BoundedEventually):
             result = T.Eventually(rewritten[id(node.child)][1])
+        elif isinstance(node, T.ClockedEventually):
+            result = T.Eventually(T.And(rewritten[id(node.tick)][1], rewritten[id(node.child)][1]))
         else:
             children = {
                 fl.name: rewritten[id(child)][1]
