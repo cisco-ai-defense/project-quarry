@@ -35,6 +35,8 @@ from dataclasses import dataclass, replace
 from quarry.engine import core as C
 from quarry.engine.budget import charge
 from quarry.engine.diagnostics import UnsupportedConstruct
+from quarry.engine.extension_surfaces import EVENT_SURFACES
+from quarry.language.runtime import surface_names
 from quarry.types.dsl import (
     AllComprehension,
     AnyComprehension,
@@ -103,6 +105,7 @@ class _ElementAlt:
     """A flow operand alternative that is the enclosing element ``element``'s condition."""
 
     element: str
+    surface: str
     body: C.Formula
 
 
@@ -116,6 +119,17 @@ class _ToolsAlt:
 _Alternative = _EventAlt | _ElementAlt | _ToolsAlt
 
 
+@dataclass(frozen=True)
+class FlowProbe:
+    """Operands whose candidates may make a manifest necessary for one flow."""
+
+    source: FlowOp
+    candidates: tuple[_EventAlt | _ElementAlt, ...]
+    ambient_surfaces: tuple[str, ...] = ()
+    static_body: C.Formula | None = None
+    static_sustained: tuple[C.Formula, ...] = ()
+
+
 class Desugarer:
     """Surface syntax to core. ``tables`` answers surface and accessor questions (the
     compiler's collection tables), so this module owns structure only."""
@@ -125,6 +139,7 @@ class Desugarer:
         self._value_var = value_var
         self._fresh = itertools.count()
         self._bound: set[str] = set()
+        self.flow_probes: list[FlowProbe] = []
 
     def fresh(self, stem: str = "e") -> str:
         return f"\x00{stem}{next(self._fresh)}"
@@ -308,12 +323,13 @@ class Desugarer:
             )
         return C.Count(binding.var, binding.coll, body, op, n)
 
-    def flow(self, node: FlowOp, scope) -> C.Formula:
+    def flow(self, node: FlowOp, scope, source: FlowOp | None = None) -> C.Formula:
         """Desugar a flow node into a core formula."""
+        source = source or node
         if self._t.contains_model_call(node):
             raise UnsupportedConstruct("model calls cannot be operands of temporal flow")
         if node.operator == "until":
-            return self.until(node, scope)
+            return self.until(node, scope, source)
         if node.operator != "after":
             raise UnsupportedConstruct(f"flow operator {node.operator!r}")
         lefts, rights = _name_variants(node.left), _name_variants(node.right)
@@ -338,7 +354,9 @@ class Desugarer:
                 + flows * (flows + alternatives) * pair_extra
             )
             return C.conj(
-                self.flow(FlowOp("after", left, right, max_distance=node.max_distance), scope)
+                self.flow(
+                    FlowOp("after", left, right, max_distance=node.max_distance), scope, source
+                )
                 for left in lefts
                 for right in rights
             )
@@ -355,7 +373,33 @@ class Desugarer:
                     and late.element == early.element
                 ):
                     continue  # one event cannot precede itself
-                pairs.append(self._after(late, early, within))
+                surfaces = {
+                    alt.coll.surface if isinstance(alt, _EventAlt) else alt.surface
+                    for alt in (late, early)
+                    if not isinstance(alt, _ToolsAlt)
+                }
+                clock = "conversation" if surfaces <= surface_names(domain="event") else "timeline"
+                if clock == "timeline" and not isinstance(early, _ToolsAlt):
+                    extension = EVENT_SURFACES.get()
+                    conversation = surface_names(domain="event")
+                    if isinstance(late, _ToolsAlt):
+                        if surfaces & extension:
+                            self.flow_probes.append(
+                                FlowProbe(
+                                    source,
+                                    (early,),
+                                    ("messages", "tool_calls"),
+                                    late.body,
+                                )
+                            )
+                    elif surfaces & extension and surfaces & conversation:
+                        self.flow_probes.append(FlowProbe(source, (late, early)))
+                    elif within is not None and surfaces <= extension:
+                        # Conversation items can fall between two extension events.
+                        self.flow_probes.append(
+                            FlowProbe(source, (late, early), ("messages", "tool_calls"))
+                        )
+                pairs.append(self._after(late, early, within, clock))
         if not pairs:
             raise UnsupportedConstruct(
                 "a flow cannot relate an element to itself: both operands read the same "
@@ -363,7 +407,13 @@ class Desugarer:
             )
         return C.disj(pairs)
 
-    def _after(self, late: _Alternative, early: _Alternative, within) -> C.Formula:
+    @staticmethod
+    def _clock_events(clock: str) -> C.AllEvents:
+        if clock == "conversation":
+            return C.AllEvents()
+        return C.AllEvents(tuple(sorted({"messages", "tool_calls"} | EVENT_SURFACES.get())))
+
+    def _after(self, late: _Alternative, early: _Alternative, within, clock: str) -> C.Formula:
         if isinstance(early, _ToolsAlt):
             # A static condition holds at every step from the boot step on, so some step
             # right before every event satisfies it, within any bound.
@@ -377,8 +427,8 @@ class Desugarer:
                         C.Quant(
                             "exists",
                             self.fresh(),
-                            C.AllEvents(),
-                            C.Rel(early.element, "after", 1, within),
+                            self._clock_events(clock),
+                            C.Rel(early.element, "after", 1, within, clock),
                             C.TRUE,
                         ),
                     ]
@@ -396,8 +446,8 @@ class Desugarer:
                         C.Quant(
                             "exists",
                             nxt,
-                            C.AllEvents(),
-                            C.Rel(early.var, "after", 1, within),
+                            self._clock_events(clock),
+                            C.Rel(early.var, "after", 1, within, clock),
                             C.TRUE,
                         ),
                     ]
@@ -406,8 +456,10 @@ class Desugarer:
         if isinstance(late, _ElementAlt):
             if isinstance(early, _ElementAlt):
                 at = self.fresh()
-                anchor = C.Rel(early.element, "after", 1, within)
-                later = C.Quant("exists", at, C.AllEvents(), anchor, C.Same(at, late.element))
+                anchor = C.Rel(early.element, "after", 1, within, clock)
+                later = C.Quant(
+                    "exists", at, self._clock_events(clock), anchor, C.Same(at, late.element)
+                )
                 return C.conj([late.body, early.body, later])
             return C.conj(
                 [
@@ -416,7 +468,7 @@ class Desugarer:
                         "exists",
                         early.var,
                         early.coll,
-                        C.Rel(late.element, "before", 1, within),
+                        C.Rel(late.element, "before", 1, within, clock),
                         early.body,
                     ),
                 ]
@@ -429,7 +481,7 @@ class Desugarer:
                         "exists",
                         late.var,
                         late.coll,
-                        C.Rel(early.element, "after", 1, within),
+                        C.Rel(early.element, "after", 1, within, clock),
                         late.body,
                     ),
                 ]
@@ -446,7 +498,7 @@ class Desugarer:
                         "exists",
                         late.var,
                         late.coll,
-                        C.Rel(early.var, "after", 1, within),
+                        C.Rel(early.var, "after", 1, within, clock),
                         late.body,
                     ),
                 ]
@@ -462,7 +514,7 @@ class Desugarer:
             )
         return C.Quant("exists", alt.var, alt.coll, anchor, alt.body)
 
-    def until(self, node: FlowOp, scope) -> C.Formula:
+    def until(self, node: FlowOp, scope, source: FlowOp | None = None) -> C.Formula:
         """Desugar a until node into a core formula."""
         if node.max_distance is not None:
             raise UnsupportedConstruct("`until` takes no `within` bound")
@@ -475,8 +527,43 @@ class Desugarer:
                 # A static condition that holds, holds at the boot step, before any event:
                 # it releases at once, and nothing needs sustaining.
                 out.append(release.body)
-            elif isinstance(release, _ElementAlt):
-                out.append(C.conj([release.body, self._sustain(sustained, release.element)]))
+                continue
+            release_surface = (
+                release.coll.surface if isinstance(release, _EventAlt) else release.surface
+            )
+            sustained_surfaces = {
+                alt.coll.surface if isinstance(alt, _EventAlt) else alt.surface
+                for alt in sustained
+                if not isinstance(alt, _ToolsAlt)
+            }
+            extension = EVENT_SURFACES.get()
+            conversation = surface_names(domain="event")
+            ambient = (
+                sustained_surfaces & conversation
+                if release_surface in extension
+                else sustained_surfaces & extension
+            )
+            if release_surface in extension and any(
+                isinstance(alt, _ToolsAlt) for alt in sustained
+            ):
+                ambient |= {"messages", "tool_calls"}
+            if ambient:
+                self.flow_probes.append(
+                    FlowProbe(
+                        source or node,
+                        (release,),
+                        tuple(sorted(ambient)),
+                        static_sustained=tuple(
+                            alt.body for alt in sustained if isinstance(alt, _ToolsAlt)
+                        ),
+                    )
+                )
+            if isinstance(release, _ElementAlt):
+                out.append(
+                    C.conj(
+                        [release.body, self._sustain(sustained, release.element, release.surface)]
+                    )
+                )
             else:
                 out.append(
                     C.Quant(
@@ -484,14 +571,38 @@ class Desugarer:
                         release.var,
                         release.coll,
                         None,
-                        C.conj([release.body, self._sustain(sustained, release.var)]),
+                        C.conj(
+                            [
+                                release.body,
+                                self._sustain(sustained, release.var, release.coll.surface),
+                            ]
+                        ),
                     )
                 )
         return C.disj(out)
 
-    def _sustain(self, alternatives: list[_Alternative], release: str) -> C.Formula:
+    def _sustain(
+        self, alternatives: list[_Alternative], release: str, release_surface: str
+    ) -> C.Formula:
         """Every event of the sustained side's kinds before ``release`` satisfies one of its
         alternatives there."""
+        sustained_surfaces = {
+            alt.coll.surface if isinstance(alt, _EventAlt) else alt.surface
+            for alt in alternatives
+            if not isinstance(alt, _ToolsAlt)
+        }
+        # A static sustained condition may fail at any step of a mixed flow; event
+        # conditions need only their own surfaces because other kinds are vacuous.
+        mixed = release_surface not in surface_names(domain="event") or bool(
+            sustained_surfaces & EVENT_SURFACES.get()
+        )
+        if any(isinstance(alt, _ToolsAlt) for alt in alternatives):
+            event_surfaces = {"messages", "tool_calls"}
+            if mixed:
+                event_surfaces.update(EVENT_SURFACES.get())
+        else:
+            # Other event kinds are vacuous for an event-specific sustained side.
+            event_surfaces = sustained_surfaces
         a = self.fresh("s")
         gates, holds = [], []
         for alt in alternatives:
@@ -507,7 +618,13 @@ class Desugarer:
                 gates.append(gate)
                 holds.append(C.conj([gate, rename(alt.body, alt.var, a)]))
         body = C.disj([C.neg(C.disj(gates)), C.disj(holds)])
-        return C.Quant("forall", a, C.AllEvents(), C.Rel(release, "before", 1, None), body)
+        return C.Quant(
+            "forall",
+            a,
+            C.AllEvents(tuple(sorted(event_surfaces))),
+            C.Rel(release, "before", 1, None),
+            body,
+        )
 
     def alternatives(self, node, scope, *, sustained: bool) -> list[_Alternative]:
         """The alternatives an operand holds at: split at top-level ``or``."""
@@ -554,7 +671,7 @@ class Desugarer:
                     f"a boolean flow operand can only test the element `{name}`; move other "
                     "conditions beside the flow"
                 )
-            return [_ElementAlt(var, body)]
+            return [_ElementAlt(var, _lookup(scope, name).surface, body)]
         raise UnsupportedConstruct(
             "a flow operand is one event: a condition on the enclosing element, an `any` "
             "comprehension, a fact such as called_tool(...), or an `or` of these"
@@ -736,7 +853,7 @@ def rename(formula: C.Formula, old: str, new: str) -> C.Formula:
             if var == old:
                 return formula
             anchor = (
-                C.Rel(new, anchor.side, anchor.lo, anchor.hi)
+                C.Rel(new, anchor.side, anchor.lo, anchor.hi, anchor.clock)
                 if anchor is not None and anchor.of_var == old
                 else anchor
             )
@@ -978,12 +1095,18 @@ def _rebind(f: C.Formula, var: str) -> C.Formula:
     match f:
         case C.Same(a, of_var) if of_var == var:
             return C.AtCandidate(a)
-        case C.Quant(q, y, coll, C.Rel(of_var, "before", lo, hi), body) if (
+        case C.Quant(q, y, coll, C.Rel(of_var, "before", lo, hi, clock), body) if (
             of_var == var and not _local(body, y)
         ):
             # `y` before the candidate, related to it from `y`'s side: closed in `var`.
             z = f"\x00at{y}"
-            later = C.Quant("exists", z, C.AllEvents(), C.Rel(y, "after", lo, hi), C.AtCandidate(z))
+            later = C.Quant(
+                "exists",
+                z,
+                Desugarer._clock_events(clock),
+                C.Rel(y, "after", lo, hi, clock),
+                C.AtCandidate(z),
+            )
             inner = _rebind(body, var)
             body = C.conj([later, inner]) if q == "exists" else C.disj([C.neg(later), inner])
             return C.Quant(q, y, coll, None, body)

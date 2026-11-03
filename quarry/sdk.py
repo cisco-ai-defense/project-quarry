@@ -54,7 +54,15 @@ class QuarryGuard:
         if not self.scanner.loaded_rules:
             raise ValueError("No rules loaded")
 
-    def scan(self, conversation: dict[str, Any]) -> list[dict[str, Any]]:
+    def scan(
+        self,
+        conversation: dict[str, Any] | None,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        extension_state: dict[str, Any] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
+        rules_subset: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Synchronously scan a conversation and return authoritative matches.
 
         Fails closed: an invalid conversation or an incomplete scan (a rule that errored,
@@ -70,19 +78,43 @@ class QuarryGuard:
                 "await QuarryGuard.scan_async() instead"
             )
 
-        self._validate_conversation_type(conversation)
-        result = self.scanner.scan_data(conversation)
+        self._validate_conversation_type(
+            conversation, extension_input=events is not None or extension_state is not None
+        )
+        result = self.scanner.scan_data(
+            conversation,
+            rules_subset=rules_subset,
+            events=events,
+            extension_state=extension_state,
+            timeline=timeline,
+        )
         return self._matches_from_complete_result(result)
 
-    async def scan_async(self, conversation: dict[str, Any]) -> list[dict[str, Any]]:
+    async def scan_async(
+        self,
+        conversation: dict[str, Any] | None,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        extension_state: dict[str, Any] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
+        rules_subset: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Asynchronously scan a conversation and return authoritative matches."""
-        self._validate_conversation_type(conversation)
-        result = await self.scanner.scan_data_async(conversation)
+        self._validate_conversation_type(
+            conversation, extension_input=events is not None or extension_state is not None
+        )
+        result = await self.scanner.scan_data_async(
+            conversation,
+            rules_subset=rules_subset,
+            events=events,
+            extension_state=extension_state,
+            timeline=timeline,
+        )
         return self._matches_from_complete_result(result)
 
     @staticmethod
-    def _validate_conversation_type(conversation: Any) -> None:
-        if not isinstance(conversation, dict):
+    def _validate_conversation_type(conversation: Any, *, extension_input: bool = False) -> None:
+        if not isinstance(conversation, dict) and not (conversation is None and extension_input):
             raise ConversationValidationError(
                 f"Expected conversation dictionary, got {type(conversation).__name__}"
             )

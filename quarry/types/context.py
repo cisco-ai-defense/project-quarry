@@ -135,6 +135,12 @@ class ScanContext:
         self.tool_call_types = Messages.validate_tool_call_types(tool_call_types)
         self.parameters = parameters or {}
         self.parameter_specs = parameter_specs or {}
+        # Scanner-local facts from trusted, registered extension schemas.
+        self.extension_event_surfaces: dict[str, tuple[Any, ...]] = {}
+        self.extension_event_sequence: tuple[Any, ...] = ()
+        self.extension_state_values: dict[str, Any] = {}
+        self.missing_extension_states: frozenset[str] = frozenset()
+        self.ordered_timeline: list[tuple[int, Any]] | None = None
         if limits is None and resource_manager and hasattr(resource_manager, "config"):
             self.limits = resource_manager.config.get_safety_limits()
         else:
@@ -322,6 +328,11 @@ class ScanContext:
         new_ctx.tool_call_types = self.tool_call_types
         new_ctx.parameters = self.parameters
         new_ctx.parameter_specs = self.parameter_specs
+        new_ctx.extension_event_surfaces = self.extension_event_surfaces
+        new_ctx.extension_event_sequence = self.extension_event_sequence
+        new_ctx.extension_state_values = self.extension_state_values
+        new_ctx.missing_extension_states = self.missing_extension_states
+        new_ctx.ordered_timeline = self.ordered_timeline
         new_ctx.evaluation_warnings = []
         new_ctx.map_filter_results = {}
         return new_ctx

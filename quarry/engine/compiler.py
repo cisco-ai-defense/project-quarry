@@ -60,6 +60,7 @@ from quarry.engine.diagnostics import (
     SourceRef,
     UnsupportedConstruct,
 )
+from quarry.engine.extension_surfaces import EVENT_SURFACES, STATIC_SURFACES
 from quarry.language.metadata import TYPE_CONVERSIONS, DSLParameter, Use, dsl_compiler_form
 from quarry.language.runtime import (
     LanguageSpecError,
@@ -188,12 +189,12 @@ def _chunk_scalar_shapes() -> dict[str, dict[str, int | bool]]:
     return shapes
 
 
-_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event"))
-_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static"))
+_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event") | EVENT_SURFACES.get())
+_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static") | STATIC_SURFACES.get())
 # Surfaces valid as a Messages-typed model-input selection (no tools). ``tool_calls`` is
 # excluded — it is a collection of ToolCall objects, not a message transcript.
 _MODEL_INPUT_SURFACES = _LazySet(lambda: surface_names(model_input=True))
-_SURFACES = _LazySet(surface_names)
+_SURFACES = _LazySet(lambda: surface_names() | EVENT_SURFACES.get() | STATIC_SURFACES.get())
 
 # Role-view accessors valid as a model-input selection filter step (everything in
 # _MODEL_INPUT_SURFACES except the whole-transcript ``messages`` root).
@@ -647,6 +648,11 @@ class _Compiler:
         scope = Scope()
         if not self._contains_model_call(node):
             self._reject_model_text_forms(node)
+        if isinstance(node, BinaryOp) and node.operator in _COMPARISONS | _CONTENT_OPS:
+            for operand in (node.left, node.right):
+                if surface := self._extension_static_field_surface(operand):
+                    self.has_static = True
+                    return self.compile_step(node, surface, scope)
         # Chunked scoring, both forms. The collection is a function result rather than a
         # timeline surface. Each desugars to ONE folded atom.
         #   quantifier:  any/all <c> in llm_split_conversation(...) where <scalar>(…, <c>) <op> n
@@ -1154,6 +1160,61 @@ class _Compiler:
                     if resolved is not None and resolved[0] in _EVENT_SURFACES:
                         return resolved[0]
         return None
+
+    @staticmethod
+    def _extension_static_field_surface(node) -> str | None:
+        """Find a registered state root through fields and literal subscripts."""
+        base = node
+        while True:
+            if isinstance(base, Identifier):
+                return base.name if base.name in STATIC_SURFACES.get() else None
+            if isinstance(base, FieldAccess):
+                base = base.base
+            elif isinstance(base, FunctionCall) and base.name in {"_index", "_slice"}:
+                base = base.args[0]
+            else:
+                return None
+
+    def reject_unsupported_extension_state_functions(self, node) -> None:
+        """Reject function reads whose existing lowering would bind state to an event.
+
+        ``len`` and ``count`` currently measure text, so applying them to arbitrary
+        JSON state (including arrays) would also give misleading results. Direct
+        scalar state comparisons and content predicates remain supported.
+        """
+        if not STATIC_SURFACES.get() or node is None:
+            return
+
+        def state_root(expression) -> str | None:
+            for part in walk_condition_nodes(expression):
+                if surface := self._extension_static_field_surface(part):
+                    return surface
+            return None
+
+        external_names = set(_EXTERNAL_FUNCS)
+        for expression in walk_condition_nodes(node):
+            if isinstance(expression, FunctionCall) and expression.name in {"len", "count"}:
+                if expression.args and (
+                    surface := self._extension_static_field_surface(expression.args[0])
+                ):
+                    raise UnsupportedConstruct(
+                        f"{expression.name}() cannot read registered extension state "
+                        f"{surface}; compare a scalar state field directly"
+                    )
+            elif isinstance(expression, FunctionCall) and expression.name in external_names:
+                for argument in expression.args:
+                    if surface := state_root(argument):
+                        raise UnsupportedConstruct(
+                            f"{expression.name}() cannot read registered extension state "
+                            f"{surface}; compare a scalar state field directly"
+                        )
+            elif isinstance(expression, ModelCall):
+                for argument in expression.args:
+                    if surface := state_root(argument):
+                        raise UnsupportedConstruct(
+                            f"model().{expression.operation}() cannot read registered "
+                            f"extension state {surface}; compare a scalar state field directly"
+                        )
 
     @staticmethod
     def _static_field_surface(node) -> str | None:

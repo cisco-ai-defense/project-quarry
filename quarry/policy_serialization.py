@@ -116,9 +116,9 @@ _ARTIFACT_KEYS = _wire_fields(
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
     "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions "
     "full_trace_proof decision_tree",
-    # Source provenance serves compile-time visualization of the authored AST, which a
-    # loaded policy does not carry.
-    unserialized="node_atom_ids",
+    # Source provenance and extension flow requirements are compile-time-only.
+    # Compiled policies do not register or scan extension inputs.
+    unserialized="node_atom_ids flow_requirements",
 )
 _TOOL_QUANTIFIER_FIELDS = _wire_fields(ToolQuantifierPlan, "body kind body_source_nodes")
 _CLOSED_PLAN_FIELDS = _wire_fields(ClosedPlan, "dfa")

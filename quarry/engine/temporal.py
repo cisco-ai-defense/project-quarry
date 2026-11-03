@@ -137,6 +137,20 @@ class BoundedEventually:
 
 
 @dataclass(frozen=True)
+class ClockedEventually:
+    """Find ``child`` at one of the next ``bound + 1`` steps selected by ``tick``.
+
+    Steps where ``tick`` is false do not consume the bound. This keeps conversation-only
+    ``within:N`` flows stable when extension events occur on the same event word, without
+    expanding a large bound into a deeply nested formula.
+    """
+
+    child: Formula
+    bound: int
+    tick: Formula
+
+
+@dataclass(frozen=True)
 class Globally:
     """G(phi) — phi must hold at every point from now until end of trace."""
 
@@ -163,6 +177,7 @@ Formula = (
     | Next
     | Eventually
     | BoundedEventually
+    | ClockedEventually
     | Globally
     | Until
 )
@@ -239,6 +254,15 @@ def simplify(f: Formula) -> Formula:
             if sc is child:
                 return f
             return sc if isinstance(sc, (TrueConst, FalseConst)) else BoundedEventually(sc, bound)
+        case ClockedEventually(child, bound, tick):
+            sc, st = simplify(child), simplify(tick)
+            if isinstance(sc, FalseConst) or isinstance(st, FalseConst):
+                return FALSE
+            if isinstance(st, TrueConst):
+                return simplify(BoundedEventually(sc, bound))
+            if sc is child and st is tick:
+                return f
+            return ClockedEventually(sc, bound, st)
         case Globally(TrueConst()):
             return TRUE
         case Globally(FalseConst()):
@@ -358,6 +382,8 @@ def _merge_next_uncached(f: Formula, memo: dict[int, tuple[Formula, Formula]]) -
             return Eventually(merge_next(child))
         case BoundedEventually(child, bound):
             return BoundedEventually(merge_next(child), bound)
+        case ClockedEventually(child, bound, tick):
+            return ClockedEventually(merge_next(child), bound, merge_next(tick))
         case Globally(child):
             return Globally(merge_next(child))
         case Until(left, right):
@@ -373,29 +399,37 @@ def _merge_windows(is_or: bool, parts: list[Formula]) -> list[Formula]:
     window leaves one shorter window per pending start, so this keeps the residual count
     linear in ``N``."""
 
-    def window(part: Formula) -> BoundedEventually | None:
+    def window(part: Formula) -> BoundedEventually | ClockedEventually | None:
         inner = part if is_or else (part.child if isinstance(part, Not) else None)
-        return inner if isinstance(inner, BoundedEventually) else None
+        return inner if isinstance(inner, (BoundedEventually, ClockedEventually)) else None
+
+    def window_key(w: BoundedEventually | ClockedEventually) -> tuple[str, str, str]:
+        tick = _norm_repr(w.tick) if isinstance(w, ClockedEventually) else ""
+        return type(w).__name__, tick, _norm_repr(w.child)
 
     unbounded = {_norm_repr(p.child) for p in parts if is_or and isinstance(p, Eventually)}
-    longest: dict[str, int] = {}
+    longest: dict[tuple[str, str, str], int] = {}
     for part in parts:
         w = window(part)
         if w is not None:
-            key = _norm_repr(w.child)
+            key = window_key(w)
             longest[key] = max(longest.get(key, 0), w.bound)
     merged: list[Formula] = []
-    emitted: set[str] = set()
+    emitted: set[tuple[str, str, str]] = set()
     for part in parts:
         w = window(part)
         if w is None:
             merged.append(part)
             continue
-        key = _norm_repr(w.child)
-        if key in unbounded or key in emitted:
+        key = window_key(w)
+        if (isinstance(w, BoundedEventually) and key[2] in unbounded) or key in emitted:
             continue
         emitted.add(key)
-        widest = BoundedEventually(w.child, longest[key])
+        widest = (
+            BoundedEventually(w.child, longest[key])
+            if isinstance(w, BoundedEventually)
+            else ClockedEventually(w.child, longest[key], w.tick)
+        )
         merged.append(widest if is_or else Not(widest))
     return merged
 
@@ -490,6 +524,17 @@ def progress(formula: Formula, valuation: dict[str, bool], is_last: bool) -> For
             if is_last or bound == 0:
                 return now
             return Or(now, BoundedEventually(child, bound - 1))
+        case ClockedEventually(child, bound, tick):
+            selected = progress(tick, valuation, is_last)
+            now = progress(child, valuation, is_last)
+            if is_last:
+                return And(selected, now)
+            if bound == 0:
+                return Or(And(selected, now), And(Not(selected), formula))
+            return Or(
+                And(selected, Or(now, ClockedEventually(child, bound - 1, tick))),
+                And(Not(selected), formula),
+            )
         case Globally(child):
             # G(phi) = phi AND (last OR X(G(phi)))
             now = progress(child, valuation, is_last)
@@ -586,6 +631,15 @@ def step_skeleton(formula: Formula, is_last: bool) -> Formula:
             case BoundedEventually(c, bound):
                 # F≤k(phi) = phi OR (not_last AND X F≤k-1(phi)); F≤0(phi) = phi
                 return now(c) if is_last or bound == 0 else Or(now(c), token())
+            case ClockedEventually(c, bound, tick):
+                selected = now(tick)
+                if is_last:
+                    return And(selected, now(c))
+                # There are two different carried states: keep the current bound on an
+                # unrelated step, consume one selected step when a match did not occur.
+                if bound == 0:
+                    return Or(And(selected, now(c)), And(Not(selected), token()))
+                return Or(And(selected, Or(now(c), token())), And(Not(selected), token()))
             case Globally(c):
                 # G(phi) = phi AND (last OR X G(phi))
                 return now(c) if is_last else And(now(c), token())
@@ -639,6 +693,9 @@ def atoms_of(formula: Formula) -> list[str]:
                 | Globally(child)
             ):
                 walk(child)
+            case ClockedEventually(child, _, tick):
+                walk(tick)
+                walk(child)
             case And(l, r) | Or(l, r) | Implies(l, r) | Until(l, r):
                 walk(l)
                 walk(r)
@@ -670,6 +727,9 @@ def branch_atoms(formula: Formula) -> list[str]:
             case Next(_):
                 return
             case Not(child) | Eventually(child) | BoundedEventually(child, _) | Globally(child):
+                walk(child)
+            case ClockedEventually(child, _, tick):
+                walk(tick)
                 walk(child)
             case And(l, r) | Or(l, r) | Implies(l, r) | Until(l, r):
                 walk(l)
@@ -718,6 +778,8 @@ def _norm_repr(f: Formula) -> str:
             return f"F({_norm_repr(child)})"
         case BoundedEventually(child, bound):
             return f"F<={bound}({_norm_repr(child)})"
+        case ClockedEventually(child, bound, tick):
+            return f"FC<={bound}({_norm_repr(tick)},{_norm_repr(child)})"
         case Globally(child):
             return f"G({_norm_repr(child)})"
         case Until(l, r):
