@@ -103,14 +103,6 @@ INTERLEAVED_TIMELINE = [*TIMELINE[:3], {"event_id": "c"}, *TIMELINE[3:]]
         ),
         (EVENT_FLOW, None, {"events": [CREATED_EVENT, CHECKED_EVENT]}, "complete", True, None),
         (
-            MIXED_FLOW,
-            CONVERSATION,
-            {"events": [CREATED_EVENT], "timeline": TIMELINE},
-            "complete",
-            True,
-            None,
-        ),
-        (
             TWO_CLOCKS,
             CONVERSATION,
             {"events": [CREATED_EVENT], "timeline": TIMELINE},

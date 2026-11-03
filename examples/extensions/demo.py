@@ -14,30 +14,52 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run two independent Quarry extension domains without external services."""
+"""Register two unrelated domains and scan their JSON facts."""
 
-from pathlib import Path
+from typing import Literal
 
-from examples.extensions.memory_extension import confirmed_write_event
-from examples.extensions.memory_extension import extension as memory_extension
-from examples.extensions.sandbox_extension import extension as sandbox_extension
-from examples.extensions.sandbox_extension import file_read_event
-from quarry import DSLScanner
+from pydantic import BaseModel, ConfigDict
+
+from quarry import DSLScanner, ExtensionSpec
 from quarry.config import QuarryConfig
 
-RULES = Path(__file__).resolve().parent
+
+class MemoryWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+    key: str
+    source_tool: str | None = None
+
+
+class FileRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+    allowed: bool
+
+
+class SandboxPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+    mode: Literal["observe", "enforce"] = "enforce"
+
+
+MEMORY_RULE = """rule "Memory write after tool A"
+condition:
+    (any write in memory.write_committed where write.payload.source_tool == "tool_a")
+    right_after
+    called_tool("tool_a")"""
+
+SANDBOX_RULE = '''rule "Sandbox denied file read"
+condition:
+    any read in sandbox.file_read where
+        read.payload.allowed == false and sandbox.state.mode == "enforce"'''
 
 
 def run_demo() -> tuple[list[str], list[str]]:
     scanner = DSLScanner(
-        QuarryConfig(
-            config_version=2,
-            quarry_rule_texts=tuple(
-                (RULES / name).read_text(encoding="utf-8")
-                for name in ("memory.dsl", "memory_temporal.dsl", "sandbox.dsl")
-            ),
-        ),
-        extensions=[memory_extension, sandbox_extension],
+        QuarryConfig(config_version=2, quarry_rule_texts=(MEMORY_RULE, SANDBOX_RULE)),
+        extensions=[
+            ExtensionSpec("memory", {"write_committed": MemoryWrite}),
+            ExtensionSpec("sandbox", {"file_read": FileRead}, state=SandboxPolicy),
+        ],
     )
 
     conversation = {
@@ -56,14 +78,12 @@ def run_demo() -> tuple[list[str], list[str]]:
             {"role": "tool", "tool_call_id": "call-7", "content": "done"},
         ]
     }
-    memory_event = confirmed_write_event(
-        event_id="write-1",
-        run_id="run-1",
-        namespace=["demo"],
-        key="preference",
-        tool_call_id="call-7",
-        source_tool="tool_a",
-    )
+    memory_event = {
+        "id": "write-1",
+        "type": "memory.write_committed",
+        "run_id": "run-1",
+        "payload": {"key": "preference", "source_tool": "tool_a"},
+    }
     timeline = [
         {"message_index": 0},
         {"message_index": 1},
@@ -75,19 +95,16 @@ def run_demo() -> tuple[list[str], list[str]]:
         conversation,
         events=[memory_event],
         timeline=timeline,
-        rules_subset={
-            "Tool A committed persistent memory",
-            "Confirmed memory write immediately after tool A",
-        },
+        rules_subset={"Memory write after tool A"},
     )
     memory_result.raise_for_status()
 
-    sandbox_event = file_read_event(
-        event_id="read-1",
-        run_id="run-2",
-        path="/workspace/blocked.txt",
-        allowed=False,
-    )
+    sandbox_event = {
+        "id": "read-1",
+        "type": "sandbox.file_read",
+        "run_id": "run-2",
+        "payload": {"path": "/workspace/blocked.txt", "allowed": False},
+    }
     sandbox_result = scanner.scan_data(
         None,
         events=[sandbox_event],

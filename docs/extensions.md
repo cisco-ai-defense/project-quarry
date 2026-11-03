@@ -100,7 +100,7 @@ An omitted manifest makes a possible cross-source flow incomplete; a malformed m
 
 `events=None` means the host did not supply a complete extension event feed; `events=[]` means it observed an empty one. Likewise, `conversation=None` means the host did not supply a conversation. Rules that depend on an absent source are skipped and make the scan incomplete. When scanning just one domain, select its rules with `rules_subset`. Check `ScanResult.raise_for_status()` before acting on matches. Invalid event types, duplicate IDs, malformed payloads, or bad state fail the scan.
 
-See the [runnable memory and sandbox examples](../examples/extensions/README.md). They show separate adapters, one mixed-source flow, and an event-only scan without model calls or network access.
+Run `uv run --frozen python examples/extensions/demo.py` from the repository root. The [example](../examples/extensions/demo.py) registers two domains, scans a mixed-source flow, and scans a standalone event without external services.
 
 ## Integrate from a host SDK
 

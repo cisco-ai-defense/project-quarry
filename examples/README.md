@@ -69,7 +69,7 @@ scan with `-t examples/data/` also completes and exits `1` because it finds matc
 
 [`parameters/`](parameters/) shows policy-bound and scan-bound values.
 [`model-inference/`](model-inference/) shows how to register a model adapter.
-[`extensions/`](extensions/) shows how to register external event and state schemas.
-These examples use local adapters and require no credentials. The generated
+[`extensions/demo.py`](extensions/demo.py) shows how to register external event and state schemas.
+These examples require no credentials. The generated
 [language examples](../quarry/language/examples/) cover more compiler forms and
 link to the [language reference](../quarry/language/reference.md).
