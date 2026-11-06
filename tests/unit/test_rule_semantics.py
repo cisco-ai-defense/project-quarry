@@ -1766,6 +1766,29 @@ _ADMIN_TOOL = 'system_prompt contains "admin" and has_tool("execute_command")'
             "escaped-literal-not-raw",
             header='strings:\n    $needle = "line\\nnext"\n',
         ),
+        # A regex declaration reaches RE2 as written: `\d` is a digit class, and a doubled
+        # backslash matches a literal backslash.
+        _case(
+            "any msg in messages where $needle in msg.content",
+            [_u("a1b")],
+            "match",
+            "regex-declaration-not-decoded",
+            header='strings:\n    $needle = "a\\db" regex\n',
+        ),
+        _case(
+            "any msg in messages where $needle in msg.content",
+            [_u("a1b")],
+            "clean",
+            "regex-doubled-backslash-not-digit",
+            header='strings:\n    $needle = "a\\\\db" regex\n',
+        ),
+        _case(
+            "any msg in messages where $needle in msg.content",
+            [_u("a\\db")],
+            "match",
+            "regex-doubled-backslash-is-literal",
+            header='strings:\n    $needle = "a\\\\db" regex\n',
+        ),
         # `all of` requires every listed pattern.
         _case(
             "any m in user_messages where all of ($alpha, $zulu) in m.content",
