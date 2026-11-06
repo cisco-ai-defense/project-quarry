@@ -53,13 +53,15 @@ work before it reaches you.
 - `subjects/<name>/` is one desk per subject: `FACTS.md`, `RULES.md`, `checks/`,
   `references/`, `jobs/`, and `subject.yaml` (which library checks it uses).
 - `pending-rules.md` holds rules waiting for your OK. Nothing in it is enforced yet.
-- `rejections/` will hold rejected attempts, one folder per session (phase 2). Only you
-  delete from it.
+- `rejections/` holds rejected tries, one folder per session. Only you delete from it
+  (`keeper rejections forget`).
+- `bases/<kind>/BASIS.md` is the best liked result for each kind of job (the ghost lap).
 - `log/` holds one file per day with every check the Keeper ran.
 - `INDEX.md` is rebuilt by the Keeper. Don't edit it by hand.
 
 Standing rules (always on, every subject): no plain HTTP, no secrets in output, no orders
-hidden in tool results, nothing sent outside without your OK.
+hidden in tool results, nothing sent outside without your OK, and no agent deleting the
+Keeper's memory.
 """
 
 _PENDING_MD = """# Pending rules
@@ -74,7 +76,7 @@ _REJECTIONS_MD = """# Rejections
 
 One folder per session, named `<date>-<session-name>`, one small file per rejected
 attempt. Delete a file, a few files, or a whole folder to clear old wrong turns.
-Agents never delete anything here. (Filled in phase 2.)
+Agents never delete anything here.
 """
 
 
@@ -82,7 +84,7 @@ def init_root(root: Path) -> Path:
     """Create a Keeper folder. Safe to run again: existing files are left alone."""
 
     root = root.expanduser().resolve()
-    for folder in ("subjects", "rejections", "log"):
+    for folder in ("subjects", "rejections", "bases", "log"):
         (root / folder).mkdir(parents=True, exist_ok=True)
     _write_once(root / "KEEPER.md", _KEEPER_MD)
     _write_once(root / "pending-rules.md", _PENDING_MD)

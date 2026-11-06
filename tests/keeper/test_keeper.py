@@ -59,7 +59,7 @@ def test_clean_conversation_passes(root: Path) -> None:
     report = check(root, "plain", convo({"role": "assistant", "content": "All done."}))
     assert report.verdict == "PASS"
     assert report.exit_code == 0
-    assert len(report.rules_loaded) == 4
+    assert len(report.rules_loaded) == 5
 
 
 def test_plain_http_in_reply_stops(root: Path) -> None:

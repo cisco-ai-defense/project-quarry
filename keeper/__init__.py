@@ -1,7 +1,8 @@
 """The Keeper: a guard and organizing system for AI agents, built on the Quarry engine.
 
 Phase 1: subjects (one desk per subject), standing rules, a library of opt-in checks,
-and a guard that checks a conversation and fails closed with an alert. Offline only.
+and a guard that checks a conversation and fails closed with an alert.
+Phase 2: the logbook (job steps, SUCCESS files, rejections, ghost lap). Offline only.
 """
 
 from keeper.guard import CheckReport, check, check_file
