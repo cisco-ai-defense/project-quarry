@@ -26,6 +26,8 @@ strings:
     $email = "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+" regex
 ```
 
+Backslashes work differently in the two kinds of declaration. Quarry decodes escapes in a literal, so `"line\nnext"` matches a line break. A `regex` declaration reaches RE2 as written, so write `"\d+"` for digits. A doubled backslash, as in `"\\d"`, matches a literal backslash followed by `d`, and the rule still loads.
+
 Quarry uses RE2 to avoid backtracking blowups. RE2 does not support lookbehind or backreferences. Rules must use regex forms the parser, validator, and compiler accept. Invalid declared patterns fail while rules load. For inline or computed patterns, test the exact rule and input shape; unsupported expressions fail closed rather than switching to another regex engine.
 
 Use `as` to capture a matched substring for a later condition:
