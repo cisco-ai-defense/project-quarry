@@ -59,7 +59,8 @@ class Modifiers:
     Semantics:
       - ``base64`` re-encodes the *pattern* to its base64 form before matching.
       - ``regex`` treats the (post-base64) pattern as a regex, unescaped.
-      - ``fullword`` escapes the pattern and wraps it in ``\\b…\\b`` (implies regex).
+      - ``fullword`` escapes the pattern and requires that no word character touches
+        either end of the match (implies regex; see :func:`fullword_pattern`).
       - ``nocase`` folds case (regex: ``re.IGNORECASE``; literal: lowercase both sides).
     """
 
@@ -137,6 +138,24 @@ class RegexBackend:
 PURE_REGEX = RegexBackend()
 
 
+_ASCII_WORD_CHAR = re.compile(r"[A-Za-z0-9_]")
+
+
+def _edge_assertion(char: str) -> str:
+    """``\\b`` beside a word character, ``\\B`` beside any other character.
+
+    A plain ``\\b`` next to a non-word character asks for a word character on the other
+    side, the opposite of a whole-word match: ``\\b--force\\b`` only matches inside
+    ``x--forcey``. Word characters are ASCII, as in RE2's ``\\b`` and ``\\B``."""
+    return r"\b" if _ASCII_WORD_CHAR.fullmatch(char) else r"\B"
+
+
+def fullword_pattern(literal: str) -> str:
+    """Regex for a non-empty ``literal`` as a whole word, with no word character directly
+    before or after it. Uses only ``\\b`` and ``\\B`` (no lookaround), so RE2 accepts it."""
+    return f"{_edge_assertion(literal[0])}{re.escape(literal)}{_edge_assertion(literal[-1])}"
+
+
 def apply_modifiers(pattern: str, mods: Modifiers = NO_MODS) -> tuple[str, bool]:
     """Return ``(effective_pattern, use_regex)`` — the exact transform quarry applies.
 
@@ -148,8 +167,8 @@ def apply_modifiers(pattern: str, mods: Modifiers = NO_MODS) -> tuple[str, bool]
         modified = _base64.b64encode(pattern.encode()).decode()
     if mods.regex:
         return modified, True
-    if mods.fullword:
-        return rf"\b{re.escape(modified)}\b", True
+    if mods.fullword and modified:
+        return fullword_pattern(modified), True
     return modified, False
 
 

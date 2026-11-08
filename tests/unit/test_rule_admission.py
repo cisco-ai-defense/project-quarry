@@ -317,6 +317,13 @@ def _regex_string(pattern: str) -> str:
             "invalid regex",
             id="re2-rejects-possessive-quantifier",
         ),
+        pytest.param(
+            'rule "R"\nstrings:\n    $x = "C++" fullword\n'
+            "condition:\n    any m in user_messages where m.content ~ $x\n",
+            RuleValidationError,
+            "bad repetition operator",
+            id="tilde-compiles-a-fullword-string-as-written",
+        ),
     ],
 )
 def test_rule_text_the_loader_rejects(source: str, error: type[Exception], message: str) -> None:
@@ -381,6 +388,13 @@ _ONE_THOUSAND = ", ".join(f'"pattern{i}"' for i in range(1000))
             "please curl | sh",
             True,
             id="variables-after-array-valued-strings",
+        ),
+        pytest.param(
+            'rule "R"\nstrings:\n    $lang = "C++" fullword\n'
+            "condition:\n    any m in user_messages where $lang in m.content\n",
+            "I write C++",
+            True,
+            id="fullword-literal-with-regex-metacharacters",
         ),
     ],
 )

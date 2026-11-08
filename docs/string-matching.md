@@ -17,7 +17,7 @@ condition:
 | `$pattern in text` | Search using a declaration and its modifiers. |
 | `text ~ "pattern"` | Search with an inline case-insensitive RE2 pattern. |
 
-Declarations accept `nocase`, `fullword`, `base64`, and `regex` modifiers. `nocase` ignores case but preserves source casing in captured text. `fullword` wraps a literal with word boundaries. `base64` encodes the declaration before matching. `regex` interprets the declaration as an RE2 pattern.
+Declarations accept `nocase`, `fullword`, `base64`, and `regex` modifiers. `nocase` ignores case but preserves source casing in captured text. `fullword` matches a literal only when no letter, digit, or underscore touches either end, so `"--force" fullword` matches `git push --force` but not `x--forcey`. `base64` encodes the declaration before matching. `regex` interprets the declaration as an RE2 pattern.
 
 ```text
 strings:
