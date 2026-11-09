@@ -69,6 +69,6 @@ scan with `-t examples/data/` also completes and exits `1` because it finds matc
 
 [`parameters/`](parameters/) shows policy-bound and scan-bound values.
 [`model-inference/`](model-inference/) shows how to register a model adapter.
-Both use a local adapter and require no credentials. The generated
+These examples require no credentials. The generated
 [language examples](../quarry/language/examples/) cover more compiler forms and
 link to the [language reference](../quarry/language/reference.md).
