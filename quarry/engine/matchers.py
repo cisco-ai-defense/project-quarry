@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import base64 as _base64
 import re
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -191,20 +192,45 @@ def match_regex(
     )
 
 
+def _literal_span(text: str, literal: str, nocase: bool) -> tuple[int, int] | None:
+    """Span of the first occurrence of ``literal`` in ``text``, as indices into ``text``.
+
+    ``nocase`` searches ``text.lower()`` for ``literal.lower()``. Lower-casing can turn one
+    character into several (``"İ".lower()`` is two code points), so an index into the
+    lowered text is mapped back to the original character that produced it.
+    """
+    if not nocase:
+        pos = text.find(literal)
+        return (pos, pos + len(literal)) if pos != -1 else None
+    lowered = text.lower()
+    needle = literal.lower()
+    pos = lowered.find(needle)
+    if pos == -1:
+        return None
+    end = pos + len(needle)
+    if len(lowered) == len(text):
+        return pos, end
+    # starts[i] is where the lowered form of text[i] begins in ``lowered``.
+    starts: list[int] = []
+    offset = 0
+    for char in text:
+        starts.append(offset)
+        offset += len(char.lower())
+    return bisect_right(starts, pos) - 1, bisect_left(starts, end)
+
+
 def find_position(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> int | None:
-    """First match position, or ``None``."""
+    """First match position (an index into ``text``), or ``None``."""
     if not text or not pattern:
         return None
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))
         return m.start() if m else None
-    search_text = text.lower() if mods.nocase else text
-    search_pat = effective.lower() if mods.nocase else effective
-    pos = search_text.find(search_pat)
-    return pos if pos != -1 else None
+    span = _literal_span(text, effective, mods.nocase)
+    return span[0] if span else None
 
 
 def count_occurrences(
@@ -246,12 +272,8 @@ def extract_match(
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))
         return m.group(0) if m else None
-    search_text = text.lower() if mods.nocase else text
-    search_pat = effective.lower() if mods.nocase else effective
-    pos = search_text.find(search_pat)
-    if pos == -1:
-        return None
-    return text[pos : pos + len(effective)]
+    span = _literal_span(text, effective, mods.nocase)
+    return text[span[0] : span[1]] if span else None
 
 
 _CMP = {
