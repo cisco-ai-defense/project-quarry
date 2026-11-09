@@ -1448,6 +1448,20 @@ async def test_cancelling_a_scan_cancels_the_pending_model_call(tmp_path, monkey
 # ── compile diagnostics ────────────────────────────────────────────────
 
 
+def test_plugin_propagates_an_author_facing_syntax_diagnostic():
+    report = QuarryPlugin().compile(rule_text=_rule("true false"))
+
+    assert (report["valid"], report["stage"]) == (False, "parse")
+    (diagnostic,) = report["diagnostics"]
+    assert diagnostic["stage"] == "parse"
+    assert "Unexpected token `false` at line 3, column" in diagnostic["message"]
+    assert "Expected one of:" in diagnostic["message"]
+    assert all(
+        parser_name not in diagnostic["message"] for parser_name in ("VAR_NAME", "$END", "__ANON")
+    )
+    assert diagnostic["details"]["line"] == 3
+
+
 @pytest.mark.parametrize(
     ("condition", "stage", "message_fragments", "details"),
     [

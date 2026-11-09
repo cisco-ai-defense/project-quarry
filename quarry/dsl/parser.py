@@ -23,6 +23,7 @@ from lark.exceptions import GrammarError, UnexpectedInput, UnexpectedToken, Visi
 
 from quarry.core.logging import get_app_logger
 from quarry.dsl.grammar import DSL_GRAMMAR
+from quarry.dsl.syntax_errors import format_syntax_error
 from quarry.dsl.transformer import DSLTransformer
 from quarry.types.exceptions import RuleParseError
 from quarry.types.rules import DSLRule
@@ -46,7 +47,12 @@ class DSLParser:
         except (GrammarError, UnexpectedToken, UnexpectedInput) as e:
             line = getattr(e, "line", None)
             logger.error(f"[ERROR] Rule grammar failed: error_type={type(e).__name__} line={line}")
-            message = _single_equals_message(e, rule_text) or str(e)
+            message = (
+                _single_equals_message(e, rule_text)
+                or format_syntax_error(e, rule_text, self.parser)
+                if isinstance(e, UnexpectedInput)
+                else str(e)
+            )
             raise RuleParseError(
                 rule_name="<unknown>", line=line, message=message, source=source
             ) from e

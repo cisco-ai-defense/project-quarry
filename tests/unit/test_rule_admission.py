@@ -192,13 +192,13 @@ def _regex_string(pattern: str) -> str:
         pytest.param(
             "invalid rule syntax here\n",
             RuleParseError,
-            "'invalid') at line 1, column 1",
+            "Unexpected token `invalid` at line 1, column 1",
             id="not-a-rule",
         ),
         pytest.param(
             'rule "R"\ncollect:\n    [f for f in findings() if true]\ncondition:\n    true\n',
             RuleParseError,
-            "'collect') at line 2, column 1",
+            "Unexpected token `collect` at line 2, column 1",
             id="collect-before-condition",
         ),
         pytest.param(
@@ -216,13 +216,13 @@ def _regex_string(pattern: str) -> str:
         pytest.param(
             '# not a comment\nrule "R"\ncondition: true\n',
             RuleParseError,
-            "'#') at line 1, column 1",
+            "Unexpected token `#` at line 1, column 1",
             id="hash-comment",
         ),
         pytest.param(
             '/* not a comment */\nrule "R"\ncondition: true\n',
             RuleParseError,
-            "No terminal matches '/' in the current parser context, at line 1 col 1",
+            "Unexpected character `/` at line 1, column 1",
             id="block-comment",
         ),
         pytest.param(

@@ -17,6 +17,10 @@ condition:
 
 The blocks `metadata`, `strings`, `variables`, and `parameters` are optional and must appear in that order. `condition:` is required. Use `//` for comments. See the [generated language reference](../quarry/language/reference.md) for every supported form.
 
+## Fix syntax errors
+
+When a rule does not parse, Quarry reports the first unexpected token, character, or end of the rule with its line, column, a bounded source excerpt, and the spellings accepted there. The diagnostic escapes control characters and limits both excerpts and expected choices, so it is safe to display for large or malformed rules. Fix the reported error and parse again to find any later mistake.
+
 ## Match the right surface
 
 Use `user_messages` for user text, `assistant_messages` for assistant text, `tool_calls` for calls, and `tool_responses` for returned data. The `tools` collection contains offered tool definitions, which are distinct from calls that actually happened.
