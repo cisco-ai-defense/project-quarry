@@ -374,10 +374,6 @@ def declaration_model(declaration: InputDeclaration) -> type[BaseModel]:
 INPUT_ADAPTER_GROUP = "quarry.input_adapters"
 
 
-def _built_in_adapters() -> dict[str, InputAdapter]:
-    return {}
-
-
 def adapter_fingerprints(
     adapters: Mapping[str, InputAdapter], read: frozenset[str]
 ) -> dict[str, str]:
@@ -403,16 +399,14 @@ def load_input_adapters(
     declared: Mapping[str, InputDeclaration],
     host: Mapping[str, InputAdapter] | None = None,
 ) -> tuple[dict[str, InputAdapter], dict[str, InputDeclaration]]:
-    """Each ``adapters:`` key's adapter: one the host passed, one built in, or one an installed
-    package registers under ``INPUT_ADAPTER_GROUP``, in that order; and every declaration, the
-    configuration's with the adapters' own. Every section an adapter fills must be
-    ``messages``, ``tools`` or declared, no two adapters fill one section, and no section is
-    declared twice."""
+    """Load host or entry-point adapters and combine their section declarations.
+
+    Reject duplicate sections or adapters that fill an undeclared section.
+    """
 
     from importlib.metadata import entry_points
 
     host = dict(host or {})
-    built_in = _built_in_adapters()
     installed = {point.name: point for point in entry_points(group=INPUT_ADAPTER_GROUP)}
     loaded: dict[str, InputAdapter] = {}
     owners: dict[str, str] = {}
@@ -423,13 +417,11 @@ def load_input_adapters(
         name = entry.adapter
         if name in host:
             adapter = host[name]
-        elif name in built_in:
-            adapter = built_in[name]
         elif name in installed:
             target = installed[name].load()
             adapter = target() if isinstance(target, type) else target
         else:
-            available = ", ".join(sorted({*host, *built_in, *installed})) or "none"
+            available = ", ".join(sorted({*host, *installed})) or "none"
             raise ConfigurationError(
                 f"Adapter key '{key}' names input adapter '{name}', which is not available; "
                 f"available: {available}"
