@@ -72,7 +72,7 @@ class ModelCallBudget:
 
         if self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias:
             raise LLMError(
-                f"Model call cost limit reached for alias '{alias}' "
+                f"Inference model '{alias}' reached its model-call limit "
                 f"(max_model_calls={self.max_calls_per_alias})",
                 {
                     "code": "model_call_limit",

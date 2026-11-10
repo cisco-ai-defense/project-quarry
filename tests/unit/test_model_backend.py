@@ -626,6 +626,31 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
         ),
     ]
 
+    class NamedFailingAdapter(ModelAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            raise LLMError(
+                "physical-model rejected the request",
+                {"code": "invalid_output", "model": "physical-model"},
+            )
+
+    named_failing = _v2_backend(tmp_path, models, NamedFailingAdapter())
+    named_failures = await asyncio.gather(
+        named_failing.model_classify_messages("exhausted", shared),
+        named_failing.model_classify_messages("available", shared),
+        return_exceptions=True,
+    )
+
+    assert [(failure.details, str(failure)) for failure in named_failures] == [
+        (
+            {"code": "invalid_output", "model": "exhausted"},
+            "Inference model 'exhausted' failed: provider request failed",
+        ),
+        (
+            {"code": "invalid_output", "model": "available"},
+            "Inference model 'available' failed: provider request failed",
+        ),
+    ]
+
 
 def test_the_model_call_limit_is_per_configured_model_and_resets_every_scan(tmp_path) -> None:
     rules = {

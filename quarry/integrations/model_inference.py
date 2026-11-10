@@ -137,11 +137,37 @@ def _llm_error(code: str, message: str, model_id: str) -> LLMError:
     return LLMError(public_message, {"code": code, "model": model_id})
 
 
-def _unnamed_failure(message: str, exc: LLMError, model_id: str) -> LLMError:
-    """Attribute an adapter or request-building failure that names no model."""
+def _attributed_failure(
+    message: str,
+    exc: LLMError,
+    model_id: str,
+    *,
+    private_model: str | None = None,
+) -> LLMError:
+    """Attribute a failure to an alias without rewriting arbitrary message substrings."""
+
+    prefix = f"Inference model '{model_id}'"
+    model_names = {
+        name for name in (private_model, exc.details.get("model")) if isinstance(name, str) and name
+    }
+    for name in model_names:
+        source_prefix = f"Inference model '{name}'"
+        if message.startswith(source_prefix):
+            public_message = f"{prefix}{message[len(source_prefix) :]}"
+            break
+    else:
+        if message.startswith(prefix):
+            public_message = message
+        else:
+            cause = (
+                "provider request failed"
+                if any(name in message for name in model_names)
+                else message
+            )
+            public_message = f"{prefix} failed: {cause}"
 
     return LLMError(
-        f"Inference model '{model_id}' failed: {message}",
+        public_message,
         {**exc.details, "model": model_id},
     )
 
@@ -1826,9 +1852,9 @@ class ModelInferenceBackend:
             try:
                 arguments = payload()
             except LLMError as exc:
-                if "model" in exc.details:
-                    raise
-                raise _unnamed_failure(exc.message, exc, model_id) from exc
+                raise _attributed_failure(
+                    exc.message, exc, model_id, private_model=rate_limit_model
+                ) from exc
             try:
                 return await self._send(
                     model_id,
@@ -1881,10 +1907,7 @@ class ModelInferenceBackend:
             other = exc.details.get("model")
             if not isinstance(other, str) or other == model_id:
                 raise
-            raise LLMError(
-                exc.message.replace(f"'{other}'", f"'{model_id}'"),
-                {**exc.details, "model": model_id},
-            ) from exc
+            raise _attributed_failure(exc.message, exc, model_id, private_model=other) from exc
         try:
             # A caller handed the raw response gets its own copy of a wire value, so it cannot
             # change what later scans read; Quarry's own readers only read it.
@@ -1943,15 +1966,11 @@ class ModelInferenceBackend:
             )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the
-            # trusted Quarry alias. Keep provider details behind the configuration boundary. An
-            # error that already names the alias is kept as-is because an alias can contain the
-            # physical model's name.
-            message = exc.message
-            if exc.details.get("model") != model_id:
-                message = message.replace(rate_limit_model, model_id)
-            if "model" not in exc.details:
-                raise _unnamed_failure(message, exc, model_id) from exc
-            raise LLMError(message, {**exc.details, "model": model_id}) from exc
+            # trusted Quarry alias. Rewrite only the structured leading model label; if an
+            # unstructured message embeds a provider model, replace the cause with fixed text.
+            raise _attributed_failure(
+                exc.message, exc, model_id, private_model=rate_limit_model
+            ) from exc
         except (QuarryError, QuarryTimeoutError):
             raise
         except TimeoutError:
@@ -1997,9 +2016,9 @@ class ModelInferenceBackend:
                 )
             _require_inline_media(outbound)
         except LLMError as exc:
-            if "model" in exc.details:
-                raise
-            raise _unnamed_failure(exc.message, exc, model_id) from exc
+            raise _attributed_failure(
+                exc.message, exc, model_id, private_model=model.model
+            ) from exc
         return outbound
 
     async def _score_messages(
