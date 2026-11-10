@@ -901,7 +901,7 @@ async def test_a_slow_classification_times_out_under_its_alias_name(tmp_path) ->
         await backend.model_classify_messages("head", _INPUT, timeout=0.01)
 
     assert error.value.details == {"code": "timeout", "model": "head"}
-    assert "physical-model" not in str(error.value)
+    assert str(error.value) == "Inference model 'head' timed out"
 
 
 class _EventLimiter:

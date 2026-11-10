@@ -1898,7 +1898,7 @@ class ModelInferenceBackend:
         except TimeoutError as exc:
             raise _llm_error(
                 "timeout",
-                f"Model call timed out for '{model_id}'",
+                "timed out",
                 model_id,
             ) from exc
         except LLMError as exc:
