@@ -1,0 +1,6 @@
+rule "Longest suspicious span"
+strings:
+    $short = "ignore"
+    $long = "ignore previous"
+condition:
+    len(outermost(union($short.spans(messages), $long.spans(messages)))) == 1

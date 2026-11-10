@@ -704,7 +704,11 @@ class _Compiler:
                 collection=split_call,
                 condition=node.condition,
             )
-        if isinstance(node, AnyComprehension) and isinstance(node.collection, ModelCall):
+        if (
+            isinstance(node, AnyComprehension)
+            and isinstance(node.collection, ModelCall)
+            and node.collection.operation == "split"
+        ):
             model_split = self._compile_model_split(node, scope)
             if model_split is not None:
                 return model_split
