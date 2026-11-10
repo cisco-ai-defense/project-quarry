@@ -81,6 +81,48 @@ class _CollectBlock:
     expression: FilterComprehension
 
 
+@dataclass(frozen=True)
+class _NamedArgument:
+    name: str
+    value: ConditionNode
+    line: int
+    column: int
+
+
+def _positional_argument_error(arguments: list, callee: str) -> ValueError:
+    named = next(arg for arg in arguments if isinstance(arg, _NamedArgument))
+    return ValueError(
+        f"function arguments are positional for {callee}; expected a comma or ')' "
+        f"after `{named.name}` at line {named.line}, column {named.column}"
+    )
+
+
+def _place_extract_arguments(arguments: list, *, required: int, names: tuple[str, ...]) -> list:
+    """Place optional extract bounds without allowing a named value into the rule AST."""
+
+    positional: list[ConditionNode] = []
+    named: dict[str, ConditionNode] = {}
+    for argument in arguments:
+        if isinstance(argument, _NamedArgument):
+            if argument.name not in names or argument.name in named:
+                raise ValueError(f"unknown or repeated extract argument {argument.name!r}")
+            named[argument.name] = argument.value
+        elif named:
+            raise ValueError("positional arguments must come before named arguments")
+        else:
+            positional.append(argument)
+    if named and len(positional) != required:
+        raise ValueError(f"extract() needs {required} positional argument(s) before named bounds")
+    if not named:
+        return positional
+    placed = [*positional, *([Literal(None)] * len(names))]
+    for name, value in named.items():
+        placed[required + names.index(name)] = value
+    while isinstance(placed[-1], Literal) and placed[-1].value is None:
+        placed.pop()
+    return placed
+
+
 # Comprehension node types whose ``.variable`` binds a loop element inside their body.
 _COMPREHENSION_TYPES = (
     AnyComprehension,
@@ -625,6 +667,8 @@ class DSLTransformer(Transformer):
         at load rather than compiling to something unintended."""
         method = str(name)
         call_args = list(args) if args else []
+        if any(isinstance(arg, _NamedArgument) for arg in call_args) and method != "extract":
+            raise _positional_argument_error(call_args, f".{method}()")
 
         def apply_method(base):
             if isinstance(base, FunctionCall) and base.name == "model":
@@ -642,8 +686,31 @@ class DSLTransformer(Transformer):
                 )
             if isinstance(base, Identifier) and base.name in self._METHOD_RECEIVERS:
                 if method == "extract":
-                    return FunctionCall(method, [base, *call_args])
+                    return FunctionCall(
+                        method,
+                        [
+                            base,
+                            *_place_extract_arguments(
+                                call_args, required=1, names=("left", "right")
+                            ),
+                        ],
+                    )
                 return FunctionCall(method, call_args)
+            if method == "extract":
+                return FunctionCall(
+                    "_extract_windows",
+                    [
+                        base,
+                        *_place_extract_arguments(
+                            call_args, required=1, names=("left", "right", "head")
+                        ),
+                    ],
+                )
+            if method == "spans" and (
+                (isinstance(base, Identifier) and base.name.startswith("$"))
+                or isinstance(base, StringSetQuantifier)
+            ):
+                return FunctionCall("_string_spans", [base, *call_args])
             # Constructed model input: message(role, content).add_message(role, content)...
             # builds a synthetic conversation for llm_score. The receiver is the message()
             # builder call (or a further add_message chain); normalize to a nested FunctionCall
@@ -775,6 +842,11 @@ class DSLTransformer(Transformer):
             right = Literal(right)
         return BinaryOp("in", left, right)
 
+    @dsl_construct(name="inside")
+    def inside_op(self, left, right):
+        """Test whether one span is covered by a span from the right-hand list."""
+        return BinaryOp("inside", left, right)
+
     @dsl_construct(name="capture")
     def in_op_with_capture(self, left, right, var):
         """Capture matched text under a name for comparison elsewhere in the rule.
@@ -797,11 +869,20 @@ class DSLTransformer(Transformer):
     @dsl_construct(name="function-call")
     def function_call(self, name, args=None):
         """Call a public Quarry function with positional arguments."""
-        return FunctionCall(str(name), args or [])
+        written = list(args or [])
+        if any(isinstance(arg, _NamedArgument) for arg in written):
+            if str(name) != "extract":
+                raise _positional_argument_error(written, f"{name}()")
+            written = _place_extract_arguments(written, required=2, names=("left", "right"))
+        return FunctionCall(str(name), written)
 
     def arguments(self, *args):
         """Arguments node."""
         return list(args)
+
+    def named_argument(self, name, value):
+        """Hold a named extract bound until its call places it."""
+        return _NamedArgument(str(name), value, name.line, name.column)
 
     def field_access(self, *fields):
         """Legacy compatibility helper (unused with postfix grammar)."""

@@ -370,6 +370,17 @@ def test_rule_is_rejected_at_load_with_its_reason(compile_rule_policy, source, r
 
 _LOADED = [
     pytest.param(
+        _rule("len($p.spans(messages)) > 0", '$p = "x"'),
+        id="declared-string-spans",
+    ),
+    pytest.param(
+        _rule(
+            '"x" in messages[-1].content.extract($p.spans(messages[-1].content), left=2)',
+            '$p = "x"',
+        ),
+        id="extract-windows-with-named-bound",
+    ),
+    pytest.param(
         _collect("true", 'model("privacy").spans(messages[1:], 0.70)'),
         id="spans-over-a-message-slice",
     ),

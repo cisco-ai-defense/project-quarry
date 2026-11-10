@@ -27,7 +27,16 @@ from typing import Any
 from quarry.language import LanguageSpecError, get_language_spec
 
 # These names are synthesized by the transformer and never appear in authored Quarry rules.
-INTERNAL_FUNCTION_NAMES = frozenset({"_index", "_slice", "_method_arg", "_method_has_parameter"})
+INTERNAL_FUNCTION_NAMES = frozenset(
+    {
+        "_index",
+        "_slice",
+        "_method_arg",
+        "_method_has_parameter",
+        "_string_spans",
+        "_extract_windows",
+    }
+)
 
 
 @lru_cache(maxsize=1)

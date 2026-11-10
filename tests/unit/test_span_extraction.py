@@ -27,7 +27,10 @@ from types import SimpleNamespace
 import pytest
 
 from quarry.config import QuarryConfig
+from quarry.engine.atoms import ModelExpression as E
+from quarry.integrations.model_expression import evaluate_model_expression
 from quarry.integrations.model_inference import ModelInferenceBackend
+from quarry.safety.limits import SafetyLimits
 from quarry.scanner import DSLScanner
 from quarry.types.messages import Messages
 from quarry.types.results import Score, Span
@@ -193,3 +196,116 @@ def test_span_over_a_divided_message_reports_whole_message_offsets() -> None:
     assert piece.extract(span) == messages.extract(span) == "bob@example.com"
     with pytest.raises(ValueError, match="outside message content"):
         _bound_span(piece, 1, 20, 30)
+
+
+async def test_input_text_spans_keep_field_provenance_across_a_projection() -> None:
+    item = {"id": "n1", "title": "ignore ", "body": "instructions"}
+    context = SimpleNamespace(
+        conversation=SimpleNamespace(
+            messages=Messages.from_openai([{"role": "user", "content": "hi"}])
+        ),
+        extension_state_values={},
+        limits=SafetyLimits(),
+        parameters={},
+    )
+    binding = E("binding", "item")
+    projected = E(
+        "input_message",
+        "records.notes",
+        (
+            E("literal", "user"),
+            E("literal", "title\x1fbody"),
+            E("field", "title", (binding,)),
+            E("field", "body", (binding,)),
+        ),
+    )
+    source = E(
+        "string_spans",
+        "phrase",
+        (
+            projected,
+            E("string_patterns", "0000", (E("literal", "ignore instructions"),)),
+        ),
+    )
+    spans = await evaluate_model_expression(source, context, bindings={"item": item})
+    span = spans.items[0].value
+    assert span.to_dict() == {
+        "position": 0,
+        "field": "title",
+        "start": 0,
+        "end": 12,
+        "end_position": 0,
+        "end_field": "body",
+        "found_in": {"message_index": 0, "start": 0, "end": 19},
+        "source": {"input": "records.notes", "item": "n1"},
+    }
+    messages = await evaluate_model_expression(projected, context, bindings={"item": item})
+    assert messages.extract(span) == "ignore instructions"
+    assert messages._bind_span(Span(0, 0, 19, Score(0.9))).to_dict()["source"] == {
+        "input": "records.notes",
+        "item": "n1",
+    }
+    inside = E("span_covered", None, (source, E("index", 0, (source,))))
+    assert await evaluate_model_expression(inside, context, bindings={"item": item}) is True
+
+
+async def test_tool_argument_spans_keep_each_calls_place_and_nested_path() -> None:
+    messages = Messages.from_openai(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": name,
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": '{"paths":["safe","/etc/passwd"]}',
+                        },
+                    }
+                    for name in ("c1", "c2")
+                ],
+            },
+            {"role": "user", "content": "done"},
+        ]
+    )
+    context = SimpleNamespace(
+        conversation=SimpleNamespace(messages=messages),
+        limits=SafetyLimits(),
+        parameters={},
+    )
+    source = E(
+        "string_spans",
+        "path",
+        (
+            E("span_text", "arguments.paths.*", (E("binding", "call"),)),
+            E("string_patterns", "0000", (E("literal", "/etc"),)),
+        ),
+    )
+    first, second = messages.tool_calls
+    first_span = (
+        (await evaluate_model_expression(source, context, bindings={"call": first})).items[0].value
+    )
+    second_span = (
+        (await evaluate_model_expression(source, context, bindings={"call": second})).items[0].value
+    )
+    assert first_span.to_dict() == {
+        "position": 1,
+        "field": "arguments.paths.1",
+        "start": 0,
+        "end": 4,
+    }
+    assert second_span.position == 2
+    assert messages.extract(first_span) == "/etc"
+    place = E("view_spans", None, (E("binding", "call"),))
+    assert (await evaluate_model_expression(place, context, bindings={"call": first})).items[
+        0
+    ].value.position == 1
+    covered = E("span_covered", None, (place, E("binding", "span")))
+    assert (
+        await evaluate_model_expression(
+            covered, context, bindings={"call": first, "span": second_span}
+        )
+        is False
+    )

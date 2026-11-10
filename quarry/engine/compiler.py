@@ -102,6 +102,7 @@ from quarry.types.dsl.operators.string import (
     StringPosition,
     StringSetQuantifier,
 )
+from quarry.types.dsl.render import render_condition
 from quarry.types.response_schema import response_schema_types
 
 _T = TypeVar("_T")
@@ -266,6 +267,7 @@ _JOIN_FORM = (
     'message("user", join([c.name for c in messages[-1].tool_calls], "\\n"))'
 )
 _MAP_COMPREHENSION_FORM = "a map comprehension is supported only as the first argument of join()"
+_SPAN_FUNCTIONS = frozenset({"_string_spans", "_extract_windows", "outermost", "union"})
 _LEGACY_COMPUTED_CONTENT = (
     "message() content computed with join() is supported only in a version 2 model expression, "
     'such as model("alias").score(...) or model("alias").complete(...), with config_version: 2'
@@ -378,6 +380,10 @@ class CompileResult:
 
 
 class _Compiler:
+    @staticmethod
+    def _written(node: ConditionNode) -> str:
+        return render_condition(node)
+
     def __init__(self, rule, response_schemas: Mapping[str, str] | None = None):
         self.rule = rule
         self.rule_name = getattr(rule, "name", "")
@@ -646,7 +652,7 @@ class _Compiler:
         ``ChunkQuant`` leaves): a chunked-scoring comprehension or count, a model check, a
         system-prompt test, a collection-count macro or a top-level function."""
         scope = Scope()
-        if not self._contains_model_call(node):
+        if not (self._contains_model_call(node) or self._reads_spans(node)):
             self._reject_model_text_forms(node)
         if isinstance(node, BinaryOp) and node.operator in _COMPARISONS | _CONTENT_OPS:
             for operand in (node.left, node.right):
@@ -693,7 +699,7 @@ class _Compiler:
             complete = self._complete_comparison(node)
             if complete is not None:
                 return complete
-        if self._contains_model_call(node):
+        if self._contains_model_call(node) or self._reads_spans(node):
             return self._model_predicate_atom(node, scope)
         # `system_prompt contains/~ X` — a zero-width static content check on the
         # system prompt. Bare static atom (holds at boot, false on real events).
@@ -1408,8 +1414,12 @@ class _Compiler:
         return T.Atom(self._intern_atom(spec).atom_id)
 
     def compile_step(self, node, surface: str, scope: Scope) -> T.Formula:
+        if isinstance(node, (AnyComprehension, AllComprehension)) and self.lists_spans(
+            node.collection, scope
+        ):
+            return self._model_predicate_atom(node, scope, surface, event_bound=True)
         self._reject_foreign_reads(node, scope)
-        if not self._contains_model_call(node):
+        if not (self._contains_model_call(node) or self._reads_spans(node)):
             self._reject_model_text_forms(node)
         if isinstance(node, BinaryOp):
             op = node.operator
@@ -1419,7 +1429,7 @@ class _Compiler:
                 left = self.compile_step(node.left, surface, scope)
                 right = self.compile_step(node.right, surface, scope)
                 return T.And(left, right) if op == "and" else T.Or(left, right)
-            if self._contains_model_call(node):
+            if self._contains_model_call(node) or self._reads_spans(node):
                 return self._model_predicate_atom(node, scope, surface, event_bound=True)
             if op == "contains":
                 if self._is_capture_ref(node.right):
@@ -1598,6 +1608,28 @@ class _Compiler:
         )
 
     @staticmethod
+    def _reads_spans(node) -> bool:
+        """A span operation is evaluated as an expression, including in a rule step."""
+
+        return any(
+            isinstance(current, FunctionCall)
+            and current.name in _SPAN_FUNCTIONS | {"extract"}
+            or isinstance(current, ModelCall)
+            and current.operation == "spans"
+            for current in walk_condition_nodes(node)
+        )
+
+    @staticmethod
+    def lists_spans(node, scope: Scope | None = None) -> bool:
+        """Whether a collection contains spans rather than conversation events."""
+
+        if isinstance(node, ModelCall):
+            return node.operation == "spans"
+        if isinstance(node, FunctionCall):
+            return node.name in {"_string_spans", "outermost", "union"}
+        return isinstance(node, FilterComprehension) and _Compiler.lists_spans(node.collection)
+
+    @staticmethod
     def _model_calls(node) -> tuple[ModelCall, ...]:
         """Return typed model operations in deterministic source order."""
 
@@ -1773,7 +1805,8 @@ class _Compiler:
             raise UnsupportedConstruct("a model expression must produce a boolean rule condition")
         if surface == "messages" and not event_bound:
             self.has_static = True
-        return self._mint_model_expression(expression, surface, event_bound=event_bound)
+        cost = Cost.LLM if self._contains_model_call(node) else Cost.PURE
+        return self._mint_model_expression(expression, surface, event_bound=event_bound, cost=cost)
 
     def _mint_model_expression(
         self,
@@ -1781,6 +1814,7 @@ class _Compiler:
         surface: str,
         *,
         event_bound: bool = False,
+        cost: Cost = Cost.LLM,
     ) -> T.Formula:
         """Intern an engine-native model predicate without overloading legacy atom fields."""
 
@@ -1790,7 +1824,7 @@ class _Compiler:
             selector=surface,
             value_expr_key="model_expression",
             predicate="external",
-            cost=Cost.LLM,
+            cost=cost,
             detector="model_expression",
             model_expression=expression,
             evidence_policy="model",
@@ -1932,6 +1966,20 @@ class _Compiler:
                     ),
                     "Messages",
                 )
+            if node.name == "_string_spans":
+                return self._lower_string_spans(node, scope), "Span[]"
+            if node.name == "_extract_windows":
+                return self._lower_extract_windows(node, scope), "string"
+            if node.name == "len" and len(node.args) == 1 and self.lists_spans(node.args[0], scope):
+                spans = self._lower_span_list(node.args[0], scope)
+                return ModelExpression("span_count", None, (spans,)), "int"
+            if node.name == "outermost" and len(node.args) == 1:
+                spans = self._lower_span_list(node.args[0], scope)
+                return ModelExpression("outermost", None, (spans,)), "Span[]"
+            if node.name == "union" and len(node.args) == 2:
+                left = self._lower_span_list(node.args[0], scope)
+                right = self._lower_span_list(node.args[1], scope)
+                return ModelExpression("union", None, (left, right)), "Span[]"
             if node.name == "extract" and 2 <= len(node.args) <= 4:
                 messages, messages_type = self._lower_model_expression(node.args[0], scope)
                 span, span_type = self._lower_model_expression(node.args[1], scope)
@@ -1939,6 +1987,8 @@ class _Compiler:
                     raise UnsupportedConstruct("messages.extract() requires Messages and a span")
                 bounds = [ModelExpression("literal", 0), ModelExpression("literal", 0)]
                 for index, bound_node in enumerate(node.args[2:]):
+                    if isinstance(bound_node, Literal) and bound_node.value is None:
+                        continue
                     bound, bound_type = self._lower_model_expression(bound_node, scope)
                     if bound_type != "int":
                         raise UnsupportedConstruct(
@@ -2019,6 +2069,14 @@ class _Compiler:
                 raise UnsupportedConstruct(_JOIN_FORM)
             raise UnsupportedConstruct(f"function {node.name}() is not a model-expression input")
 
+        if isinstance(node, FilterComprehension) and self.lists_spans(node.collection, scope):
+            return self._lower_span_filter(node, scope), "Span[]"
+
+        if isinstance(node, (AnyComprehension, AllComprehension)) and self.lists_spans(
+            node.collection, scope
+        ):
+            return self._lower_span_quantifier(node, scope), "bool"
+
         if isinstance(node, ModelCall):
             if node.result_type.endswith("[]") and not allow_collection_source:
                 if node.operation == "spans":
@@ -2063,6 +2121,9 @@ class _Compiler:
             if operand_type != "bool":
                 raise UnsupportedConstruct("not requires a boolean model expression")
             return ModelExpression("not", None, (operand,)), "bool"
+
+        if isinstance(node, BinaryOp) and node.operator == "inside":
+            return self._lower_inside(node, scope), "bool"
 
         if isinstance(node, BinaryOp):
             equality = self._lower_item_equality(node, scope)
@@ -2251,6 +2312,192 @@ class _Compiler:
         if lowered_type not in _STEP_TEXT_TYPES:
             return lowered, lowered_type
         return ModelExpression("field_text", None, (lowered,)), "string"
+
+    def _input_text(self, node, scope: Scope) -> ModelExpression | None:
+        """Project one declared content field with its section and field provenance."""
+
+        if not isinstance(node, FieldAccess) or not isinstance(node.base, Identifier):
+            return None
+        root, fields = node.base.name, [str(field) for field in node.fields]
+        surface = scope.resolve_element(root)
+        if surface is not None and "." in surface and len(fields) == 1:
+            owner = ModelExpression("binding", root)
+            field_name = fields[0]
+        elif len(fields) == 1 and root in _STATIC_SURFACES:
+            surface = root
+            owner = ModelExpression("input_state", surface)
+            field_name = fields[0]
+        elif len(fields) == 2 and f"{root}.{fields[0]}" in _STATIC_SURFACES:
+            surface = f"{root}.{fields[0]}"
+            owner = ModelExpression("input_state", surface)
+            field_name = fields[1]
+        else:
+            return None
+        # The registry is populated for one scanner generation; importing here keeps the
+        # ordinary compiler usable without a configured input.
+        from quarry.engine.extension_surfaces import INPUT_TEXTS
+
+        content_fields = INPUT_TEXTS.get().get(surface, ())
+        if field_name not in content_fields:
+            raise UnsupportedConstruct(f"{self._written(node)} is not a declared content field")
+        value = ModelExpression("field", field_name, (owner,))
+        return ModelExpression(
+            "input_message",
+            surface,
+            (
+                ModelExpression("literal", "user"),
+                ModelExpression("literal", "\x1f".join(content_fields)),
+                value,
+            ),
+        )
+
+    def _lower_span_text(self, node, scope: Scope) -> ModelExpression:
+        """Text with a stable place in the scan, suitable for span extraction."""
+
+        input_text = self._input_text(node, scope)
+        if input_text is not None:
+            return input_text
+        if isinstance(node, FieldAccess):
+            base, base_type, fields = self._model_field_parts(node, scope)
+            if base_type in {
+                "Message",
+                "RoleMessage",
+                "AssistantMessage",
+                "ToolResponse",
+            } and fields in (
+                ["content"],
+                ["result"],
+            ):
+                return ModelExpression("span_text", fields[0], (base,))
+            if base_type == "ToolCall":
+                path = ".".join(fields)
+                if path == "raw_arguments" or path.startswith("arguments."):
+                    return ModelExpression("span_text", path, (base,))
+        value, value_type = self._lower_model_expression(node, scope)
+        if value_type == "Messages":
+            return value
+        if value_type in {"Message", "RoleMessage", "AssistantMessage", "ToolResponse"}:
+            return ModelExpression("as_messages", None, (value,))
+        if value_type in {"ToolCall", "ToolCall[]"}:
+            return ModelExpression("call_texts", None, (value,))
+        raise UnsupportedConstruct(
+            f"{self._written(node)} is not text of the conversation or a declared input field"
+        )
+
+    def _lower_string_spans(self, node: FunctionCall, scope: Scope) -> ModelExpression:
+        if len(node.args) != 2:
+            raise UnsupportedConstruct("$name.spans() takes one text argument")
+        receiver, text_node = node.args
+        if isinstance(receiver, StringSetQuantifier):
+            if receiver.quantifier != "any":
+                raise UnsupportedConstruct("only any of (...).spans(text) returns spans")
+            names = self._expand_set_names(receiver.patterns)
+        elif isinstance(receiver, Identifier) and receiver.name.startswith("$"):
+            names = self._expand_set_names([receiver.name])
+        else:
+            raise UnsupportedConstruct(".spans() requires a declared string")
+        patterns = tuple(self._lower_model_expression(Identifier(name), scope)[0] for name in names)
+        return ModelExpression(
+            "string_spans",
+            self._written(receiver),
+            (self._lower_span_text(text_node, scope), *patterns),
+        )
+
+    def _lower_span_list(self, node, scope: Scope) -> ModelExpression:
+        value, value_type = self._lower_model_expression(node, scope, allow_collection_source=True)
+        if value_type == "Span[]":
+            return value
+        if value_type in {
+            "Messages",
+            "Message",
+            "RoleMessage",
+            "AssistantMessage",
+            "ToolResponse",
+            "ToolCall",
+            "ToolCall[]",
+        }:
+            return ModelExpression("view_spans", None, (value,))
+        raise UnsupportedConstruct(f"{self._written(node)} is not a list of spans")
+
+    def _lower_span_filter(self, node: FilterComprehension, scope: Scope) -> ModelExpression:
+        if (node.output_variable or node.variable) != node.variable:
+            raise UnsupportedConstruct("a span filter must keep its own item")
+        if self._find_flow(node.condition) is not None:
+            raise UnsupportedConstruct("a span filter cannot test a temporal flow")
+        source = self._lower_span_list(node.collection, scope)
+        item_scope = scope.bind(node.variable, "collect_items", "Span")
+        local_terms: list[ModelExpression] = []
+        model_terms: list[ModelExpression] = []
+        for term in self._collect_conjuncts(node.condition):
+            predicate, result_type = self._lower_model_expression(term, item_scope)
+            if result_type != "bool":
+                raise UnsupportedConstruct("a span filter condition must be boolean")
+            (model_terms if self._contains_model_call(term) else local_terms).append(predicate)
+        model = (
+            self._join_collect_predicates(model_terms) if model_terms else ModelExpression("absent")
+        )
+        return ModelExpression(
+            "span_filter",
+            node.variable,
+            (source, self._join_collect_predicates(local_terms), model),
+        )
+
+    def _lower_span_quantifier(self, node, scope: Scope) -> ModelExpression:
+        source = self._lower_span_list(node.collection, scope)
+        item_scope = scope.bind(node.variable, "collect_items", "Span")
+        predicate, result_type = self._lower_model_expression(node.condition, item_scope)
+        if result_type != "bool":
+            raise UnsupportedConstruct("a span quantifier condition must be boolean")
+        kind = "span_any" if isinstance(node, AnyComprehension) else "span_all"
+        return ModelExpression(kind, node.variable, (source, predicate))
+
+    @staticmethod
+    def _span_sources(value: ModelExpression) -> Iterator[ModelExpression]:
+        if value.kind in {"span_filter", "outermost"}:
+            yield from _Compiler._span_sources(value.children[0])
+        elif value.kind == "union":
+            for child in value.children:
+                yield from _Compiler._span_sources(child)
+        else:
+            yield value
+
+    def _lower_extract_windows(self, node: FunctionCall, scope: Scope) -> ModelExpression:
+        if not 2 <= len(node.args) <= 5:
+            raise UnsupportedConstruct("text.extract() takes spans and up to three bounds")
+        receiver, spans_node, *bounds = node.args
+        text = self._lower_span_text(receiver, scope)
+        if text.kind not in {"span_text", "input_message"}:
+            raise UnsupportedConstruct("text.extract() needs one message or input content field")
+        spans = self._lower_span_list(spans_node, scope)
+        if any(
+            leaf.kind != "string_spans" or leaf.children[0] != text
+            for leaf in self._span_sources(spans)
+        ):
+            raise UnsupportedConstruct("text.extract() needs spans found in that same text")
+        lowered = [ModelExpression("literal", 0)] * 3
+        for index, bound_node in enumerate(bounds):
+            if isinstance(bound_node, Literal) and bound_node.value is None:
+                continue
+            bound, bound_type = self._lower_model_expression(bound_node, scope)
+            if bound_type != "int" or (
+                bound.kind == "literal" and isinstance(bound.value, int) and bound.value < 0
+            ):
+                raise UnsupportedConstruct("text.extract() bounds must be non-negative integers")
+            lowered[index] = bound
+        return ModelExpression("extract_windows", None, (text, spans, *lowered))
+
+    def _lower_inside(self, node: BinaryOp, scope: Scope) -> ModelExpression:
+        for current in walk_condition_nodes(node.right):
+            if isinstance(current, Identifier) and scope.resolve_element(current.name) is not None:
+                raise UnsupportedConstruct("spans after inside cannot read the current item")
+        spans = self._lower_span_list(node.right, scope)
+        span, span_type = self._lower_model_expression(node.left, scope)
+        if span_type in {"Message", "RoleMessage", "AssistantMessage", "ToolCall"}:
+            span = ModelExpression("place_of", None, (span,))
+            span_type = "Place"
+        if span_type not in {"Span", "Place"}:
+            raise UnsupportedConstruct("inside needs a span or conversation item on its left")
+        return ModelExpression("span_covered", None, (spans, span))
 
     def _model_field_type(self, base_type: str, fields: list[str]) -> str:
         """Return the public type reached through a structured model-result path."""

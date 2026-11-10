@@ -47,9 +47,13 @@ grammar rather than changing how these functions compose. Matchers stay pure.
 from __future__ import annotations
 
 import base64 as _base64
+import heapq
+import json
 import re
-from collections.abc import Iterator, Mapping
+from bisect import bisect_right
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import groupby
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,14 @@ class Modifiers:
     fullword: bool = False
     base64: bool = False
     regex: bool = False
+
+    @classmethod
+    def from_flags(cls, flags: str) -> Modifiers:
+        """Read the four modifier bits carried by a compiled string set."""
+
+        if len(flags) != 4 or any(bit not in "01" for bit in flags):
+            raise ValueError("invalid compiled string modifier flags")
+        return cls(*(bit == "1" for bit in flags))
 
 
 NO_MODS = Modifiers()
@@ -123,6 +135,14 @@ class RegexBackend:
         compiled = re.compile(pattern, flags)
         return (m.group(0) for m in compiled.finditer(text))
 
+    def iter_match_spans(
+        self, pattern: str, text: str, flags: int = 0
+    ) -> Iterator[tuple[int, int]]:
+        """Yield the offsets of each nonoverlapping regex match."""
+
+        compiled = re.compile(pattern, flags)
+        return (m.span() for m in compiled.finditer(text))
+
     def count(self, pattern: str, text: str, flags: int = 0) -> int:
         """Occurrence count. Default = ``len(findall)``; the RE2 backend overrides this so
         the count path streams matches instead of materializing them."""
@@ -173,6 +193,61 @@ def match_contains_any(
 ) -> bool:
     """True if ANY pattern in ``patterns`` matches (the ``contains_any`` list op)."""
     return any(match_contains(text, p, mods, regex=regex) for p in patterns)
+
+
+def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int, int]]:
+    """Yield literal matches in source offsets, including Unicode case folding."""
+
+    haystack, needle = (text.lower(), pattern.lower()) if nocase else (text, pattern)
+    found = haystack.find(needle)
+    if found == -1:
+        return
+    # U+0130 expands to two characters under lower(), so map any offsets back to text.
+    expanded = tuple(match.start() + number for number, match in enumerate(re.finditer("İ", text)))
+
+    def point(offset: int, *, end: bool) -> int:
+        before = bisect_right(expanded, offset - 1)
+        inside = before > 0 and offset == expanded[before - 1] + 1
+        return offset - before + (1 if inside and end else 0)
+
+    while found != -1:
+        finish = found + len(needle)
+        yield (
+            (point(found, end=False), point(finish, end=True))
+            if len(haystack) != len(text)
+            else (found, finish)
+        )
+        found = haystack.find(needle, finish)
+
+
+def match_spans(
+    text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
+) -> Iterator[tuple[int, int]]:
+    """Yield each nonempty match with the same modifiers as a string predicate."""
+
+    if not text or not pattern:
+        return iter(())
+    effective, use_regex = apply_modifiers(pattern, mods)
+    if use_regex:
+        spans = regex.iter_match_spans(effective, text, _regex_flags(mods))
+        return (span for span in spans if span[1] > span[0])
+    return _literal_spans(text, effective, mods.nocase)
+
+
+def matching_patterns(
+    text: str,
+    patterns: Sequence[tuple[str, Modifiers]],
+    *,
+    regex: RegexBackend = PURE_REGEX,
+) -> Iterator[tuple[tuple[int, int], tuple[int, ...]]]:
+    """Yield distinct spans with the pattern indexes that matched each range."""
+
+    streams = [
+        ((span, index) for span in match_spans(text, pattern, mods, regex=regex))
+        for index, (pattern, mods) in enumerate(patterns)
+    ]
+    for span, matched in groupby(heapq.merge(*streams), key=lambda pair: pair[0]):
+        yield span, tuple(index for _, index in matched)
 
 
 def match_regex(
@@ -296,7 +371,7 @@ def field_access(obj, path: str):
     if not path:
         return obj
     cur = obj
-    segments = path.split(".")
+    segments = field_parts(path)
     for i, seg in enumerate(segments):
         if seg == "*":
             if i != len(segments) - 1:
@@ -330,6 +405,53 @@ def _step(obj, seg: str):
 
 
 MISSING = _MISSING
+
+
+def field_parts(path: str) -> tuple[str, ...]:
+    """Split a dotted field path while preserving escaped dots and backslashes."""
+
+    parts: list[str] = []
+    part: list[str] = []
+    escaped = False
+    for character in path:
+        if escaped:
+            part.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == ".":
+            parts.append("".join(part))
+            part = []
+        else:
+            part.append(character)
+    if escaped:
+        raise ValueError(f"field {path!r} ends in an escape")
+    parts.append("".join(part))
+    return tuple(parts)
+
+
+def value_texts(value, path: str = "") -> list[tuple[str, str]]:
+    """Locate each scalar text of a nested JSON value at its own escaped path."""
+
+    if value is _MISSING or value is None:
+        return []
+    if isinstance(value, str):
+        return [(path, value)]
+    if isinstance(value, bool):
+        return [(path, "true" if value else "false")]
+    if isinstance(value, int | float):
+        return [(path, json.dumps(value))]
+    if not isinstance(value, Mapping | list | tuple):
+        return [(path, str(value))]
+    items = (
+        ((str(key).replace("\\", "\\\\").replace(".", "\\."), item) for key, item in value.items())
+        if isinstance(value, Mapping)
+        else ((str(index), item) for index, item in enumerate(value))
+    )
+    texts: list[tuple[str, str]] = []
+    for segment, item in items:
+        texts.extend(value_texts(item, f"{path}.{segment}" if path else segment))
+    return texts
 
 
 def truth(value) -> bool:

@@ -19,8 +19,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
-from dataclasses import dataclass, field
+import uuid
+from bisect import bisect_right
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
+from itertools import accumulate
 from typing import Any, cast
 
 from quarry.engine.atoms import ModelExpression
@@ -35,13 +40,17 @@ from quarry.engine.matchers import (
     match_contains,
     match_contains_any,
     match_regex,
+    matching_patterns,
     truth,
 )
 from quarry.engine.pacing import Pacer
+from quarry.engine.windows import kept_windows, render_windows
 from quarry.engine.witness import ModelResultEvidence
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
-from quarry.types.messages import Messages
+from quarry.types.messages import Message, Messages, ToolCall
+from quarry.types.origins import Place, SourceText, excerpt, field_part, joined, source_key
+from quarry.types.results import CollectionResult, InputText, ProducerRef, ResultItem, Span
 from quarry.types.text_resources import TextRef
 
 # The operator that keeps a comparison's meaning when its operands swap sides.
@@ -147,6 +156,150 @@ async def evaluate_model_expression(
         return context.resource_manager.resolve_text(TextRef(str(expression.value)))
     if kind == "string_patterns":
         return tuple(str(child.value) for child in expression.children), str(expression.value)
+    if kind == "input_message":
+        return await _input_message(expression, context, event, environment, trace, regex_backend)
+    if kind == "string_spans":
+        return await _evaluate_string_spans(
+            expression, context, event, environment, trace, regex_backend
+        )
+    if kind == "span_count":
+        spans = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        return len(spans.items)
+    if kind == "span_covered":
+        spans, inner = await _evaluate_children(
+            expression, context, event, environment, trace, regex_backend
+        )
+        if inner is MISSING:
+            return False
+        if not isinstance(spans, CollectionResult) or not isinstance(inner, Span):
+            raise TypeError("inside requires a span and a span collection")
+        _check_span_limit(context, len(spans.items), "span source items")
+        return _is_covered(_cover_index(item.value for item in spans.items), inner)
+    if kind == "view_spans":
+        value = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        return _view_spans(context.conversation.messages, value)
+    if kind == "place_of":
+        value = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        places = _view_spans(context.conversation.messages, value).items
+        return places[0].value if places else MISSING
+    if kind == "span_filter":
+        source, local, model = expression.children
+        spans = await evaluate_model_expression(
+            source,
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(spans, CollectionResult):
+            raise TypeError("a span filter requires a span collection")
+        survivors = []
+        for item in spans.items:
+            scope = {**environment, str(expression.value): item.value}
+            if not truth(
+                await evaluate_model_expression(
+                    local,
+                    context,
+                    event=event,
+                    bindings=scope,
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+            ):
+                continue
+            if model.kind != "absent" and not truth(
+                await evaluate_model_expression(
+                    model,
+                    context,
+                    event=event,
+                    bindings=scope,
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+            ):
+                continue
+            survivors.append(item)
+        return replace(spans, items=tuple(survivors))
+    if kind in {"span_any", "span_all"}:
+        source, predicate = expression.children
+        spans = await evaluate_model_expression(
+            source,
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(spans, CollectionResult):
+            raise TypeError("a span quantifier requires a span collection")
+        wanted = kind == "span_any"
+        for item in spans.items:
+            held = truth(
+                await evaluate_model_expression(
+                    predicate,
+                    context,
+                    event=event,
+                    bindings={**environment, str(expression.value): item.value},
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+            )
+            if held is wanted:
+                return wanted
+        return not wanted
+    if kind == "outermost":
+        spans = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(spans, CollectionResult):
+            raise TypeError("outermost() requires a span collection")
+        return replace(spans, items=tuple(_outermost_spans(spans.items)))
+    if kind == "union":
+        lists = [
+            await evaluate_model_expression(
+                child,
+                context,
+                event=event,
+                bindings=environment,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+            for child in expression.children
+        ]
+        if not all(isinstance(spans, CollectionResult) for spans in lists):
+            raise TypeError("union requires span collections")
+        return _union_spans(lists)
+    if kind == "extract_windows":
+        return await _evaluate_extract_windows(
+            expression, context, event, environment, trace, regex_backend
+        )
     if kind == "text_equals":
         # `=` on a field of a map comprehension item, as a rule step reads it: the text of a
         # value that is not missing or null, or for `= null` whether the value is missing or
@@ -556,6 +709,395 @@ async def _evaluate_children(
     return left, right
 
 
+def _check_span_limit(context, count: int, what: str) -> None:
+    limits = context.limits
+    if limits.enforce_limits and count > limits.max_comprehension_size:
+        raise ValueError(
+            f"{what} has at least {count} items, exceeding "
+            f"max_comprehension_size={limits.max_comprehension_size}"
+        )
+
+
+async def _input_message(expression, context, event, environment, trace, regex_backend) -> Messages:
+    """Project an input item's ordered content fields into one located message."""
+
+    section = str(expression.value)
+    role, order, *parts = expression.children
+    owner = await evaluate_model_expression(
+        parts[0].children[0],
+        context,
+        event=event,
+        bindings=environment,
+        trace=trace,
+        regex_backend=regex_backend,
+    )
+    if owner is MISSING or owner is None:
+        return Messages()
+    item = (
+        None
+        if section in getattr(context, "extension_state_values", {})
+        else field_access(owner, "id")
+    )
+    source = InputText(
+        section,
+        None if item is MISSING else item,
+        tuple(str(order.value).split("\x1f")),
+    )
+    pieces = []
+    for part in parts:
+        name = str(part.value)
+        value = field_access(owner, name)
+        if value is not MISSING and value is not None and value != "":
+            if not isinstance(value, str):
+                raise TypeError(f"input content field {name!r} must be text")
+            pieces.append((value, Place(0, name, 0, owner, source)))
+    if not pieces:
+        return Messages()
+    origin = pieces[0][1] if len(pieces) == 1 else joined(pieces)
+    return Messages.message_parts(str(role.value), [text for text, _ in pieces], origin)
+
+
+def _conversation_positions(transcript: Messages) -> dict[int, int]:
+    """Place messages and their calls in conversation order."""
+
+    positions = {}
+    position = 0
+    for message in transcript._root._items:
+        positions[id(message)] = position
+        position += 1
+        for call in getattr(message, "tool_calls", ()):
+            positions[id(call)] = position
+            position += 1
+    return positions
+
+
+def _view_source_texts(transcript: Messages, view: Messages) -> list[SourceText]:
+    """Locate the text of every selected message in the scanned chat or an input."""
+
+    located = []
+    positions = _conversation_positions(transcript)
+    for ordinal in view._ordinals:
+        message = view._message_at(ordinal)
+        origin = view._root._origins[ordinal]
+        if origin is None:
+            if not view.shares_root_with(transcript):
+                raise ValueError("a string's spans read only text of the scanned input")
+            segment = view._segments.get(ordinal)
+            start = 0 if segment is None else segment._range[0]
+            original = transcript._root._items[ordinal]
+            origin = Place(positions[id(original)], "", start, original)
+        elif ordinal in view._segments:
+            start, end = view._segments[ordinal]._range
+            origin = excerpt(origin, start, end)
+        located.append(SourceText(message.content, origin, ordinal))
+        if view.shares_root_with(transcript):
+            for call in getattr(message, "tool_calls", ()):
+                position = positions[id(call)]
+                located.extend(
+                    SourceText(text, Place(position, name, 0, call), ordinal)
+                    for name, text in call.texts()
+                )
+    return located
+
+
+async def _span_source_texts(
+    text_source, context, event, environment, trace, regex_backend
+) -> list[SourceText]:
+    if text_source.kind == "span_text":
+        owner = await evaluate_model_expression(
+            text_source.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if owner is MISSING or owner is None:
+            return []
+        field = str(text_source.value)
+        transcript = context.conversation.messages
+        positions = _conversation_positions(transcript)
+        if isinstance(owner, Message) and field in {"content", "result"} and id(owner) in positions:
+            return [
+                SourceText(
+                    owner.content,
+                    Place(positions[id(owner)], "", 0, owner),
+                    owner.message_index,
+                )
+            ]
+        if isinstance(owner, ToolCall) and id(owner) in positions:
+            position = positions[id(owner)]
+            return [
+                SourceText(text, Place(position, name, 0, owner), owner.message_index)
+                for name, text in owner.argument_texts(field)
+            ]
+        raise ValueError("a string's spans need a located input item or conversation message")
+    view = await evaluate_model_expression(
+        text_source,
+        context,
+        event=event,
+        bindings=environment,
+        trace=trace,
+        regex_backend=regex_backend,
+    )
+    if view is MISSING or view is None:
+        return []
+    if not isinstance(view, Messages):
+        raise TypeError("a string's spans read Messages or one item's text")
+    return _view_source_texts(context.conversation.messages, view)
+
+
+async def _evaluate_string_spans(expression, context, event, environment, trace, regex_backend):
+    text_source, *pattern_sources = expression.children
+    texts = await _span_source_texts(text_source, context, event, environment, trace, regex_backend)
+    pattern_sets = [
+        await evaluate_model_expression(child, context, regex_backend=regex_backend)
+        for child in pattern_sources
+    ]
+    patterns = [
+        (pattern, Modifiers.from_flags(flags)) for names, flags in pattern_sets for pattern in names
+    ]
+    producer = str(expression.value)
+    run_uuid = uuid.uuid4()
+    items = []
+    pacer = Pacer(every=64)
+    for text in texts:
+        raise_if_evaluation_expired()
+        for (begin, end), _matched in matching_patterns(text.text, patterns, regex=regex_backend):
+            _check_span_limit(context, len(items) + 1, f"{producer}.spans() spans")
+            if pacer.due():
+                raise_if_evaluation_expired()
+                await asyncio.sleep(0)
+            span = text.span(begin, end)
+            identity = json.dumps(
+                [
+                    producer,
+                    span.position,
+                    span.field,
+                    span.start,
+                    span.end_position,
+                    span.end_field,
+                    span.end,
+                    *(span._found or ()),
+                ]
+            )
+            items.append(ResultItem(item_id=str(uuid.uuid5(run_uuid, identity)), value=span))
+    return CollectionResult(
+        output_type="span_collection",
+        category=None,
+        source=ProducerRef(kind="pattern", name=producer, run_id=str(run_uuid)),
+        items=tuple(items),
+    )
+
+
+_SpanPoint = tuple[str, int, tuple[int, int, str], int, float]
+
+
+def _span_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
+    low, high = span._found or (0, math.inf)
+    key = source_key(span.source)
+    start = (key, span.position, field_part(span._source, span.field, span.source), span.start, low)
+    end = (
+        key,
+        span.end_position,
+        field_part(span._source, span.end_field, span.source),
+        span.end,
+        high,
+    )
+    return start, end
+
+
+def _cover_index(spans: Iterable[Span]) -> tuple[list[_SpanPoint], list[_SpanPoint]]:
+    ranges = sorted(_span_ends(span) for span in spans)
+    return [start for start, _ in ranges], list(accumulate((end for _, end in ranges), max))
+
+
+def _is_covered(index: tuple[list[_SpanPoint], list[_SpanPoint]], inner: Span) -> bool:
+    starts, furthest = index
+    start, end = _span_ends(inner)
+    position = bisect_right(starts, start) - 1
+    return position >= 0 and furthest[position] >= end
+
+
+def _view_spans(transcript: Messages, value: Any) -> CollectionResult[Span]:
+    run_uuid = uuid.uuid4()
+    positions = _conversation_positions(transcript)
+    views = value if isinstance(value, list | tuple) else () if value is MISSING else (value,)
+    places: list[Span] = []
+    for view in views:
+        if view is None or view is MISSING:
+            continue
+        if isinstance(view, Messages):
+            if view.shares_root_with(transcript):
+                # A run of adjacent selected messages occupies one conversation range.
+                runs: list[list[int]] = []
+                for ordinal in view._ordinals:
+                    if runs and runs[-1][-1] + 1 == ordinal:
+                        runs[-1].append(ordinal)
+                    else:
+                        runs.append([ordinal])
+                for run in runs:
+                    first, last = run[0], run[-1]
+                    places.append(
+                        Span(
+                            first,
+                            0,
+                            len(view._message_at(last).content),
+                            end_message_index=last,
+                            place_position=positions[id(transcript._root._items[first])],
+                            end_place_position=positions[id(transcript._root._items[last])],
+                        )
+                    )
+            else:
+                texts = _view_source_texts(transcript, view)
+                places.extend(text.span(0, len(text.text)) for text in texts if text.text)
+            continue
+        if isinstance(view, ToolCall) and id(view) in positions:
+            texts = view.texts() or (("raw_arguments", view.raw_arguments),)
+            span = Span(
+                view.message_index,
+                0,
+                len(texts[-1][1]),
+                source_field=texts[0][0],
+                end_source_field=texts[-1][0],
+                place_position=positions[id(view)],
+            )
+            places.append(span._bind_to_source(view))
+            continue
+        ordinal = getattr(view, "message_index", None)
+        if (
+            isinstance(ordinal, int)
+            and 0 <= ordinal < len(transcript._root._items)
+            and transcript._root._items[ordinal] is view
+        ):
+            places.append(
+                Span(
+                    ordinal,
+                    0,
+                    len(view.content),
+                    place_position=positions[id(view)],
+                )._bind_to_source(view)
+            )
+            continue
+        raise ValueError("a view's spans require scanned or located text")
+    places.sort(key=lambda span: _span_ends(span)[0])
+    items = tuple(
+        ResultItem(
+            item_id=str(uuid.uuid5(run_uuid, json.dumps(span.to_dict(), sort_keys=True))),
+            value=span,
+        )
+        for span in places
+    )
+    return CollectionResult(
+        output_type="span_collection",
+        category=None,
+        source=ProducerRef(kind="view", name="view", run_id=str(run_uuid)),
+        items=items,
+    )
+
+
+def _score(span: Span) -> float:
+    return -1.0 if span.score is None else span.score.value
+
+
+def _union_spans(lists: list[CollectionResult[Span]]) -> CollectionResult[Span]:
+    kept: dict[Span, tuple[int, ResultItem[Span]]] = {}
+    for order, item in enumerate(item for spans in lists for item in spans.items):
+        unscored = replace(item.value, score=None)
+        earlier = kept.get(unscored)
+        if earlier is None or _score(item.value) > _score(earlier[1].value):
+            kept[unscored] = (order if earlier is None else earlier[0], item)
+    items = [item for _, item in sorted(kept.values(), key=lambda pair: pair[0])]
+    items.sort(key=lambda item: _span_ends(item.value))
+    categories = {spans.category for spans in lists}
+    return CollectionResult(
+        output_type="span_collection",
+        category=categories.pop() if len(categories) == 1 else None,
+        source=ProducerRef(kind="union", name="union", run_id=str(uuid.uuid4())),
+        items=tuple(items),
+    )
+
+
+def _outermost_spans(items: tuple[ResultItem[Span], ...]) -> list[ResultItem[Span]]:
+    longest: dict[_SpanPoint, tuple[_SpanPoint, int]] = {}
+    for index, item in enumerate(items):
+        start, end = _span_ends(item.value)
+        best = longest.get(start)
+        if (
+            best is None
+            or end > best[0]
+            or (end == best[0] and _score(item.value) > _score(items[best[1]].value))
+        ):
+            longest[start] = (end, index)
+    kept = []
+    furthest: _SpanPoint | None = None
+    for start in sorted(longest):
+        end, index = longest[start]
+        if furthest is None or end > furthest:
+            kept.append(items[index])
+            furthest = end
+    return kept
+
+
+async def _evaluate_extract_windows(expression, context, event, environment, trace, regex_backend):
+    text_source, spans_source, *bounds = expression.children
+    texts = await _span_source_texts(text_source, context, event, environment, trace, regex_backend)
+    if not texts:
+        return MISSING
+    spans = await evaluate_model_expression(
+        spans_source,
+        context,
+        event=event,
+        bindings=environment,
+        trace=trace,
+        regex_backend=regex_backend,
+    )
+    if not isinstance(spans, CollectionResult):
+        raise TypeError("text.extract() requires a span collection")
+    _check_span_limit(context, len(spans.items), "text.extract() spans")
+    left, right, head = [
+        await evaluate_model_expression(
+            bound,
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        for bound in bounds
+    ]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (left, right, head)
+    ):
+        raise ValueError("text.extract() bounds must be non-negative integers")
+    by_place = {
+        (text.origin.position, text.origin.field)
+        if isinstance(text.origin, Place)
+        else ("found", text.origin): text
+        for text in texts
+    }
+    ranges = {place: [] for place in by_place}
+    for item in spans.items:
+        span = item.value
+        found = span._found_in
+        key = ("found", found[0]) if found is not None else (span.position, span.field)
+        text = by_place.get(key)
+        offsets = None if text is None else text.offsets(span)
+        if offsets is None:
+            raise ValueError("text.extract() span is outside the text it cuts")
+        ranges[key].append(offsets)
+    rendered = []
+    for key, text in by_place.items():
+        windows = kept_windows(text.text, ranges[key], left, right, head)
+        rendered.append(text.text if windows is None else render_windows(text.text, windows))
+        if trace is not None and windows is not None:
+            trace.input_pieces.extend(
+                piece for begin, end in windows for piece in text.pieces(begin, end)
+            )
+    return "\n".join(rendered)
+
+
 async def _evaluate_model_call(expression, context, event, bindings, trace, regex_backend) -> Any:
     """Dispatch one validated ModelRef operation through the configured backend.
 
@@ -631,10 +1173,11 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         return result
     if operation == "spans":
         messages, threshold = arguments
-        if not isinstance(messages, Messages) or not messages.shares_root_with(
-            context.conversation.messages
+        if not isinstance(messages, Messages) or not (
+            messages.shares_root_with(context.conversation.messages)
+            or all(messages._root._origins[ordinal] is not None for ordinal in messages._ordinals)
         ):
-            raise ValueError("model().spans() input must be a view of the original conversation")
+            raise ValueError("model().spans() input must read located text")
         return await backend.model_span_messages(
             alias,
             messages,
