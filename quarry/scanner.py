@@ -32,7 +32,7 @@ from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
 from quarry.core.conversation import Conversation
 from quarry.core.logging import get_app_logger
-from quarry.dsl.composition import link_public_rule_calls
+from quarry.dsl.composition import label_called_rule_artifact, link_public_rule_calls
 from quarry.dsl.functions import (
     capability_tags,
     intent_baseline,
@@ -445,6 +445,10 @@ class DSLScanner:
         self._link_candidate_functions(rules, active_sources)
         resource_requirements = self._prepare_candidate_resources(rules, resource_manager)
         compiled_rules = self._compile_candidate_rules(rules)
+        compiled_rules = {
+            name: label_called_rule_artifact(artifact, rules[name])
+            for name, artifact in compiled_rules.items()
+        }
 
         return _InitialGeneration(
             rules=rules,
@@ -736,10 +740,12 @@ class DSLScanner:
             if name == "split":
                 if artifact is None or spec.atom_id not in artifact.split_checks:
                     raise ValueError("compiled rule is missing its called-rule check")
+                trace = ModelExpressionTrace() if explain else None
                 selected = await evaluate_model_expression(
                     spec.model_expression,
                     rule_ctx,
                     event=event,
+                    trace=trace,
                     regex_backend=regex_backend,
                 )
                 if selected is MISSING:
@@ -753,38 +759,89 @@ class DSLScanner:
                     tools_supplied=rule_ctx.conversation._tools_supplied,
                 )
                 nested_ctx._timeline_cache = None
+                nested_ctx.evaluation_warnings = rule_ctx.evaluation_warnings
                 check = artifact.split_checks[spec.atom_id]
+                nested_detector = self._make_async_detector(
+                    nested_ctx,
+                    artifact=check,
+                    explain=explain,
+                    regex_backend=regex_backend,
+                )
+                evidence: list[ModelResultEvidence] = []
+
+                async def grounded(nested_spec, nested_text, nested_event=None):
+                    result = await nested_detector(nested_spec, nested_text, nested_event)
+                    if isinstance(result, Grounded) and isinstance(
+                        result.evidence, ModelResultEvidence
+                    ):
+                        evidence.append(result.evidence)
+                    return result
+
                 nested = await evaluate_async(
                     check,
                     build_evaluation_input(nested_ctx),
-                    async_detector=self._make_async_detector(
-                        nested_ctx,
-                        artifact=check,
-                        explain=explain,
-                        regex_backend=regex_backend,
-                    ),
+                    async_detector=grounded,
                     async_collector=self._make_async_collector(
                         nested_ctx, regex_backend=regex_backend
                     ),
                     regex_backend=regex_backend,
                     minimize_witness=False,
-                    record_trace=explain,
+                    record_trace=False,
                     time_left=remaining_evaluation_time,
                 )
                 if not explain:
                     return nested.matched
+                measured = evidence[0] if len(evidence) == 1 else None
+                score = None if measured is None else measured.expression_value
+                score = (
+                    float(score)
+                    if isinstance(score, int | float) and not isinstance(score, bool)
+                    else None
+                )
+                pieces = (
+                    [
+                        selected[index : index + 1].span.to_dict()
+                        for index in range(min(len(selected), 16))
+                    ]
+                    if selected.shares_root_with(rule_ctx.conversation.messages)
+                    else []
+                )
+                chunk = {
+                    "ordinal": 0,
+                    "context": None,
+                    "pieces": pieces,
+                    "outcome": nested.matched,
+                    "value": score,
+                    "refused": any(item.refusals for item in evidence),
+                }
+                if len(selected) > len(pieces) and pieces:
+                    chunk["omitted_pieces"] = len(selected) - len(pieces)
+                if not selected.shares_root_with(rule_ctx.conversation.messages):
+                    chunk["constructed"] = True
+                summary = {"chunks": [chunk]}
+                if nested.matched:
+                    summary["deciding"] = 0
+                assert trace is not None
                 return Grounded(
                     nested.matched,
                     ModelResultEvidence.bounded(
                         operation="messages",
-                        models=(),
-                        arguments=(),
-                        expression_value=nested.matched,
-                        operator=None,
-                        threshold=None,
+                        models=[
+                            *(call[0] for call in trace.calls),
+                            *(model for item in evidence for model in item.models),
+                        ],
+                        arguments=[
+                            *((f"parameter:{key}", value) for key, value in trace.parameters),
+                            *(pair for item in evidence for pair in item.arguments),
+                        ],
+                        expression_value=score,
+                        operator=None if measured is None else measured.operator,
+                        threshold=None if measured is None else measured.threshold,
                         matched=nested.matched,
                         source_path=event.source_path if event is not None else None,
-                        score_summary={"count": 1, "matching_count": int(nested.matched)},
+                        score_summary=summary,
+                        input_span=evidence[-1].input_span if evidence else None,
+                        refusals=[refusal for item in evidence for refusal in item.refusals],
                     ),
                 )
             if name == "model_expression":

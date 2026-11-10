@@ -14,9 +14,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import NoReturn
 
+from quarry.engine.contracts import CompiledRuleArtifact, DecisionTree
 from quarry.engine.desugar import COMPOSED_CHECK
 from quarry.language.runtime import surface_names
 from quarry.rule_versioning import InvalidQuarryRequirement, parse_quarry_requirement
@@ -40,6 +43,7 @@ MAX_IMPORTS_PER_RULE = 128
 MAX_IMPORT_NAME_LENGTH = 256
 _RESERVED_STRING_PREFIX = "$__quarry_"
 _CALL_STRING_PREFIX = "$__quarry_call_"
+_CALL_STRING_REFERENCE = re.compile(r"([$@#])__quarry_call_(\d{3})_([a-zA-Z0-9_]+)")
 
 
 def _fail(rule: DSLRule, sources: Mapping[str, str], message: str, reason: str) -> NoReturn:
@@ -322,3 +326,26 @@ def link_public_rule_calls(
         if linked[name].import_groups:
             linked[name] = _link_calls(linked[name], linked, sources)
     return linked
+
+
+def label_called_rule_artifact(
+    artifact: CompiledRuleArtifact, rule: DSLRule
+) -> CompiledRuleArtifact:
+    """Show the called rule's name in human-readable string references."""
+
+    if not rule.called_rules or artifact.decision_tree is None:
+        return artifact
+
+    def display(match: re.Match[str]) -> str:
+        index = int(match[2])
+        return (
+            f"{rule.called_rules[index]}::{match[1]}{match[3]}"
+            if index < len(rule.called_rules)
+            else match[0]
+        )
+
+    nodes = tuple(
+        replace(node, label=_CALL_STRING_REFERENCE.sub(display, node.label))
+        for node in artifact.decision_tree.nodes
+    )
+    return replace(artifact, decision_tree=DecisionTree(nodes))

@@ -48,3 +48,16 @@ def test_invalid_public_call_fails_at_load(imports: str, condition: str, reason:
     with pytest.raises(RuleValidationError) as failure:
         DSLScanner(QuarryConfig(quarry_rule_texts=(source,)))
     assert failure.value.details["reason"] == reason
+
+
+def test_called_rule_strings_and_evidence_keep_the_callee_identity() -> None:
+    source = (
+        'rule "PI"\nstrings:\n    $i = "ignore"\n'
+        "condition:\n    $i in messages[0].content\n" + _CALLER + "    pi(messages.user_messages)\n"
+    )
+    scanner = DSLScanner(QuarryConfig(quarry_rule_texts=(source,)))
+    result = scanner.scan_data(_CONVERSATION, enable_explain=True)
+    evidence = next(item for item in result.explanations or () if item.rule_name == "R")
+    assert sorted(result.rule_matches) == ["PI", "R"]
+    assert "PI::$i" in scanner.compiled_rules["R"].decision_tree.nodes[0].label
+    assert evidence.model_results[0].score_summary["chunks"][0]["outcome"] is True
