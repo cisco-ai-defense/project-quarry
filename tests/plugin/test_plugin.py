@@ -2613,7 +2613,14 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
     result = scan["result"]["structuredContent"]
     assert result["completion_state"] == "incomplete"
     assert result["diagnostics"] == [
-        {"code": "evaluation_error", "rule_name": "r", "message": "Inference model 'judge' failed"}
+        {
+            "code": "evaluation_error",
+            "rule_name": "r",
+            "message": (
+                "Inference model 'judge' could not be called: local AWS credentials are "
+                "missing or expired"
+            ),
+        }
     ]
     assert after_exit == b""
 

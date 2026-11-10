@@ -993,6 +993,67 @@ def _unusable_aws_credentials(exc: BaseException) -> bool:
     return any(isinstance(link, credential_errors) for link in _exception_chain(exc))
 
 
+def _provider_failure(exc: BaseException, model_id: str) -> LLMError:
+    """Classify a final provider failure without exposing provider-controlled text."""
+
+    chain = tuple(_exception_chain(exc))
+    type_names = {error_type.__name__ for link in chain for error_type in type(link).__mro__}
+    status = next(
+        (
+            value
+            for link in chain
+            for source in (link, getattr(link, "response", None))
+            if isinstance(value := getattr(source, "status_code", None), int)
+            and not isinstance(value, bool)
+        ),
+        None,
+    )
+
+    if _unusable_aws_credentials(exc):
+        # LiteLLM assigns a status to some local setup failures even though no request was sent.
+        return _llm_error(
+            "authentication",
+            f"Inference model '{model_id}' could not be called: local AWS credentials are "
+            "missing or expired",
+            model_id,
+        )
+
+    http_status = f" (HTTP {status})" if status is not None else ""
+    if type_names & {"AuthenticationError", "PermissionDeniedError"} or status in {401, 403}:
+        return _llm_error(
+            "authentication",
+            f"Inference model '{model_id}' was refused by the provider{http_status}: "
+            "credentials are missing, expired, invalid, or not authorized for this model",
+            model_id,
+        )
+    if "ContextWindowExceededError" in type_names:
+        return _llm_error(
+            "context_window_exceeded",
+            f"Inference model '{model_id}' rejected the request{http_status}: input exceeds "
+            "the model's context window",
+            model_id,
+        )
+    if "NotFoundError" in type_names or status == 404:
+        return _llm_error(
+            "model_not_found",
+            f"Inference model '{model_id}' was not found by the provider{http_status}: check "
+            "the configured model name and region",
+            model_id,
+        )
+    if type_names & {"BadRequestError", "UnsupportedParamsError"} or status in {400, 422}:
+        return _llm_error(
+            "bad_request",
+            f"Inference model '{model_id}' rejected the request as invalid{http_status}: the "
+            "provider does not accept this conversation or these parameters for this model",
+            model_id,
+        )
+    return _llm_error(
+        "provider_error",
+        f"Inference model '{model_id}' failed{http_status}",
+        model_id,
+    )
+
+
 async def _litellm_completion(litellm: Any, **kwargs: Any) -> Any:
     """Call LiteLLM once and identify failures that Quarry may retry."""
 
@@ -1347,6 +1408,22 @@ async def _system_one_request(
         raise LLMError("System One request was rate limited", {"code": "rate_limit"})
     if isinstance(status_code, int) and 500 <= status_code < 600:
         raise LLMError("System One provider is unavailable", {"code": "provider_unavailable"})
+    if status_code in {401, 403}:
+        raise LLMError(
+            "System One request was refused: credentials are missing, expired, invalid, or "
+            "not authorized for this model",
+            {"code": "authentication"},
+        )
+    if status_code == 404:
+        raise LLMError(
+            "System One model was not found: check the configured model name",
+            {"code": "model_not_found"},
+        )
+    if status_code in {400, 422}:
+        raise LLMError(
+            "System One rejected the request as invalid",
+            {"code": "bad_request"},
+        )
     if status_code != 200:
         # The body can echo request content, so only the status leaves the adapter.
         raise LLMError(
@@ -1947,9 +2024,7 @@ class ModelInferenceBackend:
         except TimeoutError:
             raise
         except Exception as exc:
-            raise _llm_error(
-                "provider_error", f"Inference model '{model_id}' failed", model_id
-            ) from exc
+            raise _provider_failure(exc, model_id) from exc
 
     def _score_request(
         self,
