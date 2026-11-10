@@ -56,7 +56,7 @@ def _static_values(
                 return None
             if plan := artifact.tool_quantifiers.get(spec.atom_id):
                 uncertain = False
-                for tool in evaluation_input.static.read_tools().values():
+                for tool in evaluation_input.static.tools.values():
                     check_deadline()
                     result = _step_value(
                         StaticOracle(tool), specs, plan.body, BOOT, static_unknown.copy()
