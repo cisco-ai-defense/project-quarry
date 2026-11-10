@@ -1077,7 +1077,7 @@ async def _evaluate_extract_windows(expression, context, event, environment, tra
         for value in (left, right, head)
     ):
         raise ValueError("text.extract() bounds must be non-negative integers")
-    by_place = {
+    by_place: dict[tuple[object, object], SourceText] = {
         (text.origin.position, text.origin.field)
         if isinstance(text.origin, Place)
         else ("found", text.origin): text

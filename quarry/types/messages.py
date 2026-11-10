@@ -1317,8 +1317,7 @@ class Messages(Sequence[MessageType]):
             texts.append((position, "", message.content, message))
             for number, call in enumerate(getattr(message, "tool_calls", ())):
                 texts.extend(
-                    (position + number + 1, field, text, call)
-                    for field, text in call.texts()
+                    (position + number + 1, field, text, call) for field, text in call.texts()
                 )
         places = [(position, field) for position, field, _, _ in texts]
         start, end = (span.position, span.field), (span.end_position, span.end_field)

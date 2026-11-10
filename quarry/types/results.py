@@ -174,7 +174,9 @@ class Span:
     def end_position(self) -> int:
         if self.end_place_position is not None:
             return self.end_place_position
-        return self.end_message_index if self.place_position is None else self.place_position
+        if self.place_position is not None:
+            return self.place_position
+        return self.message_index if self.end_message_index is None else self.end_message_index
 
     @property
     def field(self) -> str:
