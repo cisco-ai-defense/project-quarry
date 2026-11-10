@@ -702,7 +702,7 @@ so the intended grouping is explicit.
 | 3 | boolean not | `not` | right | Applies to the expression immediately after it. |
 | 4 | flow | `before`, `before(within:N)`, `right_before`, `after`, `after(within:N)`, `right_after`, `until` | none | Relates two event conditions. Each operand is one event: a single condition, an `any` comprehension, `and`/`or`/`not` over the element of an enclosing comprehension, or an `or` of such operands. `all` is allowed only on the sustained side of `until`. Chain flow operators only with parentheses. |
 | 5 | comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` | none | Compares two values. Chain comparisons only with parentheses. |
-| 6 | text and membership | `contains`, `contains_any`, `~`, `matches`, `in`, `as` | none | Tests text or membership and binds captures. |
+| 6 | text and membership | `contains`, `contains_any`, `~`, `matches`, `in`, `inside`, `as` | none | Tests text or membership and binds captures. |
 | 7 | addition | `+`, `-` | left | Adds or subtracts numeric values. |
 | 8 | multiplication | `*` | left | Multiplies numeric values. |
 | 9 | postfix access | `.field`, `.method(...)`, `[index]`, `[slice]`, `.*` | left | Reads fields, calls methods, indexes, slices, or expands object values. |
@@ -946,6 +946,14 @@ Match when the left number is greater than or equal to the right number.
 Grammar: `comparison: in_expr ">=" in_expr`
 
 Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
+
+### inside
+
+Test whether one span is covered by a span from the right-hand list.
+
+Grammar: `in_expr: arith_expr "inside" arith_expr`
+
+Examples: [examples/span-inside.rule](examples/span-inside.rule)
 
 ### less-than-comparison
 
@@ -1252,6 +1260,7 @@ Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
 | `>=` | operator | no |
 | `if` | operator | no |
 | `in` | operator | yes |
+| `inside` | operator | no |
 | `{` | punctuation | no |
 | `[` | punctuation | no |
 | `(` | punctuation | no |

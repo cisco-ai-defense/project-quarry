@@ -544,6 +544,19 @@ condition:
         backend_required=True,
     ),
     ExampleRecord(
+        id="example:span-inside",
+        rule_text="""rule "Quoted secret"
+strings:
+    $secret = "password"
+    $quote = "\\\"password\\\""
+condition:
+    any s in $secret.spans(user_messages) where s inside $quote.spans(user_messages)
+""",
+        covered_item_ids=("construct:inside",),
+        matching={"messages": [{"role": "user", "content": 'The secret is "password".'}]},
+        non_matching={"messages": [{"role": "user", "content": "The password is exposed."}]},
+    ),
+    ExampleRecord(
         id="example:model-spans",
         rule_text=r"""rule "PII email"
 strings:

@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "content": "The secret is \"password\".",
+      "role": "user"
+    }
+  ]
+}
