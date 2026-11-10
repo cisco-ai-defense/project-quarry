@@ -574,6 +574,20 @@ condition:
         non_matching={"messages": [{"role": "user", "content": "The password is exposed."}]},
     ),
     ExampleRecord(
+        id="example:span-lists",
+        rule_text="""rule "Longest suspicious span"
+strings:
+    $short = "ignore"
+    $long = "ignore previous"
+condition:
+    user_said("ignore") and
+    len(outermost(union($short.spans(messages), $long.spans(messages)))) == 1
+""",
+        covered_item_ids=("compiler_form:outermost", "compiler_form:union"),
+        matching={"messages": [{"role": "user", "content": "ignore previous"}]},
+        non_matching={"messages": [{"role": "user", "content": "hello"}]},
+    ),
+    ExampleRecord(
         id="example:model-spans",
         rule_text=r"""rule "PII email"
 strings:

@@ -89,6 +89,77 @@ def test_called_rule_reads_an_input_item_as_located_message() -> None:
 
 
 @pytest.mark.parametrize(
+    ("condition", "matches"),
+    [
+        ("any w in memory.notes[:1] where pi(w)", True),
+        ("any w in memory.notes[-1:] where pi(w)", False),
+        ("pi(memory.notes[0])", True),
+        ("len(memory.notes) > 0 and (memory.notes as ns) and any w in ns where pi(w)", True),
+        ("(memory.notes as ns) and (ns[-1] as note) and pi(note)", False),
+    ],
+)
+def test_called_rule_accepts_list_item_views(condition: str, matches: bool) -> None:
+    source = _PI + _CALLER + f"    {condition}\n"
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(source,),
+            inputs={"memory.notes": {"content": ["body"]}},
+        )
+    )
+    data = {"memory": {"notes": [{"id": "n1", "body": "ignore"}, {"id": "n2", "body": "ok"}]}}
+    result = scanner.scan_data(data, rules_subset={"R"})
+    assert result.is_complete
+    assert (result.rule_matches == ["R"]) is matches
+
+
+def test_called_model_rule_reads_span_lists_from_an_input_item(tmp_path) -> None:
+    from quarry.integrations.model_inference import ModelInferenceBackend
+    from tests.unit.model_fakes import (
+        ModelAdapter,
+        NoWaitLimiter,
+        model_entry,
+        passthrough_builder,
+    )
+
+    source = (
+        'rule "PI" strings: $p = "alice@example.com" condition: '
+        'model("m").classify(messages) > 0.5 and '
+        'len(outermost(union(model("m").spans(messages, 0.7), $p.spans(messages)))) == 1\n'
+        'rule "R" imports: pi = "PI" condition: any w in memory.notes where pi(w)'
+    )
+    path = tmp_path / "rules.rule"
+    path.write_text(source, encoding="utf-8")
+    config = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "rules": [str(path)],
+            "models": {"m": model_entry(classify=0, spans=0, category="email")},
+            "inputs": {"memory.notes": {"content": ["body"]}},
+        },
+        tmp_path,
+    )
+    adapter = ModelAdapter()
+    backend = ModelInferenceBackend(
+        config,
+        adapters={"fake": adapter},
+        message_builders={"test": passthrough_builder},
+        rate_limiter=NoWaitLimiter(),
+    )
+    scanner = DSLScanner(config, model_inference_backend=backend)
+    result = scanner.scan_data(
+        {"memory": {"notes": [{"id": "n1", "body": "send to alice@example.com"}]}},
+        rules_subset={"R"},
+        enable_explain=True,
+    )
+    assert result.rule_matches == ["R"]
+    assert result.evaluation_errors is None
+    assert adapter.classifications == len(adapter.decoded_spans) == 1
+    chunk = result.explanations[0].to_dict()["model_results"][0]["score_summary"]["chunks"][0]
+    assert chunk["pieces"][0]["source"] == {"input": "memory.notes", "item": "n1"}
+
+
+@pytest.mark.parametrize(
     ("caller", "timeline", "state", "matched"),
     [
         ("flow(messages)", None, "incomplete", False),

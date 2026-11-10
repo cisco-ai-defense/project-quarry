@@ -149,6 +149,17 @@ def test_plugin_lists_declared_inputs():
             True,
         ),
         (
+            "len(union($p.spans(skill.instructions.body), $q.spans(skill.instructions.body))) == 2",
+            {"skill": {"instructions": {"body": "x ignore this"}}},
+            True,
+        ),
+        (
+            "len(outermost(union($p.spans(skill.instructions.body), "
+            "$q.spans(skill.instructions.body)))) == 1",
+            {"skill": {"instructions": {"body": "x ignore this"}}},
+            True,
+        ),
+        (
             "any w in memory.notes where any s in $p.spans(w.body) where "
             "s inside $q.spans(skill.instructions.body)",
             {

@@ -23,8 +23,10 @@ a public function, surface, or grammar form.
 | `model.spans(messages: model_input, threshold: number) -> collection<span>` | Return original-conversation spans from the alias-configured span operation. |
 | `model.split(messages: model_input, max_input_tokens: integer, overlap: integer = null, context: model_input = null) -> collection<model_input>` | Partition messages into model-sized chunks for one non-nested `any` score check. |
 | `model_split(model: string, messages: model_input, max_input_tokens: integer) -> collection<model_input>` | Deprecated. Compatibility spelling for `model("alias").split(...)` in version 2 rules. |
+| `outermost(spans: collection<span>) -> collection<span>` | Keep spans that no other span in the list contains, in text order. |
 | `refused(value: boolean \| number \| string \| message) -> boolean` | Return whether a `model("alias").score(...)` or `.complete(...)` call in `value` was refused. |
 | `text_ref(name: string) -> text_reference` | Refer to configured policy text by its exact resource name. |
+| `union(first: collection<span>, second: collection<span>) -> collection<span>` | Combine two span lists in text order, keeping equal spans once. |
 | `add_message(role: string, content: string) -> model_input` | Append one text message to a model input created with `message(...)`. |
 | `assistant_said(text: string, case_sensitive: boolean = false) -> boolean` | Return whether any assistant message contains the supplied text. |
 | `call_sequence() -> collection<string>` | Return assistant tool-call names in chronological order. |
@@ -288,6 +290,18 @@ This spelling remains available during migration. New rules should use the model
 
 Examples: [examples/compatibility-model-split.rule](examples/compatibility-model-split.rule) (requires a configured backend)
 
+### `outermost`
+
+`outermost(spans: collection<span>) -> collection<span>`
+
+Rule syntax: `outermost(spans)`
+
+Keep spans that no other span in the list contains, in text order.
+
+- Allowed in: condition, comprehension_source, comprehension_body
+
+Examples: [examples/span-lists.rule](examples/span-lists.rule)
+
 ### `refused`
 
 `refused(value: boolean | number | string | message) -> boolean`
@@ -318,6 +332,18 @@ being mistaken for the policy itself.
 - `name`: must be written directly in the rule
 
 Examples: [examples/model-inference.rule](examples/model-inference.rule) (requires a configured backend)
+
+### `union`
+
+`union(first: collection<span>, second: collection<span>) -> collection<span>`
+
+Rule syntax: `union(spans, spans)`
+
+Combine two span lists in text order, keeping equal spans once.
+
+- Allowed in: condition, comprehension_source, comprehension_body
+
+Examples: [examples/span-lists.rule](examples/span-lists.rule)
 
 ### `add_message`
 

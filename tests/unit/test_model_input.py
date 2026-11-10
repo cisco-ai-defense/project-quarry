@@ -1544,11 +1544,6 @@ _SPAN_FILTER = (
             id="unknown-completion-field",
         ),
         pytest.param(
-            "condition: " + 'any c in model("email").spans(messages, 0.5) where true',
-            "only model().split() can be a comprehension collection",
-            id="spans-as-a-comprehension-collection",
-        ),
-        pytest.param(
             "condition: " + _SPLIT + "true",
             "model().split() must be consumed by a score predicate",
             id="split-without-a-score",

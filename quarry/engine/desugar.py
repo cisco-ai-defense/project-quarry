@@ -40,6 +40,7 @@ from quarry.language.runtime import surface_names
 from quarry.types.dsl import (
     AllComprehension,
     AnyComprehension,
+    Assignment,
     BinaryOp,
     FieldAccess,
     FilterComprehension,
@@ -52,6 +53,7 @@ from quarry.types.dsl import (
     StringPosition,
     StringSetQuantifier,
     UnaryOp,
+    walk_condition_nodes,
 )
 from quarry.types.dsl.operators.flow import FlowOp
 from quarry.types.dsl.traversal import condition_child_fields, iter_condition_children
@@ -69,6 +71,25 @@ _FLOW_FUNCTIONS = ("called_tool", "called_tools", "user_said", "assistant_said")
 ORDERS_INPUT_ITEMS = "orders input items"
 # Reserved binder for a public rule's check over a messages value.
 COMPOSED_CHECK = "\x00composed"
+
+
+def _without_check_bodies(node):
+    """Treat a called rule's body as its own rule when checking outer model nesting."""
+
+    if isinstance(node, (AnyComprehension, AllComprehension)) and node.variable.startswith(
+        COMPOSED_CHECK
+    ):
+        return _without_check_bodies(node.collection)
+    changes = {}
+    for name in condition_child_fields(node):
+        value = getattr(node, name)
+        if hasattr(value, "__dataclass_fields__"):
+            rewritten = _without_check_bodies(value)
+            if rewritten is not value:
+                changes[name] = rewritten
+        elif isinstance(value, (list, tuple)):
+            changes[name] = type(value)(_without_check_bodies(item) for item in value)
+    return replace(node, **changes) if changes else node
 
 
 @dataclass(frozen=True)
@@ -169,12 +190,10 @@ class Desugarer:
             and not isinstance(node, FlowOp)
             and node.operator in ("and", "or")
         ):
-            alias = self._t.scalar_alias(node.left)
-            if alias is not None and node.operator == "and":
-                var, expr = alias
-                return self.cond(self._t.substitute_identifier(node.right, var, expr), scope)
+            if node.operator == "and":
+                return C.conj(self.cond(part, scope) for part in self._unaliased(node))
             left, right = self.cond(node.left, scope), self.cond(node.right, scope)
-            return C.conj([left, right]) if node.operator == "and" else C.disj([left, right])
+            return C.disj([left, right])
         if isinstance(node, UnaryOp) and node.operator == "not":
             return C.neg(self.cond(node.operand, scope))
         if isinstance(node, FlowOp):
@@ -223,6 +242,36 @@ class Desugarer:
         (var,) = reads
         binding = _lookup(scope, var)
         return C.Pred(node, binding.var, binding.surface)
+
+    def _unaliased(self, node) -> list:
+        """Inline values named with ``as`` throughout one ``and`` chain."""
+
+        parts: list = []
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, BinaryOp) and current.operator == "and":
+                pending.extend((current.right, current.left))
+            else:
+                parts.append(current)
+        index = 0
+        while index < len(parts):
+            alias = self._t.scalar_alias(parts[index])
+            if alias is None:
+                index += 1
+                continue
+            var, expr = alias
+            del parts[index]
+            if any(
+                isinstance(child, Assignment) and child.variable == var
+                for part in parts
+                for child in walk_condition_nodes(part)
+            ):
+                raise UnsupportedConstruct(
+                    f"`as {var}` names two values in one `and`; give each its own name"
+                )
+            parts = [self._t.substitute_identifier(part, var, expr) for part in parts]
+        return parts
 
     def join(self, node, scope) -> C.Formula | None:
         """``test contains bound`` as one strategy-neutral relation between scoped elements."""
@@ -286,8 +335,9 @@ class Desugarer:
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
             chunk = self._bind(node.variable, "\x00chunks", C.Events("\x00chunks"))
             return C.ChunkQuant(q, chunk.var, node.collection, self.cond(node.condition, (chunk,)))
-        if self._t.contains_model_call(node.condition):
-            self._check_model_comprehension(node, scope)
+        outer = _without_check_bodies(node.condition)
+        if self._t.contains_model_call(outer):
+            self._check_model_comprehension(replace(node, condition=outer), scope)
         if self._t.is_tools(node.collection):
             binding = self._bind(node.variable, "tools", C.Events("tools"))
             body = self.cond(node.condition, (*scope, binding))

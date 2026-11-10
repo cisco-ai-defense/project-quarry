@@ -704,7 +704,11 @@ class _Compiler:
                 collection=split_call,
                 condition=node.condition,
             )
-        if isinstance(node, AnyComprehension) and isinstance(node.collection, ModelCall):
+        if (
+            isinstance(node, AnyComprehension)
+            and isinstance(node.collection, ModelCall)
+            and node.collection.operation == "split"
+        ):
             model_split = self._compile_model_split(node, scope)
             if model_split is not None:
                 return model_split
@@ -2803,6 +2807,35 @@ class _Compiler:
                 "model().spans() input must be a view of the original conversation"
             )
         return messages, threshold
+
+    @dsl_compiler_form(
+        name="outermost",
+        return_type="collection<span>",
+        allowed_uses=(Use.CONDITION, Use.COMPREHENSION_SOURCE, Use.COMPREHENSION_BODY),
+        syntax="outermost(spans)",
+    )
+    def _bind_outermost(
+        self,
+        spans: Annotated[object, DSLParameter(accepted_types=("collection<span>",))],
+    ) -> tuple[object]:
+        """Keep spans that no other span in the list contains, in text order."""
+
+        return (spans,)
+
+    @dsl_compiler_form(
+        name="union",
+        return_type="collection<span>",
+        allowed_uses=(Use.CONDITION, Use.COMPREHENSION_SOURCE, Use.COMPREHENSION_BODY),
+        syntax="union(spans, spans)",
+    )
+    def _bind_union(
+        self,
+        first: Annotated[object, DSLParameter(accepted_types=("collection<span>",))],
+        second: Annotated[object, DSLParameter(accepted_types=("collection<span>",))],
+    ) -> tuple[object, object]:
+        """Combine two span lists in text order, keeping equal spans once."""
+
+        return first, second
 
     @staticmethod
     def _is_conversation_backed_messages(node) -> bool:
