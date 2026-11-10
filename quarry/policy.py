@@ -23,7 +23,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
@@ -31,14 +31,20 @@ from typing import Any
 from quarry.config import QuarryConfig
 from quarry.decision_report import conversation_sha256, explores, scanner_digests, tree_report
 from quarry.engine.contracts import CompiledRuleArtifact
+from quarry.input_registry import InputRegistry
+from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
+from quarry.language.runtime import surface_names
+from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.timer import (
     evidence_deadline,
     raise_if_evaluation_expired,
     remaining_evaluation_time,
     scan_deadline,
 )
+from quarry.safety.validator import _validate_json_tree
 from quarry.scanner import DSLScanner
+from quarry.types.exceptions import ConversationValidationError
 from quarry.types.parameters import (
     ParameterSpec,
     ParameterValue,
@@ -80,6 +86,19 @@ def _referenced_text_hashes(scanner: DSLScanner, required: set[str], key: bytes)
     }
 
 
+def _referenced_input_hashes(
+    scanner: DSLScanner, artifact: CompiledRuleArtifact
+) -> tuple[dict[str, str], dict[str, str]]:
+    read = artifact.read_surfaces
+    declarations = scanner.input_registry.declarations
+    inputs = {
+        section: _canonical_sha256(declarations[section].describe())
+        for section in sorted(read)
+        if section in declarations
+    }
+    return inputs, adapter_fingerprints(scanner.input_adapters, read)
+
+
 def _policy_identity(
     *,
     source_sha256: str,
@@ -90,10 +109,12 @@ def _policy_identity(
     text_resources: Mapping[str, str],
     models: Mapping[str, object],
     evidence_key: bytes,
+    inputs: Mapping[str, str] | None = None,
+    adapters: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the stable identity assigned once when source is compiled."""
 
-    return {
+    identity = {
         "source_sha256": source_sha256,
         "rule_name": rule_name,
         "dfa_hash": artifact.dfa_hash,
@@ -117,6 +138,62 @@ def _policy_identity(
         "text_resources": dict(text_resources),
         "models": dict(models),
     }
+    if inputs:
+        identity["inputs"] = dict(inputs)
+    if adapters:
+        identity["adapters"] = dict(adapters)
+    return identity
+
+
+def _sampled_values(
+    conversation: Any,
+    read: frozenset[str],
+    adapter_keys: Iterable[str],
+    ordered: bool,
+    registry: InputRegistry,
+) -> dict[str, Any] | None:
+    if not isinstance(conversation, dict):
+        return None
+    chat_read = bool(read & (surface_names() - {"tools"}))
+    keys = (
+        *(("messages",) if chat_read else ()),
+        *(("tools", "functions") if "tools" in read else ()),
+        *sorted(adapter_keys),
+    )
+    sampled = {key: conversation[key] for key in keys if key in conversation}
+    if ordered and "timeline" in conversation:
+        sampled["timeline"] = registry.timeline_read(
+            conversation["timeline"], read, conversation, chat_read
+        )
+    for surface in sorted(read):
+        namespace, _, name = surface.partition(".")
+        holder = conversation.get(namespace)
+        if name and isinstance(holder, dict) and name in holder:
+            sampled[surface] = holder[name]
+    return sampled
+
+
+def _sampled(
+    conversation: Any,
+    read: frozenset[str],
+    adapter_keys: Iterable[str],
+    ordered: bool,
+    rate: float,
+    limits: SafetyLimits,
+    registry: InputRegistry,
+) -> bool:
+    sampled = _sampled_values(conversation, read, adapter_keys, ordered, registry)
+    if sampled is None:
+        return False
+    most = limits.max_total_size if limits.enforce_limits else None
+    for key, value in sampled.items():
+        if most is not None and json_size(value, most) > most:
+            return False
+        try:
+            _validate_json_tree(value, key, limits.max_nesting_depth)
+        except ConversationValidationError:
+            return False
+    return explores(conversation_sha256(sampled), rate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +208,12 @@ class CompiledPolicy:
     _source_sha256: str = field(repr=False, compare=False)
     _text_resource_hashes: Mapping[str, str] = field(repr=False, compare=False)
     _model_hashes: Mapping[str, str] = field(repr=False, compare=False)
+    _input_hashes: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
+    _adapter_hashes: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
     _evidence_key: bytes = field(
         default_factory=lambda: secrets.token_bytes(32), repr=False, compare=False
     )
@@ -175,6 +258,7 @@ class CompiledPolicy:
             name: _canonical_sha256(configuration)
             for name, configuration in model_configuration.items()
         }
+        input_hashes, adapter_hashes = _referenced_input_hashes(scanner, artifact)
         digest = _canonical_sha256(
             _policy_identity(
                 source_sha256=source_sha256,
@@ -185,6 +269,8 @@ class CompiledPolicy:
                 text_resources=text_resources,
                 models=model_configuration,
                 evidence_key=key,
+                inputs=input_hashes,
+                adapters=adapter_hashes,
             )
         )
         return cls(
@@ -196,6 +282,8 @@ class CompiledPolicy:
             _source_sha256=source_sha256,
             _text_resource_hashes=MappingProxyType(text_resources),
             _model_hashes=MappingProxyType(model_hashes),
+            _input_hashes=MappingProxyType(input_hashes),
+            _adapter_hashes=MappingProxyType(adapter_hashes),
             _evidence_key=key,
         )
 
@@ -335,7 +423,15 @@ class CompiledPolicy:
                     record_traces=record_traces,
                     rules_subset={self._rule_name},
                     decision_paths=decision_paths,
-                    explore=explores(conversation_sha256(conversation), explore_rate),
+                    explore=_sampled(
+                        conversation,
+                        self._scanner.compiled_rules[self._rule_name].read_surfaces,
+                        self._adapter_hashes,
+                        self._scanner.compiled_rules[self._rule_name].orders_input_items,
+                        explore_rate,
+                        self._scanner.limits,
+                        self._scanner.input_registry,
+                    ),
                     deferred_evidence=deferred,
                 )
                 remaining = remaining_evaluation_time()
@@ -414,6 +510,7 @@ def compile_policy(
     model_inference_backend=None,
     llm_rate_limiter=None,
     evidence_key: bytes | None = None,
+    input_adapters: Mapping[str, InputAdapter] | None = None,
 ) -> CompiledPolicy:
     """Compile one rule and bind its policy parameters into a reusable policy."""
 
@@ -434,6 +531,7 @@ def compile_policy(
         config,
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
+        input_adapters=input_adapters,
         _allow_parameters=True,
     )
     return CompiledPolicy._from_scanner(

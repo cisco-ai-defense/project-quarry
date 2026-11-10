@@ -17,7 +17,12 @@
 """Safety limits for rule evaluation."""
 
 from dataclasses import dataclass
+from json.encoder import encode_basestring
 from math import isfinite
+from typing import Any
+
+_END = object()
+_MAX_JSON_DEPTH = 1_000
 
 
 @dataclass(frozen=True)
@@ -102,3 +107,94 @@ class SafetyLimits:
             or self.max_comprehension_size < 1
         ):
             raise ValueError("max_comprehension_size must be a positive integer")
+
+
+def utf8_size(text: str) -> int:
+    """The UTF-8 bytes of ``text``, a lone surrogate counted as its three bytes, as
+    ``sha256()`` and the regex engine encode it."""
+
+    return len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))
+
+
+# Characters escaped at a time by ``json_string_size``. An escape is at most six characters, so
+# measuring a text of controls copies at most six times this, however long the text.
+_ESCAPE_CHUNK = 1 << 16
+
+
+def json_string_size(text: str) -> int:
+    """The bytes ``text`` takes as a compact JSON string: its UTF-8 bytes, its two quotes, and
+    what escaping adds. ``encode_basestring`` is the escaping ``json.dumps(text,
+    ensure_ascii=False)`` does, in C; what it adds is ASCII, a byte a character, and since it
+    escapes character by character, a chunk at a time adds the same."""
+
+    escaped = sum(
+        len(encode_basestring(text[at : at + _ESCAPE_CHUNK])) - 2
+        for at in range(0, len(text), _ESCAPE_CHUNK)
+    )
+    return utf8_size(text) + 2 + escaped - len(text)
+
+
+def json_size(value: Any, limit: int) -> int:
+    """The size of ``value`` as compact JSON text, in UTF-8 bytes: the measure
+    ``max_total_size`` holds a scanned conversation and a generated completion to.
+
+    Exactly the length of ``json.dumps(value, separators=(",", ":"), ensure_ascii=False)``
+    in UTF-8: each string as a JSON string, quotes and escapes included
+    (``json_string_size``), keys included; numbers, ``true``, ``false`` and ``null`` as
+    written; two brackets per dict or list, a comma between items and a colon after each key.
+    Every occurrence counts, so a value named twice counts twice, as it does in the JSON text
+    and in the ``Messages`` built from it.
+
+    It saturates: once the running total passes ``limit`` this returns ``limit + 1`` and stops
+    walking, so a result above ``limit`` means "over budget", not how far over. A value nested
+    deeper than any JSON text, as a cyclic one is, is over budget too.
+    """
+
+    total = 0
+    # Each frame: the container's remaining items, whether it is a dict (whose items alternate
+    # key, value), and how many of its items were counted.
+    stack: list[list[Any]] = [[iter((value,)), False, 0]]
+    while stack:
+        frame = stack[-1]
+        current = next(frame[0], _END)
+        if current is _END:
+            stack.pop()
+            continue
+        if frame[2]:
+            # A colon before a dict's value, a comma before any other item but the first.
+            total += 1
+        frame[2] += 1
+        if isinstance(current, str):
+            # A string's UTF-8 bytes are at least its length; skip encoding one that is over.
+            if len(current) > limit - total:
+                return limit + 1
+            total += json_string_size(current)
+        elif current is True or current is None:
+            total += 4
+        elif current is False:
+            total += 5
+        elif isinstance(current, int):
+            # Its digits and sign; a number too long to print is over any budget.
+            digits = abs(current).bit_length() * 30103 // 100000
+            total += len(str(current)) if digits < 4000 else limit + 1
+        elif isinstance(current, float):
+            total += len(_json_float(current))
+        elif isinstance(current, dict):
+            total += 2
+            stack.append([(item for pair in current.items() for item in pair), True, 0])
+        elif isinstance(current, list | tuple):
+            total += 2
+            stack.append([iter(current), False, 0])
+        if total > limit or len(stack) > _MAX_JSON_DEPTH:
+            return limit + 1
+    return total
+
+
+def _json_float(number: float) -> str:
+    """How ``json.dumps`` writes ``number``."""
+
+    if number != number:
+        return "NaN"
+    if number in (float("inf"), float("-inf")):
+        return "Infinity" if number > 0 else "-Infinity"
+    return repr(number)

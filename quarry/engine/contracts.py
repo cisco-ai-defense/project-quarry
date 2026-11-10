@@ -31,8 +31,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, Literal
 
+from quarry.engine.atoms import AtomDomain
 from quarry.engine.symbolic_dfa import DFA
 from quarry.engine.temporal import Formula
 
@@ -42,7 +44,10 @@ if TYPE_CHECKING:
 # Bump when compilation or admission semantics change in a way that must invalidate
 # previously produced artifacts. Compiler-6 admitted colliding `variables:`/`as`
 # bindings and referenced captures on the sustained side of `until`.
-COMPILER_VERSION = "compiler-7"
+# Compiler-8 records per-flow clocks so extension events cannot change a
+# conversation-only bounded flow. Saved compiler-7 artifacts must be recompiled
+# from rule source; the loader cannot migrate their serialized automata.
+COMPILER_VERSION = "compiler-8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,25 @@ class ClosedPlan:
     automaton matches over that run's events, oracle and binding."""
 
     dfa: DFA
+
+
+@dataclass(frozen=True, slots=True)
+class FlowCandidate:
+    """One event operand's compiled Boolean test at its own event."""
+
+    surface: str
+    formula: Formula | None  # None means its predicate cannot be decided before the verdict.
+
+
+@dataclass(frozen=True, slots=True)
+class FlowRequirement:
+    """Candidate operands and complete sources needed for a flow verdict."""
+
+    candidates: tuple[FlowCandidate, ...]
+    ambient_surfaces: tuple[str, ...] = ()
+    static_formula: Formula | None = None
+    static_sustained: tuple[Formula, ...] = ()
+    clock_surfaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +201,7 @@ class CompiledRuleArtifact:
     # is deliberately structural rather than an AST object reference so compiled artifacts
     # remain independent of the mutable parser objects and can be serialized later.
     node_atom_ids: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    flow_requirements: tuple[FlowRequirement, ...] = ()
     temporal: bool = False
     notes: tuple[str, ...] = ()
     # Value capture (``... as v`` / cross-field join): the recipe the executor uses
@@ -214,6 +239,70 @@ class CompiledRuleArtifact:
         return set(self.dfa.atoms).union(
             *(plan.dfa.atoms for plan in self.closed_conditions.values())
         )
+
+    @cached_property
+    def read_surfaces(self) -> frozenset[str]:
+        """Surfaces read by live atoms, flow clocks and collection work."""
+
+        surfaces = set().union(
+            *(
+                self._atom_reads(atom_id)
+                for atom_id in self.automaton_atoms
+                if atom_id in self.atom_specs
+            )
+        )
+        for requirement in self.flow_requirements:
+            surfaces.update(requirement.ambient_surfaces)
+            surfaces.update(requirement.clock_surfaces)
+        plan: Any = self.collect_plan
+        for expression in (
+            () if plan is None else (plan.source, plan.local_predicate, plan.model_predicate)
+        ):
+            if expression is not None:
+                surfaces.update(expression.inputs)
+                if expression.reads_messages:
+                    surfaces.add("messages")
+                if expression.reads_tools:
+                    surfaces.add("tools")
+        return frozenset(surfaces)
+
+    def _atom_reads(self, atom_id: str) -> frozenset[str]:
+        spec = self.atom_specs[atom_id]
+        expression = spec.model_expression
+        reads = {spec.selector}
+        if expression is not None:
+            reads.update(expression.inputs)
+            if expression.reads_tools:
+                reads.add("tools")
+            if spec.domain == AtomDomain.STATIC and not expression.reads_messages:
+                reads.discard(spec.selector)
+        return frozenset(reads)
+
+    @cached_property
+    def orders_input_items(self) -> bool:
+        """Whether a live flow orders input items against other timeline items."""
+
+        return "orders input items" in self.notes
+
+    @cached_property
+    def clock_only_surfaces(self) -> frozenset[str]:
+        """Sections read only as steps of a bounded shared clock."""
+
+        clocks = {
+            surface
+            for requirement in self.flow_requirements
+            for surface in requirement.clock_surfaces
+        }
+        read = set().union(
+            *(
+                self._atom_reads(atom_id)
+                for atom_id in self.automaton_atoms
+                if atom_id in self.atom_specs and self.atom_specs[atom_id].predicate != "on_surface"
+            )
+        )
+        for requirement in self.flow_requirements:
+            read.update(requirement.ambient_surfaces)
+        return frozenset(clocks - read)
 
 
 AtomEvaluationStatus = Literal["evaluated_true", "evaluated_false", "skipped"]

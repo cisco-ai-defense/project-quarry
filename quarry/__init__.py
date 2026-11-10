@@ -18,6 +18,7 @@
 
 from quarry._version import __version__
 from quarry.core.conversation import Conversation
+from quarry.inputs import InputAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.policy import CompiledPolicy, compile_policy
 from quarry.policy_serialization import load_compiled_policy
@@ -81,6 +82,7 @@ __all__ = [
     "ConversationValidationError",
     "DSLScanner",
     "EvaluationError",
+    "InputAdapter",
     "EvaluationTimeoutError",
     "IncompleteScanError",
     "LLMError",

@@ -114,6 +114,7 @@ for match in matches:
 - [Rule writing](docs/rule-writing.md) and [string matching](docs/string-matching.md)
 - [Configuration](docs/configuration.md) and [message input](docs/messages.md)
 - [Python API](docs/python-api.md) and [parameters](docs/parameters.md)
+- [Declared inputs](docs/inputs.md) for data beside conversation messages
 - [Model inference](docs/model-inference.md) and [application integration](docs/integration.md)
 - [Agent plugin](docs/PLUGIN.md) for Codex, Claude Code, and MCP hosts
 - [Architecture](docs/architecture.md) and [testing](docs/testing.md)
