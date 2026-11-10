@@ -247,6 +247,17 @@ async def test_input_text_spans_keep_field_provenance_across_a_projection() -> N
     }
     inside = E("span_covered", None, (source, E("index", 0, (source,))))
     assert await evaluate_model_expression(inside, context, bindings={"item": item}) is True
+    optional = {"id": "n2", "body": "instructions"}
+    body = E(
+        "string_spans",
+        "body",
+        (
+            projected,
+            E("string_patterns", "0000", (E("literal", "instructions"),)),
+        ),
+    )
+    found = await evaluate_model_expression(body, context, bindings={"item": optional})
+    assert found.items[0].value.to_dict()["field"] == "body"
 
 
 async def test_tool_argument_spans_keep_each_calls_place_and_nested_path() -> None:
