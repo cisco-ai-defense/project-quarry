@@ -376,6 +376,20 @@ class _Refused(NamedTuple):
         )
 
 
+def _tool_call_wire(value: Any) -> Any:
+    """Keep the canonical fields from one provider-generated tool call."""
+
+    if not isinstance(value, Mapping):
+        return value
+    wire = {field: value[field] for field in ("id", "type", "function") if field in value}
+    function = wire.get("function")
+    if isinstance(function, Mapping):
+        wire["function"] = {
+            field: function[field] for field in ("name", "arguments") if field in function
+        }
+    return wire
+
+
 def _assistant_wire_message(value: Any) -> dict[str, Any]:
     """Keep the canonical assistant fields from one provider response message."""
 
@@ -387,6 +401,8 @@ def _assistant_wire_message(value: Any) -> dict[str, Any]:
     }
     if wire.get("tool_calls") is None or wire.get("tool_calls") == []:
         wire.pop("tool_calls", None)
+    elif isinstance(wire["tool_calls"], list):
+        wire["tool_calls"] = [_tool_call_wire(call) for call in wire["tool_calls"]]
     wire.setdefault("role", "assistant")
     return wire
 
