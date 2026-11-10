@@ -54,7 +54,7 @@ from quarry.types.dsl import (
     walk_condition_nodes,
 )
 from quarry.types.parameters import ParameterSpec, ParameterType
-from quarry.types.rules import DSLRule
+from quarry.types.rules import DSLRule, ImportGroup
 
 # Maximum size of a resolved ``variables:`` expansion — enforced both on each binding and on
 # the final condition after bindings are inserted. This limit stops a short chain of repeated
@@ -72,6 +72,10 @@ class _VariableBindings(dict):
 
 class _ParameterDeclarations(tuple):
     """Marker for a parsed ``parameters:`` block."""
+
+
+class _Imports(tuple):
+    """Marker for named public-rule imports."""
 
 
 @dataclass(frozen=True)
@@ -431,9 +435,12 @@ class DSLTransformer(Transformer):
         parameters: tuple[ParameterSpec, ...] = ()
         condition = None
         collect = None
+        import_groups: tuple[ImportGroup, ...] = ()
 
         for arg in args:
-            if isinstance(arg, _VariableBindings):
+            if isinstance(arg, _Imports):
+                import_groups = tuple(arg)
+            elif isinstance(arg, _VariableBindings):
                 variables = arg
             elif isinstance(arg, _ParameterDeclarations):
                 parameters = tuple(arg)
@@ -467,10 +474,31 @@ class DSLTransformer(Transformer):
 
         if condition is None:
             raise ValueError("rule requires a condition")
+        shadowed = sorted({group.name for group in import_groups} & set(variables))
+        if shadowed:
+            raise ValueError(
+                "variables: "
+                + ", ".join(map(repr, shadowed))
+                + " names an import; rename the variable or the import"
+            )
         rule_obj = DSLRule(self._decode_string_token(name), metadata, condition, collect=collect)
         rule_obj.strings = strings
         rule_obj.parameters = parameters
+        rule_obj.import_groups = import_groups
         return rule_obj
+
+    def module(self, *rules):
+        """Parse one source containing one or more public rules."""
+        return tuple(rules)
+
+    @dsl_construct(name="imports")
+    def imports_block(self, *groups):
+        """Name public rules to call on a messages value in ``condition:``."""
+        return _Imports(groups)
+
+    def import_group(self, name, target):
+        """Parse one named public-rule import."""
+        return ImportGroup(str(name), self._decode_string_token(target))
 
     @dsl_construct(name="parameters")
     def parameters_block(self, *items):

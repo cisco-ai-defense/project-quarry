@@ -32,6 +32,14 @@ ScanCompletionState = Literal["complete", "invalid", "incomplete"]
 ExplainLevel = bool | Literal["support"]
 
 
+@dataclass(frozen=True, slots=True)
+class ImportGroup:
+    """One public rule imported under a local name."""
+
+    name: str
+    rule: str
+
+
 @dataclass
 class DSLRule:
     """DSL rule."""
@@ -43,6 +51,9 @@ class DSLRule:
     source_file: Path | None = None
     parameters: tuple[ParameterSpec, ...] = ()
     collect: ConditionNode | None = None
+    import_groups: tuple[ImportGroup, ...] = ()
+    called_rules: tuple[str, ...] = ()
+    source_sha256: str | None = None
 
     def __post_init__(self):
         if self.strings is None:

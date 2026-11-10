@@ -30,7 +30,9 @@ from quarry.cache.async_cache import current_scan, result_cache, scan_scope
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
+from quarry.core.conversation import Conversation
 from quarry.core.logging import get_app_logger
+from quarry.dsl.composition import label_called_rule_artifact, link_public_rule_calls
 from quarry.dsl.functions import (
     capability_tags,
     intent_baseline,
@@ -51,10 +53,10 @@ from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
 from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
 from quarry.engine.flow_requirements import clock_feeds_settled, cross_source_flow_has_candidates
+from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
-from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
-from quarry.engine.witness import build_evidence
+from quarry.engine.witness import ModelResultEvidence, build_evidence
 from quarry.input_registry import InputRegistry, MissingInputState
 from quarry.inputs import InputAdapter, load_input_adapters
 from quarry.integrations.collection import evaluate_collect_plan
@@ -101,12 +103,39 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
-from quarry.types.messages import Messages, ToolCallTypeRegistry
+from quarry.types.messages import Messages, ToolCall, ToolCallTypeRegistry
+from quarry.types.origins import SourceText
 from quarry.types.parameters import ParameterValue
 from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+def _timeline_key(item: Any) -> tuple[str, int | str]:
+    return (
+        ("tool_call_id", item.id)
+        if isinstance(item, ToolCall)
+        else ("message_index", item.message_index)
+    )
+
+
+def _project_chunk_timeline(
+    positions: Mapping[tuple[str, int | str], int],
+    extensions: tuple[tuple[int, Any], ...],
+    chunk: list[tuple[int, Any]],
+) -> list[tuple[int, Any]] | None:
+    """Keep the supplied order when a selected messages value is an ordered transcript view."""
+    selected: list[tuple[int, Any]] = []
+    previous = -1
+    for _, item in chunk:
+        position = positions.get(_timeline_key(item))
+        if position is None or position <= previous:
+            return None
+        selected.append((position, item))
+        previous = position
+    ordered = sorted((*selected, *extensions), key=lambda entry: entry[0])
+    return list(enumerate(item for _, item in ordered))
 
 
 def _required_surfaces(artifact: CompiledRuleArtifact) -> set[str]:
@@ -370,11 +399,13 @@ class DSLScanner:
     def _build_initial_generation(self) -> _InitialGeneration:
         """Build and prepare a complete rule generation before publishing it ."""
         rule_files = self._discover_rule_files() if self.config.quarry_rules_paths else []
-        parsed_rules = [(self._parse_rule_file(path), str(path)) for path in rule_files]
+        parsed_rules = [
+            (rule, str(path)) for path in rule_files for rule in self._parse_rule_file(path)
+        ]
 
         for i, rule_text in enumerate(self.config.quarry_rule_texts):
             source = f"inline:{i}"
-            parsed_rules.append((self._parse_rule_text(rule_text, source), source))
+            parsed_rules.extend((rule, source) for rule in self._parse_rule_text(rule_text, source))
 
         for rule, _source in parsed_rules:
             self.input_registry.rewrite_rule(rule)
@@ -420,6 +451,12 @@ class DSLScanner:
         rules: dict[str, DSLRule] = {}
         active_sources: dict[str, str] = {}
         for rule, source in parsed_rules:
+            rules[rule.name] = rule
+            active_sources[rule.name] = source
+
+        rules = link_public_rule_calls(rules, active_sources)
+        for rule in rules.values():
+            source = active_sources[rule.name]
             self._validate_rule(rule, source)
             if rule.parameters and not self._allow_parameters:
                 raise RuleValidationError(
@@ -432,12 +469,13 @@ class DSLScanner:
                     },
                 )
 
-            rules[rule.name] = rule
-            active_sources[rule.name] = source
-
         self._link_candidate_functions(rules, active_sources)
         resource_requirements = self._prepare_candidate_resources(rules, resource_manager)
         compiled_rules = self._compile_candidate_rules(rules)
+        compiled_rules = {
+            name: label_called_rule_artifact(artifact, rules[name])
+            for name, artifact in compiled_rules.items()
+        }
 
         return _InitialGeneration(
             rules=rules,
@@ -487,18 +525,17 @@ class DSLScanner:
 
         return discovered
 
-    def _parse_rule_file(self, path: Path) -> DSLRule:
+    def _parse_rule_file(self, path: Path) -> tuple[DSLRule, ...]:
         """Read and parse one rule source without mutating scanner state."""
         try:
             rule_text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise RuleLoadError(str(path), "read", str(exc)) from exc
 
-        rule = self.parser.parse(rule_text, source=str(path))
-        if not isinstance(rule, DSLRule):
-            raise RuleLoadError(str(path), "parse", "Parser did not return a DSLRule")
-        rule.source_file = path
-        return rule
+        rules = self.parser.parse_many(rule_text, source=str(path))
+        for rule in rules:
+            rule.source_file = path
+        return rules
 
     def _compile_candidate_rules(self, rules: dict[str, DSLRule]) -> dict[str, Any]:
         """Compile every candidate rule to a DFA artifact .
@@ -536,13 +573,10 @@ class DSLScanner:
             logger.info(f"[STATUS] Compiled {len(compiled)} rules")
         return compiled
 
-    def _parse_rule_text(self, rule_text: str, source: str) -> DSLRule:
+    def _parse_rule_text(self, rule_text: str, source: str) -> tuple[DSLRule, ...]:
         """Parse a rule from an inline text string without filesystem access."""
 
-        rule = self.parser.parse(rule_text, source=source)
-        if not isinstance(rule, DSLRule):
-            raise RuleLoadError(source, "parse", "Parser did not return a DSLRule")
-        return rule
+        return self.parser.parse_many(rule_text, source=source)
 
     def _prepare_candidate_resources(
         self,
@@ -659,7 +693,12 @@ class DSLScanner:
                 )
 
     def _make_async_detector(
-        self, rule_ctx: ScanContext, *, explain: bool = False, regex_backend=None
+        self,
+        rule_ctx: ScanContext,
+        *,
+        artifact: CompiledRuleArtifact | None = None,
+        explain: bool = False,
+        regex_backend=None,
     ):
         """Build the async external-atom grounding backend for one rule evaluation.
 
@@ -725,6 +764,171 @@ class DSLScanner:
         async def detector(spec, text: str | tuple[str, ...], event=None) -> bool | Grounded:
             name = spec.detector
             arg = spec.detector_arg
+            if name == "split":
+                if artifact is None or spec.atom_id not in artifact.split_checks:
+                    raise ValueError("compiled rule is missing its called-rule check")
+                trace = ModelExpressionTrace() if explain else None
+                selected = await evaluate_model_expression(
+                    spec.model_expression,
+                    rule_ctx,
+                    event=event,
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+                if selected is MISSING:
+                    selected = rule_ctx.conversation.messages[0:0]
+                if not isinstance(selected, Messages):
+                    raise TypeError("called rule input must be a Messages value")
+                nested_ctx = rule_ctx.copy()
+                nested_ctx.conversation = Conversation._from_parts(
+                    selected,
+                    rule_ctx.conversation._tools,
+                    tools_supplied=rule_ctx.conversation._tools_supplied,
+                )
+                nested_ctx._timeline_cache = None
+                nested_ctx.evaluation_warnings = rule_ctx.evaluation_warnings
+                check = artifact.split_checks[spec.atom_id]
+                uses_events = bool(check.read_surfaces & self.input_registry.event_surfaces)
+                nested_ctx.ordered_timeline = None
+                if not uses_events:
+                    nested_ctx.extension_event_surfaces = {}
+                    nested_ctx.extension_event_sequence = ()
+                elif rule_ctx.ordered_timeline is not None:
+                    extension_ids = {id(item) for item in rule_ctx.extension_event_sequence}
+                    nested_ctx.extension_event_sequence = tuple(
+                        item for _, item in rule_ctx.ordered_timeline if id(item) in extension_ids
+                    )
+                    if check.flow_requirements and selected.shares_root_with(
+                        rule_ctx.conversation.messages
+                    ):
+                        positions = {
+                            _timeline_key(item): position
+                            for position, item in rule_ctx.ordered_timeline
+                            if id(item) not in extension_ids
+                        }
+                        extensions = tuple(
+                            (position, item)
+                            for position, item in rule_ctx.ordered_timeline
+                            if id(item) in extension_ids
+                        )
+                        nested_ctx.ordered_timeline = _project_chunk_timeline(
+                            positions, extensions, nested_ctx.timeline
+                        )
+                nested_input = build_evaluation_input(nested_ctx)
+                if (
+                    uses_events
+                    and nested_ctx.ordered_timeline is None
+                    and check.flow_requirements
+                    and cross_source_flow_has_candidates(
+                        check,
+                        nested_input,
+                        regex_backend or RE2_REGEX,
+                        raise_if_evaluation_expired,
+                    )
+                ):
+                    if rule_ctx.ordered_timeline is None:
+                        raise ConversationValidationError(
+                            "An explicit timeline is required for before/after across "
+                            "conversation and input items"
+                        )
+                    raise ConversationValidationError(
+                        "The input timeline cannot order a derived messages check"
+                    )
+                nested_detector = self._make_async_detector(
+                    nested_ctx,
+                    artifact=check,
+                    explain=explain,
+                    regex_backend=regex_backend,
+                )
+                evidence: list[ModelResultEvidence] = []
+
+                async def grounded(nested_spec, nested_text, nested_event=None):
+                    result = await nested_detector(nested_spec, nested_text, nested_event)
+                    if isinstance(result, Grounded) and isinstance(
+                        result.evidence, ModelResultEvidence
+                    ):
+                        evidence.append(result.evidence)
+                    return result
+
+                nested = await evaluate_async(
+                    check,
+                    nested_input,
+                    async_detector=grounded,
+                    async_collector=self._make_async_collector(
+                        nested_ctx, regex_backend=regex_backend
+                    ),
+                    regex_backend=regex_backend,
+                    minimize_witness=False,
+                    record_trace=False,
+                    time_left=remaining_evaluation_time,
+                )
+                if not explain:
+                    return nested.matched
+                measured = evidence[0] if len(evidence) == 1 else None
+                score = None if measured is None else measured.expression_value
+                score = (
+                    float(score)
+                    if isinstance(score, int | float) and not isinstance(score, bool)
+                    else None
+                )
+                if selected.shares_root_with(rule_ctx.conversation.messages):
+                    all_pieces = [
+                        selected[index : index + 1].span.to_dict() for index in range(len(selected))
+                    ]
+                    constructed = False
+                else:
+                    all_pieces = []
+                    constructed = False
+                    for ordinal in selected._ordinals:
+                        origin = selected._root._origins[ordinal]
+                        if origin is None:
+                            constructed = True
+                            continue
+                        item = selected._root._items[ordinal]
+                        all_pieces.extend(
+                            SourceText(item.content, origin, item.message_index).pieces(
+                                0, len(item.content)
+                            )
+                        )
+                pieces = all_pieces[:16]
+                chunk = {
+                    "ordinal": 0,
+                    "context": None,
+                    "pieces": pieces,
+                    "outcome": nested.matched,
+                    "value": score,
+                    "refused": any(item.refusals for item in evidence),
+                }
+                if len(all_pieces) > len(pieces):
+                    chunk["omitted_pieces"] = len(all_pieces) - len(pieces)
+                if constructed:
+                    chunk["constructed"] = True
+                summary = {"chunks": [chunk]}
+                if nested.matched:
+                    summary["deciding"] = 0
+                assert trace is not None
+                return Grounded(
+                    nested.matched,
+                    ModelResultEvidence.bounded(
+                        operation="messages",
+                        models=[
+                            *(call[0] for call in trace.calls),
+                            *(model for item in evidence for model in item.models),
+                        ],
+                        arguments=[
+                            *((f"parameter:{key}", value) for key, value in trace.parameters),
+                            *(pair for item in evidence for pair in item.arguments),
+                        ],
+                        expression_value=score,
+                        operator=None if measured is None else measured.operator,
+                        threshold=None if measured is None else measured.threshold,
+                        matched=nested.matched,
+                        source_path=event.source_path if event is not None else None,
+                        score_summary=summary,
+                        input_span=evidence[-1].input_span if evidence else None,
+                        refusals=[refusal for item in evidence for refusal in item.refusals],
+                    ),
+                )
             if name == "model_expression":
                 trace = ModelExpressionTrace() if explain else None
                 value = truth(
@@ -1419,6 +1623,7 @@ class DSLScanner:
                     regex_backend = RE2_REGEX
                     detector = self._make_async_detector(
                         rule_ctx,
+                        artifact=artifact,
                         explain=bool(enable_explain) or reports_path,
                         regex_backend=regex_backend,
                     )

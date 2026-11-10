@@ -25,7 +25,10 @@ from typing import Literal
 
 DSL_GRAMMAR = r"""
     ?start: rule
-    rule: "rule" STRING metadata_block? strings_block? variables_block? parameters_block? "condition:" condition collect_block?
+    module: rule+
+    rule: "rule" STRING imports_block? metadata_block? strings_block? variables_block? parameters_block? "condition:" condition collect_block?
+    imports_block: "imports:" import_group+
+    import_group: VAR_NAME "=" STRING
     collect_block: "collect:" filter_comp
     metadata_block: "metadata:" metadata_item+
     metadata_item: METADATA_KEY "=" STRING
@@ -126,10 +129,10 @@ DSL_GRAMMAR = r"""
     STRING_VAR: /\$[a-zA-Z_][a-zA-Z0-9_]*/
     ARG_NAME.3: /[a-zA-Z_][a-zA-Z0-9_]*(?=[ \t\r\n]*=(?!=))/
     PATTERN_OPERATOR: "contains" | "==" | "!=" | ">" | "<" | ">=" | "<="
-    METADATA_KEY: /(?!condition\b|collect\b|strings\b|variables\b|parameters\b)[a-zA-Z_][a-zA-Z0-9_]*/
+    METADATA_KEY: /(?!condition\b|collect\b|imports\b|strings\b|variables\b|parameters\b)[a-zA-Z_][a-zA-Z0-9_]*/
     // Variable-binding LHS name. Exclude block headers so each optional block terminates
     // cleanly. Match the colon to keep the same words available as binding names.
-    VAR_NAME: /(?!(?:condition|collect|strings|variables|metadata|parameters)[ \t]*:)[a-zA-Z_][a-zA-Z0-9_]*/
+    VAR_NAME: /(?!(?:condition|collect|imports|strings|variables|metadata|parameters)[ \t]*:)[a-zA-Z_][a-zA-Z0-9_]*/
     PARAM_NAME: /(?!(?:condition|params|policy)\b)[a-zA-Z_][a-zA-Z0-9_]*/
     PARAM_TYPE: "number" | "text"
     POLICY_BOUND: "policy"

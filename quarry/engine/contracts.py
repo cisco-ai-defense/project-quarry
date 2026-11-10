@@ -219,6 +219,8 @@ class CompiledRuleArtifact:
     tool_quantifiers: dict[str, ToolQuantifierPlan] = field(default_factory=dict)
     # Each closed part's atom (a part of a body that reads no element) and its automaton.
     closed_conditions: dict[str, ClosedPlan] = field(default_factory=dict)
+    # A public rule call compiles its condition as a nested rule over selected messages.
+    split_checks: dict[str, CompiledRuleArtifact] = field(default_factory=dict)
     # A universal/absence claim must be explained over the original complete input.
     full_trace_proof: bool = False
     decision_tree: DecisionTree | None = None
@@ -266,7 +268,7 @@ class CompiledRuleArtifact:
                     surfaces.add("tools")
         return frozenset(surfaces)
 
-    def _atom_reads(self, atom_id: str) -> frozenset[str]:
+    def _atom_reads(self, atom_id: str, *, clocks: bool = True) -> frozenset[str]:
         spec = self.atom_specs[atom_id]
         expression = spec.model_expression
         reads = {spec.selector}
@@ -276,27 +278,42 @@ class CompiledRuleArtifact:
                 reads.add("tools")
             if spec.domain == AtomDomain.STATIC and not expression.reads_messages:
                 reads.discard(spec.selector)
+        check = self.split_checks.get(atom_id)
+        if check is not None:
+            inner = (
+                check.read_surfaces if clocks else check.read_surfaces - check.clock_only_surfaces
+            )
+            if expression is not None and not expression.reads_messages:
+                inner = frozenset(s for s in inner if s == "tools" or "." in s)
+            reads.update(inner)
         return frozenset(reads)
 
     @cached_property
     def orders_input_items(self) -> bool:
         """Whether a live flow orders input items against other timeline items."""
 
-        return "orders input items" in self.notes
+        active = self.automaton_atoms
+        return "orders input items" in self.notes or any(
+            check.orders_input_items
+            for atom_id, check in self.split_checks.items()
+            if atom_id in active
+        )
 
     @cached_property
     def clock_only_surfaces(self) -> frozenset[str]:
         """Sections read only as steps of a bounded shared clock."""
 
+        active = self.automaton_atoms
+        checks = [check for atom_id, check in self.split_checks.items() if atom_id in active]
         clocks = {
             surface
             for requirement in self.flow_requirements
             for surface in requirement.clock_surfaces
-        }
+        }.union(*(check.clock_only_surfaces for check in checks))
         read = set().union(
             *(
-                self._atom_reads(atom_id)
-                for atom_id in self.automaton_atoms
+                self._atom_reads(atom_id, clocks=False)
+                for atom_id in active
                 if atom_id in self.atom_specs and self.atom_specs[atom_id].predicate != "on_surface"
             )
         )

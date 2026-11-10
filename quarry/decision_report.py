@@ -47,7 +47,7 @@ from quarry.engine.decision import (
 )
 from quarry.engine.matchers import compare
 from quarry.engine.symbolic_dfa import GuardNode
-from quarry.integrations.resources import requirements_from_specs
+from quarry.integrations.resources import requirements_from_artifact, requirements_from_specs
 
 if TYPE_CHECKING:
     from quarry.config import InferenceModelConfig
@@ -232,6 +232,9 @@ def _nodes(artifact: CompiledRuleArtifact) -> list[_Node]:
         found = requirements_from_specs(
             artifact.atom_specs[atom_id] for atom_id in read if atom_id in artifact.atom_specs
         )
+        for atom_id in read & artifact.split_checks.keys():
+            for name, needed in requirements_from_artifact(artifact.split_checks[atom_id]).items():
+                found[name].update(needed)
         spec = None if node.atom_id is None else artifact.atom_specs[node.atom_id]
         nodes.append(
             _Node(
