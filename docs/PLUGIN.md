@@ -62,10 +62,10 @@ The launch configuration uses `uv` and the repository lock file. The host must t
 5. Scan an explicit conversation and inspect `completion_state` before using `matched`.
 
 Every reference response includes `model_aliases`. Each configured alias lists its `operations`
-(`completion`, `score`, `token`, `classify`, and `spans`) and its optional `description`. Select an
-alias whose description fits the rule, then compile: compilation verifies that the selected
-adapter actually serves the requested operation. An installation without runtime model
-configuration returns an empty mapping.
+using the callable DSL names (`complete`, `score`, `input_tokens`, `split`, `classify`, and
+`spans`) and its optional `description`. Select an alias whose description fits the rule, then
+compile: compilation verifies that the selected adapter actually serves the requested operation.
+An installation without runtime model configuration returns an empty mapping.
 
 ```json
 {

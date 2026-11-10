@@ -331,14 +331,21 @@ def test_reference_publishes_model_alias_operations_and_optional_descriptions(
 
     assert response["model_aliases"] == {
         "head": {
-            "operations": ["completion", "score", "token", "classify", "spans"],
+            "operations": [
+                "complete",
+                "score",
+                "input_tokens",
+                "split",
+                "classify",
+                "spans",
+            ],
             "description": "Primary model for every supported operation.",
         },
         "judge": {
-            "operations": ["completion", "score"],
+            "operations": ["complete", "score"],
             "description": "Constitution judge; 1.0 means the policy is violated.",
         },
-        "plain": {"operations": ["completion"]},
+        "plain": {"operations": ["complete"]},
     }
 
 

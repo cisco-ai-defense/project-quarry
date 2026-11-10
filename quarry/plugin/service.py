@@ -1245,9 +1245,10 @@ class QuarryPlugin:
                 "operations": [
                     operation
                     for operation, configured in (
-                        ("completion", True),
+                        ("complete", True),
                         ("score", model.score is not None),
-                        ("token", model.tokens is not None),
+                        ("input_tokens", model.tokens is not None),
+                        ("split", model.tokens is not None),
                         ("classify", model.classify is not None),
                         ("spans", model.spans is not None),
                     )
