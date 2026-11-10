@@ -45,6 +45,14 @@ RETRYABLE_ERROR_CODES = frozenset(
     }
 )
 
+# How a retryable failure reads in the timeout that ends its retries.
+_RETRIED_FAILURES = {
+    "connection": "connection error",
+    "provider_unavailable": "provider unavailable",
+    "rate_limit": "rate limited",
+    "timeout": "provider timeout",
+}
+
 
 class ModelCallBudget:
     """Limit paid provider attempts per Quarry model alias during one scan."""
@@ -136,9 +144,14 @@ class ModelUsage:
             deadline = active_evaluation.expires_at
             evaluation_timeout_message = active_evaluation.error_message
         retry_number = 0
+        last_failure: str | None = None
+        # Public errors name the configured alias, not the provider model.
+        name = budget_alias or model
 
         while True:
-            remaining = self._remaining(deadline, model, evaluation_timeout_message)
+            remaining = self._remaining(
+                deadline, name, evaluation_timeout_message, last_failure, retry_number
+            )
             attempt_timeout = asyncio.timeout(remaining)
             try:
                 async with attempt_timeout:
@@ -153,19 +166,26 @@ class ModelUsage:
                 # Preserve the scanner's error type when this inner timer is
                 # enforcing the same rule deadline.
                 if attempt_timeout.expired():
-                    raise self._budget_error(model, evaluation_timeout_message) from exc
+                    raise self._budget_error(
+                        name, evaluation_timeout_message, last_failure, retry_number
+                    ) from exc
                 raise
             except LLMError as exc:
                 if exc.details.get("code") not in RETRYABLE_ERROR_CODES:
                     raise
 
                 retry_number += 1
+                last_failure = exc.details.get("code")
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    raise self._budget_error(model, evaluation_timeout_message) from exc
+                    raise self._budget_error(
+                        name, evaluation_timeout_message, last_failure, retry_number
+                    ) from exc
                 delay = min(0.25 * (2 ** min(retry_number - 1, 3)), 2.0)
                 if delay >= remaining:
-                    raise self._budget_error(model, evaluation_timeout_message) from exc
+                    raise self._budget_error(
+                        name, evaluation_timeout_message, last_failure, retry_number
+                    ) from exc
                 await _sleep(delay)
 
     async def _attempt(
@@ -185,7 +205,9 @@ class ModelUsage:
                 budget.consume(budget_alias or model)
             remaining = None
             if deadline is not None:
-                remaining = self._remaining(deadline, model, evaluation_timeout_message)
+                remaining = self._remaining(
+                    deadline, budget_alias or model, evaluation_timeout_message
+                )
             return await operation(remaining)
 
         if self.rate_limiter is None:
@@ -201,27 +223,51 @@ class ModelUsage:
         deadline: float,
         model: str,
         evaluation_timeout_message: str | None,
+        last_failure: str | None = None,
+        failed_attempts: int = 0,
     ) -> float:
         """Return positive budget remaining or raise the logical timeout."""
 
         remaining = deadline - monotonic()
         if remaining > 0:
             return remaining
-        raise ModelUsage._budget_error(model, evaluation_timeout_message)
+        raise ModelUsage._budget_error(
+            model, evaluation_timeout_message, last_failure, failed_attempts
+        )
 
     @staticmethod
-    def _budget_error(model: str, evaluation_timeout_message: str | None) -> Exception:
+    def _budget_error(
+        model: str,
+        evaluation_timeout_message: str | None,
+        last_failure: str | None = None,
+        failed_attempts: int = 0,
+    ) -> Exception:
         """Preserve rule-deadline ownership or return a model-call timeout."""
 
         if evaluation_timeout_message is not None:
             return QuarryTimeoutError(evaluation_timeout_message)
-        return ModelUsage._timeout_error(model)
+        return ModelUsage._timeout_error(model, last_failure, failed_attempts)
 
     @staticmethod
-    def _timeout_error(model: str) -> LLMError:
-        """Build the structured timeout shared by direct model integrations."""
+    def _timeout_error(
+        model: str, last_failure: str | None = None, failed_attempts: int = 0
+    ) -> LLMError:
+        """Build the structured timeout shared by direct model integrations.
 
+        When retries consume the deadline, the message names only the most recent completed
+        failure. Earlier attempts may have failed differently, and an attempt still running
+        when the deadline passes has no recorded reason.
+        """
+
+        if last_failure is not None:
+            attempts = "attempt" if failed_attempts == 1 else "attempts"
+            return LLMError(
+                f"Inference model '{model}' ran out of time after {failed_attempts} failed "
+                f"{attempts}; last recorded failure: "
+                f"{_RETRIED_FAILURES.get(last_failure, last_failure)}",
+                {"code": "timeout", "model": model, "last_failure": last_failure},
+            )
         return LLMError(
-            f"Model call timed out for '{model}'",
+            f"Inference model '{model}' timed out",
             {"code": "timeout", "model": model},
         )

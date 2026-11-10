@@ -259,6 +259,7 @@ def test_a_completion_outside_the_limits_or_the_contract_is_refused(
         asyncio.run(backend.model_complete_message("gemma4", _INPUT, limits=SafetyLimits(**limits)))
 
     assert error.value.details == {"code": "invalid_output", "model": "gemma4"}
+    assert "Inference model 'gemma4'" in str(error.value)
 
 
 def _text_backend(tmp_path: Path, config_version: int, adapter) -> ModelInferenceBackend:
@@ -604,7 +605,7 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
 
     class FailingAdapter(ModelAdapter):
         async def classify_messages(self, config, messages, tools, *, timeout=None):
-            raise LLMError("physical-model rejected the request", {"code": "invalid_output"})
+            raise LLMError("adapter rejected the request", {"code": "invalid_output"})
 
     failing = _v2_backend(tmp_path, models, FailingAdapter())
     failures = await asyncio.gather(
@@ -613,10 +614,16 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
         return_exceptions=True,
     )
 
-    # Each failure names its own alias, never the shared physical model.
-    assert [(failure.details, "physical-model" in str(failure)) for failure in failures] == [
-        ({"code": "invalid_output", "model": "exhausted"}, False),
-        ({"code": "invalid_output", "model": "available"}, False),
+    # Each reader names its own alias even though both aliases share one failed request.
+    assert [(failure.details, str(failure)) for failure in failures] == [
+        (
+            {"code": "invalid_output", "model": "exhausted"},
+            "Inference model 'exhausted' failed: adapter rejected the request",
+        ),
+        (
+            {"code": "invalid_output", "model": "available"},
+            "Inference model 'available' failed: adapter rejected the request",
+        ),
     ]
 
 
@@ -1632,3 +1639,30 @@ def test_a_schema_integer_keeps_its_exact_value(tmp_path) -> None:
     result = scanner.scan_data({"messages": [{"role": "user", "content": "check"}]})
 
     assert (result.rule_matches, result.is_complete) == (["Exact"], True)
+
+
+def test_an_external_media_url_fails_each_model_call_under_its_alias(tmp_path) -> None:
+    adapter = ModelAdapter()
+    image = {"type": "image_url", "image_url": {"url": "https://example.invalid/cat.png"}}
+    scanner = v2_scanner(
+        tmp_path,
+        {
+            "Score": 'model("scorer").score(messages, "Policy.") > 0.5',
+            "Complete": 'model("writer").complete(messages).content == "ok"',
+        },
+        {
+            "scorer": model_entry(score=True),
+            "writer": model_entry(physical_model="text-model"),
+        },
+        adapter,
+    )
+
+    result = scanner.scan_data({"messages": [{"role": "user", "content": [image]}]})
+
+    assert result.evaluation_errors == {
+        "Complete": "Inference model 'writer' failed: the conversation has a media URL that is "
+        "not inline",
+        "Score": "Inference model 'scorer' failed: the conversation has a media URL that is not "
+        "inline",
+    }
+    assert (adapter.score_calls, adapter.completions) == (0, 0)

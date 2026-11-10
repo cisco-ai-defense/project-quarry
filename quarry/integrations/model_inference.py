@@ -130,9 +130,20 @@ class _ChunkPart(NamedTuple):
 
 
 def _llm_error(code: str, message: str, model_id: str) -> LLMError:
-    """Create a structured inference error tagged with its configured model."""
+    """Create a structured inference error that names its configured model."""
 
-    return LLMError(message, {"code": code, "model": model_id})
+    prefix = f"Inference model '{model_id}'"
+    public_message = message if message.startswith(prefix) else f"{prefix} {message}"
+    return LLMError(public_message, {"code": code, "model": model_id})
+
+
+def _unnamed_failure(message: str, exc: LLMError, model_id: str) -> LLMError:
+    """Attribute an adapter or request-building failure that names no model."""
+
+    return LLMError(
+        f"Inference model '{model_id}' failed: {message}",
+        {**exc.details, "model": model_id},
+    )
 
 
 def _make_boundary(seed: int) -> str:
@@ -474,7 +485,10 @@ def _require_inline_media(value: Any) -> None:
     if "url" in value and (
         not isinstance(value["url"], str) or not value["url"].startswith("data:")
     ):
-        raise LLMError("Inference conversations require inline media", {"code": "invalid_output"})
+        raise LLMError(
+            "the conversation has a media URL that is not inline",
+            {"code": "invalid_output"},
+        )
     for nested in value.values():
         _require_inline_media(nested)
 
@@ -1809,7 +1823,12 @@ class ModelInferenceBackend:
         send = getattr(adapter, method)
 
         async def request(*, timeout: float | None) -> Any:
-            arguments = payload()
+            try:
+                arguments = payload()
+            except LLMError as exc:
+                if "model" in exc.details:
+                    raise
+                raise _unnamed_failure(exc.message, exc, model_id) from exc
             try:
                 return await self._send(
                     model_id,
@@ -1863,7 +1882,8 @@ class ModelInferenceBackend:
             if not isinstance(other, str) or other == model_id:
                 raise
             raise LLMError(
-                exc.message.replace(other, model_id), {**exc.details, "model": model_id}
+                exc.message.replace(f"'{other}'", f"'{model_id}'"),
+                {**exc.details, "model": model_id},
             ) from exc
         try:
             # A caller handed the raw response gets its own copy of a wire value, so it cannot
@@ -1923,9 +1943,15 @@ class ModelInferenceBackend:
             )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the
-            # trusted Quarry alias. Keep provider details behind the configuration boundary.
-            public_message = exc.message.replace(rate_limit_model, model_id)
-            raise LLMError(public_message, {**exc.details, "model": model_id}) from exc
+            # trusted Quarry alias. Keep provider details behind the configuration boundary. An
+            # error that already names the alias is kept as-is because an alias can contain the
+            # physical model's name.
+            message = exc.message
+            if exc.details.get("model") != model_id:
+                message = message.replace(rate_limit_model, model_id)
+            if "model" not in exc.details:
+                raise _unnamed_failure(message, exc, model_id) from exc
+            raise LLMError(message, {**exc.details, "model": model_id}) from exc
         except (QuarryError, QuarryTimeoutError):
             raise
         except TimeoutError:
@@ -1950,25 +1976,30 @@ class ModelInferenceBackend:
         if score_config is None:
             raise ConfigurationError(f"Inference model '{model_id}' has no score configuration")
         builder = self.message_builders[score_config.message_builder]
-        # The registered builders follow the config version's signature: the defaults are
-        # chosen by version in ``__init__``, and a caller-supplied builder must match it.
-        if self.config.config_version == 2:
-            outbound = cast(MessageBuilderV2, builder)(
-                constitution,
-                message_dicts,
-                tool_dicts,
-                self.boundaries[model_id],
-                score_config,
-            )
-        else:
-            assert legacy_conversation is not None
-            outbound = cast(MessageBuilderV1, builder)(
-                constitution,
-                legacy_conversation,
-                self.boundaries[model_id],
-                score_config,
-            )
-        _require_inline_media(outbound)
+        try:
+            # The registered builders follow the config version's signature: the defaults are
+            # chosen by version in ``__init__``, and a caller-supplied builder must match it.
+            if self.config.config_version == 2:
+                outbound = cast(MessageBuilderV2, builder)(
+                    constitution,
+                    message_dicts,
+                    tool_dicts,
+                    self.boundaries[model_id],
+                    score_config,
+                )
+            else:
+                assert legacy_conversation is not None
+                outbound = cast(MessageBuilderV1, builder)(
+                    constitution,
+                    legacy_conversation,
+                    self.boundaries[model_id],
+                    score_config,
+                )
+            _require_inline_media(outbound)
+        except LLMError as exc:
+            if "model" in exc.details:
+                raise
+            raise _unnamed_failure(exc.message, exc, model_id) from exc
         return outbound
 
     async def _score_messages(
@@ -2416,7 +2447,10 @@ class ModelInferenceBackend:
             raise ConfigurationError(
                 f"Inference model '{model_id}' adapter '{model.adapter}' cannot complete"
             )
-        _require_inline_media(message_dicts)
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(message_dicts)
+            return message_dicts, tool_dicts
 
         def message(wire: Any) -> Any:
             if not isinstance(wire, dict):
@@ -2431,7 +2465,7 @@ class ModelInferenceBackend:
             adapter,
             "complete_message",
             model,
-            lambda: (message_dicts, tool_dicts),
+            payload,
             key=key,
             timeout=timeout,
             read=message,
@@ -2498,7 +2532,10 @@ class ModelInferenceBackend:
             raise ConfigurationError(
                 f"Inference model '{model_id}' adapter '{model.adapter}' cannot complete"
             )
-        _require_inline_media(message_dicts)
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(message_dicts)
+            return message_dicts, raw_tools
 
         def text(content: Any) -> str:
             if not isinstance(content, str):
@@ -2511,7 +2548,7 @@ class ModelInferenceBackend:
             adapter,
             "complete",
             model,
-            lambda: (message_dicts, raw_tools),
+            payload,
             key=key,
             timeout=timeout,
             read=text,
@@ -2576,12 +2613,15 @@ class ModelInferenceBackend:
                 f"Inference model '{model_id}' has no input-token configuration",
                 model_id,
             )
-        _require_inline_media(messages)
         # ``messages`` and ``tools`` are fresh wire projections (``to_openai_messages`` /
         # ``raw_tools`` rebuild new dicts each call); the tokenizer treats them as read-only, so
         # they are passed by reference — no defensive copy. The split reuses one ``tools`` list
         # across probes under this same read-only contract already relied on for ``messages``.
         count_field = tokens_config.count_field
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(messages)
+            return messages, tools
 
         def count(result: Any) -> int:
             if not isinstance(result, dict):
@@ -2599,7 +2639,7 @@ class ModelInferenceBackend:
             self.adapters[tokens_config.adapter],
             "tokenize",
             model,
-            lambda: (messages, tools),
+            payload,
             key=key,
             timeout=timeout,
             read=count,
