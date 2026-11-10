@@ -17,9 +17,15 @@
 """Tests for the DSL parser."""
 
 import pytest
+from lark import Lark
+from lark.exceptions import UnexpectedCharacters
 
 from quarry.dsl.parser import DSLParser
-from quarry.dsl.syntax_errors import MAX_EXPECTED_CHOICES
+from quarry.dsl.syntax_errors import (
+    MAX_EXPECTED_CHOICES,
+    format_syntax_error,
+    validate_terminal_labels,
+)
 from quarry.types.exceptions import RuleParseError
 from quarry.types.rules import DSLRule
 
@@ -124,6 +130,47 @@ invalid rule syntax here
             for parser_name in ("VAR_NAME", "IDENTIFIER", "$END", "__ANON")
         )
         assert raised.value.line == 3
+
+    @pytest.mark.parametrize(
+        ("rule_text", "location", "context"),
+        [
+            pytest.param(
+                'rule "Broken"\ncondition:\n    true and',
+                "at line 3, column 13.",
+                "    true and\n                ^",
+                id="after-last-token",
+            ),
+            pytest.param(
+                'rule "Example"\ncondition:\n',
+                "at line 2, column 11.",
+                "    condition:\n              ^",
+                id="after-empty-condition",
+            ),
+        ],
+    )
+    def test_end_of_input_points_after_the_last_non_whitespace_character(
+        self, rule_text, location, context
+    ):
+        with pytest.raises(RuleParseError) as raised:
+            DSLParser().parse(rule_text)
+
+        assert "Unexpected end of the rule" in raised.value.reason
+        assert location in raised.value.reason
+        assert context in raised.value.reason
+
+    def test_character_error_without_parser_state_omits_lexer_only_choices(self):
+        parser = DSLParser().parser
+        error = UnexpectedCharacters("%", 0, 1, 1, allowed={"IDENTIFIER"})
+
+        message = format_syntax_error(error, "%", parser)
+
+        assert "Expected one of:" not in message
+
+    def test_parser_construction_rejects_an_unlabelled_regex_terminal(self):
+        parser = Lark("start: UNLABELLED\nUNLABELLED: /x/", parser="lalr")
+
+        with pytest.raises(ValueError, match="UNLABELLED"):
+            validate_terminal_labels(parser)
 
     def test_syntax_error_output_is_bounded_and_escapes_control_characters(self):
         long_name = "x" * 200

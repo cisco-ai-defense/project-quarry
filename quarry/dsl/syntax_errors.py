@@ -46,10 +46,8 @@ def format_syntax_error(error: UnexpectedInput, rule_text: str, parser: Lark) ->
     """Describe one failed parse without reparsing or exposing grammar terminal names."""
 
     position = _position(error, rule_text)
-    line = getattr(error, "line", None) or rule_text.count("\n", 0, position) + 1
-    column = getattr(error, "column", None)
-    if not isinstance(column, int):
-        column = position - rule_text.rfind("\n", 0, position)
+    line = rule_text.count("\n", 0, position) + 1
+    column = position - rule_text.rfind("\n", 0, position)
     summary = _summary(error)
     lines = [f"{summary} at line {line}, column {column}.", _context(rule_text, position)]
     expected = _expected_choices(error, parser)
@@ -63,6 +61,8 @@ def format_syntax_error(error: UnexpectedInput, rule_text: str, parser: Lark) ->
 
 
 def _position(error: UnexpectedInput, rule_text: str) -> int:
+    if isinstance(error, UnexpectedToken) and error.token.type == "$END":
+        return len(rule_text.rstrip())
     position = getattr(error, "pos_in_stream", None)
     if not isinstance(position, int):
         position = len(rule_text)
@@ -127,7 +127,9 @@ def _expected_names(error: UnexpectedInput) -> Collection[Any]:
         interactive_parser = getattr(error, "interactive_parser", None)
         if interactive_parser is not None:
             return interactive_parser.accepts()
-        return getattr(error, "allowed", ()) or ()
+        # The lexer's ``allowed`` set can include terminals the parser would reject at this
+        # position. Without parser state, omit choices rather than suggest invalid syntax.
+        return ()
     if isinstance(error, UnexpectedToken):
         return error.accepts or error.expected or ()
     return ()
@@ -143,9 +145,24 @@ def _terminal_labels(parser: Lark) -> dict[str, str]:
     return labels
 
 
+def validate_terminal_labels(parser: Lark) -> None:
+    """Fail at parser construction when an author-visible regex terminal has no label."""
+
+    labels = _terminal_labels(parser)
+    ignored = set(parser.ignore_tokens)
+    missing = sorted(
+        terminal.name
+        for terminal in parser.terminals
+        if terminal.name not in labels and terminal.name not in ignored
+    )
+    if missing:
+        raise ValueError(f"syntax error labels missing for terminals: {', '.join(missing)}")
+
+
 __all__ = [
     "MAX_CONTEXT_CHARACTERS",
     "MAX_EXPECTED_CHOICES",
     "MAX_UNEXPECTED_CHARACTERS",
     "format_syntax_error",
+    "validate_terminal_labels",
 ]

@@ -23,7 +23,7 @@ from lark.exceptions import GrammarError, UnexpectedInput, UnexpectedToken, Visi
 
 from quarry.core.logging import get_app_logger
 from quarry.dsl.grammar import DSL_GRAMMAR
-from quarry.dsl.syntax_errors import format_syntax_error
+from quarry.dsl.syntax_errors import format_syntax_error, validate_terminal_labels
 from quarry.dsl.transformer import DSLTransformer
 from quarry.types.exceptions import RuleParseError
 from quarry.types.rules import DSLRule
@@ -36,6 +36,7 @@ class DSLParser:
 
     def __init__(self):
         self.parser = Lark(DSL_GRAMMAR, parser="lalr")
+        validate_terminal_labels(self.parser)
         self.transformer = DSLTransformer()
 
     def parse(self, rule_text: str, *, source: str | None = None) -> DSLRule:
