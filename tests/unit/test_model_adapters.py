@@ -416,6 +416,43 @@ class _Dumps:
             {"role": "assistant", "content": None, "tool_calls": [{"id": "c", "type": "function"}]},
             id="tool-call-kept",
         ),
+        pytest.param(
+            _Dumps(
+                {
+                    "content": None,
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"query":"example"}',
+                                "provider_specific_fields": None,
+                            },
+                        }
+                    ],
+                    "function_call": None,
+                    "provider_specific_fields": None,
+                }
+            ),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"query":"example"}',
+                        },
+                    }
+                ],
+            },
+            id="provider-tool-call-bookkeeping-dropped",
+        ),
     ],
 )
 def test_a_litellm_response_message_keeps_only_the_assistant_fields(
