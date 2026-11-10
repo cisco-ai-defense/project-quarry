@@ -309,3 +309,19 @@ async def test_tool_argument_spans_keep_each_calls_place_and_nested_path() -> No
         )
         is False
     )
+    user_span = messages._bind_span(Span(1, 0, 4, Score(0.9)))
+    user_place = E("view_spans", None, (E("message_view", "user_messages"),))
+    assert user_span.to_dict() == {
+        "message_index": 1,
+        "start": 0,
+        "end": 4,
+        "score": {"value": 0.9},
+    }
+    assert (
+        await evaluate_model_expression(
+            E("span_covered", None, (user_place, E("binding", "span"))),
+            context,
+            bindings={"span": user_span},
+        )
+        is True
+    )

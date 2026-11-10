@@ -214,7 +214,7 @@ class Span:
                 }
             data["source"] = self.source.to_dict()
             return data
-        if self.place_position is not None:
+        if self.place_position is not None and self._message is None:
             data = {
                 "position": self.position,
                 "field": self.field,

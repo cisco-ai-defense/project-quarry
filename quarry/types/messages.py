@@ -819,6 +819,7 @@ class Messages(Sequence[MessageType]):
         "_segments",
         "_chunk",
         "_origins",
+        "_positions",
         "_sealed",
     )
 
@@ -839,6 +840,7 @@ class Messages(Sequence[MessageType]):
         # Whether this view is a ``split`` chunk (see ``_select_ranges``).
         self._chunk = False
         self._origins: tuple[Origin | None, ...] = ()
+        self._positions: tuple[int, ...] = ()
         self._sealed = True
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -1003,6 +1005,12 @@ class Messages(Sequence[MessageType]):
                 {name: tuple(responses) for name, responses in responses_by_name.items()}
             ),
         )
+        position = 0
+        positions = []
+        for message in root._items:
+            positions.append(position)
+            position += 1 + len(getattr(message, "tool_calls", ()))
+        object.__setattr__(root, "_positions", tuple(positions))
 
     @staticmethod
     def _validate_nesting_limit(max_nesting_depth: int) -> None:
@@ -1179,6 +1187,7 @@ class Messages(Sequence[MessageType]):
         view._responses_by_name = self._root._responses_by_name
         view._tool_call_types = self._root._tool_call_types
         view._origins = self._root._origins
+        view._positions = self._root._positions
         view._segments = MappingProxyType(
             {ordinal: self._segments[ordinal] for ordinal in selected if ordinal in self._segments}
         )
@@ -1288,6 +1297,8 @@ class Messages(Sequence[MessageType]):
             covered[-1] = covered[-1][: span.end + right]
             return "".join(covered)
         if isinstance(span._source, Message):
+            if not span.within_one_text:
+                return self._extract_across_texts(span, left, right)
             message = self._span_message(span, require_bound=False)
             if span._source is not message:
                 raise ValueError("span source message is not present in these messages")
@@ -1296,6 +1307,34 @@ class Messages(Sequence[MessageType]):
         message = self._span_message(span, require_bound=True)
         content = message.content
         return content[max(0, span.start - left) : min(len(content), span.end + right)]
+
+    def _extract_across_texts(self, span: Span, left: int, right: int) -> str:
+        """Read a bound range across consecutive chat and call texts."""
+
+        texts: list[tuple[int, str, str, object]] = []
+        for ordinal, message in enumerate(self._root._items):
+            position = self._root._positions[ordinal]
+            texts.append((position, "", message.content, message))
+            for number, call in enumerate(getattr(message, "tool_calls", ())):
+                texts.extend(
+                    (position + number + 1, field, text, call)
+                    for field, text in call.texts()
+                )
+        places = [(position, field) for position, field, _, _ in texts]
+        start, end = (span.position, span.field), (span.end_position, span.end_field)
+        if start not in places or end not in places:
+            raise ValueError("span is outside the texts of these messages")
+        first, last = places.index(start), places.index(end)
+        if first > last or texts[first][3] is not span._source:
+            raise ValueError("span source is not present in these messages")
+        covered = [text for _, _, text, _ in texts[first : last + 1]]
+        if span.start > len(covered[0]) or span.end > len(covered[-1]):
+            raise ValueError("span is outside the texts it covers")
+        if len(covered) == 1:
+            return covered[0][max(0, span.start - left) : span.end + right]
+        covered[0] = covered[0][max(0, span.start - left) :]
+        covered[-1] = covered[-1][: span.end + right]
+        return "".join(covered)
 
     def _bind_span(self, span: Span) -> Span:
         """Validate coordinates and bind a producer span to its canonical message."""
@@ -1326,7 +1365,9 @@ class Messages(Sequence[MessageType]):
                 span.start, span.end
             )
             return replace(mapped, score=span.score, label=span.label)
-        return span._bind_to_message(message)
+        return replace(span, place_position=self._root._positions[ordinal])._bind_to_message(
+            message
+        )
 
     def _span_message(self, span: Span, *, require_bound: bool) -> MessageType:
         """Return the selected canonical message after validating one span."""
