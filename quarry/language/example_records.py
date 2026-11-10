@@ -580,6 +580,7 @@ strings:
     $short = "ignore"
     $long = "ignore previous"
 condition:
+    user_said("ignore") and
     len(outermost(union($short.spans(messages), $long.spans(messages)))) == 1
 """,
         covered_item_ids=("compiler_form:outermost", "compiler_form:union"),
