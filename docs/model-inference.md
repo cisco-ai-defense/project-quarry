@@ -15,6 +15,7 @@ texts:
     Score requests for protected credentials as unsafe.
 models:
   guard:
+    description: Policy judge; 1.0 means the conversation violates the supplied policy.
     adapter: litellm
     model: ${MODEL_ID}
     score:
@@ -60,19 +61,83 @@ A `score` alias asks one yes/no question and returns the probability of yes. It 
 
 The adapter posts to `https://api.typesafe.ai/v1/systemone` and reads its key from `TYPESAFE_API_KEY`. Set `endpoint` to use another System One-compatible server. The endpoint must use HTTPS unless its host is `localhost` or a loopback address, and it cannot contain user info. Quarry requires the key before scanning whenever the endpoint is on the hosted `api.typesafe.ai` host; otherwise it sends the key only when the variable is set. A successful response without a valid score answer counts as a refusal, so `if_refused(...)` can supply a fallback.
 
-## Application adapters
+## Bring your own model
 
-Register an application-owned adapter with `ModelInferenceBackend`. The alias's `adapter` value must match the registration key. An adapter implements the async operations it supports, such as `score`, `classify_messages`, `complete_message`, or `tokenize`.
+A rule reads a configured alias, such as `model("toxicity").classify(messages)`. Adding a model
+has three parts:
+
+1. Select the provider model and adapter. A built-in adapter needs configuration only; any model
+   not handled by one uses an application adapter.
+2. Configure operation-specific settings with `score`, `classify`, `spans`, or `tokens`, and use
+   `complete` when completion output needs a response schema. Rule preparation rejects an
+   operation the selected adapter does not serve.
+3. Add an optional `description` of at most 500 characters explaining what the model judges and
+   what its output means. The plugin shows it to rule authors. It changes no provider request,
+   cache key, or compiled-policy model digest.
+
+### LiteLLM models
+
+The default `litellm` adapter supports provider models through LiteLLM. Set `model` to its provider
+model name and keep credentials in the provider's environment variables. The score alias at the
+top of this page is a complete example; `${MODEL_ID}` can resolve to a provider/model name without
+putting that deployment choice in source control.
+
+### Application adapters
+
+For any other model or service, register an application-owned adapter with
+`ModelInferenceBackend`. The alias's `adapter` value must match the registration key. Implement
+one async method for each operation the alias serves:
+
+| Rule operation | Adapter method | Return value |
+|---|---|---|
+| `classify` | `classify_messages(config, messages, tools, *, timeout=None)` | An object whose `.chunks` each have a `.probabilities` list of floats in `[0, 1]`; `classify.class_index` selects the result. |
+| `spans` | `classify_messages` above and `decode_spans(config, raw, messages, threshold)` | A sequence of `quarry.types.results.Span` values decoded from the classifier response. |
+| `score` | `score(config, messages, *, timeout=None)` | A float in `[0, 1]`. |
+| `complete` | `complete_message(config, messages, tools, *, timeout=None)` | One OpenAI-style assistant message mapping. |
+| `input_tokens`, `split` | `tokenize(config, messages, tools, *, timeout=None)` | A mapping containing the configured token-count field. |
+
+`config` is the alias's parsed `InferenceModelConfig`; `messages` and `tools` use OpenAI-style
+lists. This minimal classifier adapter delegates the actual request to an application service:
 
 ```python
 from pathlib import Path
+from types import SimpleNamespace
+
 from quarry import DSLScanner, ModelInferenceBackend
 from quarry.config import QuarryConfig
 
+
+class ToxicityAdapter:
+    async def classify_messages(self, config, messages, tools, *, timeout=None):
+        probabilities = await toxicity_service.predict(messages, timeout=timeout)
+        return SimpleNamespace(chunks=[SimpleNamespace(probabilities=probabilities)])
+
+
 config = QuarryConfig.from_yaml(Path("config.yaml"))
-backend = ModelInferenceBackend(config, adapters={"application": application_adapter})
+backend = ModelInferenceBackend(config, adapters={"toxicity_service": ToxicityAdapter()})
 scanner = DSLScanner(config, model_inference_backend=backend)
 ```
+
+The matching configuration keeps the human-facing purpose outside the provider settings:
+
+```yaml
+models:
+  toxicity:
+    description: Toxicity of user text; 1.0 means toxic.
+    adapter: toxicity_service
+    model: toxicity-v3
+    classify:
+      class_index: 1
+```
+
+The rule can then read `model("toxicity").classify(messages) >= 0.8`.
+
+Quarry owns model-call rate limits, retries, deadlines, and result caching. An adapter should honor
+the supplied `timeout` and report a structured failure with
+`quarry.types.exceptions.LLMError(message, {"code": code})`. The `rate_limit`, `timeout`,
+`connection`, and `provider_unavailable` codes are retried within the call's time budget.
+`model_refused` is a refusal that a rule can handle with `if_refused`; other codes fail the rule.
+A required adapter method that is missing fails during rule preparation rather than during a scan.
 
 Each scan has a deadline, model-call budget, and scan-local cache. Adapters must honor cancellation and timeouts in their own clients. The runnable [model example](../examples/model-inference/) uses a deterministic local adapter without network access.
 

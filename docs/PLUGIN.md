@@ -61,6 +61,12 @@ The launch configuration uses `uv` and the repository lock file. The host must t
 4. Compile the rule.
 5. Scan an explicit conversation and inspect `completion_state` before using `matched`.
 
+Every reference response includes `model_aliases`. Each configured alias lists its `operations`
+(`completion`, `score`, `token`, `classify`, and `spans`) and its optional `description`. Select an
+alias whose description fits the rule, then compile: compilation verifies that the selected
+adapter actually serves the requested operation. An installation without runtime model
+configuration returns an empty mapping.
+
 ```json
 {
   "action": "search",

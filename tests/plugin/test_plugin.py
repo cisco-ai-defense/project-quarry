@@ -302,6 +302,46 @@ async def test_plugin_reference_compile_and_scan_work_as_one_public_flow():
     assert non_matching["matched"] is False
 
 
+def test_reference_publishes_model_alias_operations_and_optional_descriptions(
+    tmp_path, monkeypatch
+):
+    head = {
+        **SCORE_MODEL,
+        "model": "head-v1",
+        "description": "Primary model for every supported operation.",
+        "classify": {"class_index": 1},
+        "tokens": {"adapter": "fake", "endpoint": None, "extraction": {"count": "count"}},
+        "category": "EMAIL",
+        "spans": {"class_index": 1},
+    }
+    judge = {
+        **SCORE_MODEL,
+        "model": "judge-v1",
+        "description": "Constitution judge; 1.0 means the policy is violated.",
+    }
+    plain = {"adapter": "fake", "model": "plain-v1"}
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _HeadAdapter(),
+        {"head": head, "judge": judge, "plain": plain},
+    )
+
+    response = plugin.reference(action="search", query="model")
+
+    assert response["model_aliases"] == {
+        "head": {
+            "operations": ["completion", "score", "token", "classify", "spans"],
+            "description": "Primary model for every supported operation.",
+        },
+        "judge": {
+            "operations": ["completion", "score"],
+            "description": "Constitution judge; 1.0 means the policy is violated.",
+        },
+        "plain": {"operations": ["completion"]},
+    }
+
+
 async def test_scan_returns_no_visualization_unless_requested():
     plugin = QuarryPlugin()
 

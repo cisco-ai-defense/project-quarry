@@ -148,6 +148,11 @@ async def quarry_reference(
     ``missing_ids`` means no such record, while ``filtered_ids`` means the ID was right and
     the request's own ``kinds`` excluded it, so widen that filter instead of searching again.
 
+    Every response lists ``model_aliases``: each alias a rule may name in ``model("alias")``,
+    its configured ``operations`` (``completion``, ``score``, ``token``, ``classify``,
+    ``spans``), and its optional ``description``. Pick the alias whose description fits the
+    rule; compiling the rule verifies that its adapter serves the requested operation.
+
     Use ``rejected`` to read the spellings Quarry refuses and what to write instead. It
     returns the complete table, or only matching rows when a ``query`` substring is given.
 

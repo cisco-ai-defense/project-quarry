@@ -28,6 +28,11 @@ so read the keys that are there and do not infer a value for one that is absent.
 names each tested example and whether each of its checks is meant to match; add
 `verbosity: "full"` when the conversation a check scans is what you need to see.
 
+Every reference response lists the configured models under `model_aliases`, with each alias's
+`operations` (`completion`, `score`, `token`, `classify`, and `spans`) and optional `description`.
+When a rule needs a model, choose the alias whose description fits the requested judgment and
+compile the rule to verify that its adapter serves the operation.
+
 Quarry deliberately rejects several spellings that look plausible, such as `messages()` for the
 `messages` surface or `first(tool_calls)` for `tool_calls[0]`. Call `quarry_reference` with
 `action: rejected` to read the full table before writing a rule, and read the `rejected_spellings`,

@@ -42,6 +42,9 @@ DEFAULT_INFERENCE_ADAPTER = "litellm"
 # A System One choice question accepts at most 255 options.
 MAX_CLASSIFY_LABELS = 255
 
+# Model descriptions are returned by the plugin reference tool, so bound each configured value.
+MAX_MODEL_DESCRIPTION_LENGTH = 500
+
 # Configuration blocks holding named text resources, each mapping a name to the text or {file: path}.
 # 'texts' is the general name; 'judge_prompts' is what the same block was called first. Both load
 # into one namespace, so a rule's reference resolves the same either way.
@@ -253,11 +256,11 @@ class QuarryConfig:
     """Configuration for rules and integrations.
 
     Deeply immutable after construction: rule paths and texts are tuples, and models,
-    prompts, and rate-limit definitions are read-only mappings of frozen values. One
-    configuration graph is built once and safely shared by reference across parallel work.
-    Per-scan variants come from ``dataclasses.replace`` changing only the rule source,
-    which shares the immutable models/prompts/limits by identity. Mutable runtime services
-    (the shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
+    descriptions, prompts, and rate-limit definitions are read-only mappings of frozen values.
+    One configuration graph is built once and safely shared by reference across parallel work.
+    Per-scan variants come from ``dataclasses.replace`` changing only the rule source, which
+    shares the immutable models/descriptions/prompts/limits by identity. Mutable runtime
+    services (the shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
     """
 
     quarry_rules_paths: tuple[Path, ...] = ()
@@ -272,6 +275,9 @@ class QuarryConfig:
 
     safety_limits: SafetyLimits | None = None
     models: Mapping[str, InferenceModelConfig] = field(default_factory=dict)
+    # Human-facing purpose of each alias. Kept outside ``models`` so rewording does not change
+    # provider requests, cache keys, or a compiled policy's model digest.
+    model_descriptions: Mapping[str, str] = field(default_factory=dict)
     model_cache: ModelCacheConfig = field(default_factory=ModelCacheConfig)
 
     quarry_rule_texts: tuple[str, ...] = ()
@@ -296,6 +302,19 @@ class QuarryConfig:
         object.__setattr__(self, "quarry_rules_paths", _frozen_tuple(self.quarry_rules_paths))
         object.__setattr__(self, "quarry_rule_texts", _frozen_tuple(self.quarry_rule_texts))
         object.__setattr__(self, "models", _frozen_mapping(self.models))
+        object.__setattr__(self, "model_descriptions", _frozen_mapping(self.model_descriptions))
+        # Validate here, not only while parsing a mapping: hosts may construct or replace the
+        # config directly, and descriptions are included in plugin reference responses.
+        for model_name, description in self.model_descriptions.items():
+            if not isinstance(description, str) or not description:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' description must be a non-empty string"
+                )
+            if len(description) > MAX_MODEL_DESCRIPTION_LENGTH:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' description must be at most "
+                    f"{MAX_MODEL_DESCRIPTION_LENGTH} characters"
+                )
         object.__setattr__(self, "judge_prompts", _frozen_mapping(self.judge_prompts))
         object.__setattr__(self, "llm_rate_limits", _frozen_mapping(self.llm_rate_limits))
 
@@ -387,11 +406,15 @@ class QuarryConfig:
             raise ValueError("Config must specify at least one Quarry rule path in 'rules' field")
 
         models: dict[str, InferenceModelConfig] = {}
+        model_descriptions: dict[str, str] = {}
         if "models" in document and document["models"]:
             for model_name, model_data in document["models"].items():
                 if not isinstance(model_data, dict):
                     raise ValueError(f"Model '{model_name}' config must be a mapping")
                 models[model_name] = _parse_inference_model(model_name, model_data)
+                description = model_data.get("description")
+                if description is not None:
+                    model_descriptions[model_name] = description
                 if config_version == 1 and models[model_name].complete is not None:
                     raise ValueError(
                         f"Inference model '{model_name}' complete is only supported by "
@@ -474,6 +497,7 @@ class QuarryConfig:
             config_version=config_version,
             quarry_rules_paths=rules_paths,
             models=models,
+            model_descriptions=model_descriptions,
             judge_prompts=judge_prompts,
             llm_rate_limits=llm_rate_limits,
             safety_limits=safety_limits,
@@ -542,6 +566,7 @@ def _parse_inference_model(
     _reject_unknown_fields(
         data,
         {
+            "description",
             "adapter",
             "model",
             "endpoint",

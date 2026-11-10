@@ -421,6 +421,7 @@ class QuarryPlugin:
         response = self._version_envelope()
         response["action"] = action
         response["runtime_capabilities"] = self._runtime_capabilities()
+        response["model_aliases"] = self._model_aliases()
         # The table is the same on every call and is what an author reads once, before writing
         # anything, so it rides along with the browsing action and is asked for explicitly
         # anywhere else. Repeating it on every search and every get charged the caller for it
@@ -1231,6 +1232,32 @@ class QuarryPlugin:
             group: "requires_compile" if is_configured else "unconfigured"
             for group, is_configured in configured.items()
         }
+
+    def _model_aliases(self) -> dict[str, dict[str, Any]]:
+        """List configured aliases with their operations and optional descriptions."""
+
+        config = self._runtime_config
+        if config is None:
+            return {}
+        aliases: dict[str, dict[str, Any]] = {}
+        for alias, model in sorted(config.models.items()):
+            entry: dict[str, Any] = {
+                "operations": [
+                    operation
+                    for operation, configured in (
+                        ("completion", True),
+                        ("score", model.score is not None),
+                        ("token", model.tokens is not None),
+                        ("classify", model.classify is not None),
+                        ("spans", model.spans is not None),
+                    )
+                    if configured
+                ]
+            }
+            if alias in config.model_descriptions:
+                entry["description"] = config.model_descriptions[alias]
+            aliases[alias] = entry
+        return aliases
 
     def _deprecation_warnings_from_text(self, rule_text: str) -> list[dict[str, Any]]:
         warnings = []
