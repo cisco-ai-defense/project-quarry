@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -922,6 +923,129 @@ async def test_a_retry_takes_a_new_limiter_ticket_and_the_remaining_time(tmp_pat
         ("release", "physical-model"),
     ]
     assert 0 < adapter.timeouts[1] < adapter.timeouts[0] <= 1.0
+
+
+class _AlwaysFailsAdapter(ModelAdapter):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+        self.attempts = 0
+
+    async def classify_messages(self, config, messages, tools, *, timeout=None):
+        self.attempts += 1
+        raise self.error
+
+
+def _synthetic_provider_error(name: str, status: int | None) -> Exception:
+    error_type = type(name, (Exception,), {} if status is None else {"status_code": status})
+    return error_type("provider detail from https://provider.invalid/models/physical-id")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "code", "phrase"),
+    [
+        (
+            _synthetic_provider_error("PermissionDeniedError", 500),
+            "authentication",
+            "refused by the provider",
+        ),
+        (
+            _synthetic_provider_error("RuntimeError", 401),
+            "authentication",
+            "credentials",
+        ),
+        (
+            _synthetic_provider_error("NotFoundError", 500),
+            "model_not_found",
+            "check the configured model name",
+        ),
+        (
+            _synthetic_provider_error("RuntimeError", 404),
+            "model_not_found",
+            "check the configured model name",
+        ),
+        (
+            _synthetic_provider_error("BadRequestError", 500),
+            "bad_request",
+            "rejected the request as invalid",
+        ),
+        (
+            _synthetic_provider_error("RuntimeError", 422),
+            "bad_request",
+            "rejected the request as invalid",
+        ),
+        (
+            _synthetic_provider_error("ContextWindowExceededError", 400),
+            "context_window_exceeded",
+            "context window",
+        ),
+        (
+            _synthetic_provider_error("RuntimeError", None),
+            "provider_error",
+            "Inference model 'head' failed",
+        ),
+    ],
+    ids=[
+        "authentication-type",
+        "authentication-status",
+        "model-not-found-type",
+        "model-not-found-status",
+        "bad-request-type",
+        "bad-request-status",
+        "context-window",
+        "unknown",
+    ],
+)
+async def test_a_non_retryable_provider_failure_has_a_safe_stable_cause(
+    tmp_path, error, code, phrase
+) -> None:
+    adapter = _AlwaysFailsAdapter(error)
+    backend = _v2_backend(tmp_path, {"head": model_entry(classify=0)}, adapter)
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("head", _INPUT, timeout=1.0)
+
+    assert adapter.attempts == 1
+    assert raised.value.details == {"code": code, "model": "head"}
+    assert phrase in str(raised.value)
+    assert "provider.invalid" not in str(raised.value)
+    assert "physical-id" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_local_credential_failure_is_not_attributed_to_the_provider(
+    tmp_path, monkeypatch
+) -> None:
+    names = (
+        "NoCredentialsError",
+        "PartialCredentialsError",
+        "ProfileNotFound",
+        "SSOError",
+        "LoginError",
+        "TokenRetrievalError",
+        "CredentialRetrievalError",
+    )
+    credential_errors = SimpleNamespace(**{name: type(name, (Exception,), {}) for name in names})
+    monkeypatch.setitem(sys.modules, "botocore.exceptions", credential_errors)
+    provider_error = _synthetic_provider_error("APIConnectionError", 500)
+    provider_error.__cause__ = credential_errors.NoCredentialsError(
+        "sensitive local credential detail"
+    )
+    backend = _v2_backend(
+        tmp_path,
+        {"head": model_entry(classify=0)},
+        _AlwaysFailsAdapter(provider_error),
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("head", _INPUT, timeout=1.0)
+
+    assert raised.value.details == {"code": "authentication", "model": "head"}
+    assert "could not be called" in str(raised.value)
+    assert "HTTP 500" not in str(raised.value)
+    assert "provider.invalid" not in str(raised.value)
+    assert "sensitive local credential detail" not in str(raised.value)
 
 
 def test_a_retried_attempt_spends_the_model_call_budget(tmp_path) -> None:
