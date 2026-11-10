@@ -54,8 +54,8 @@ from quarry.engine.contracts import (
 )
 from quarry.engine.decision import Parts, boot_diagram_is_decided, reads
 from quarry.engine.desugar import (
-    ORDERS_INPUT_ITEMS,
     COMPOSED_CHECK,
+    ORDERS_INPUT_ITEMS,
     Desugarer,
     FlowProbe,
     ValueTest,

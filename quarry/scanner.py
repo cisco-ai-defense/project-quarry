@@ -103,12 +103,39 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
-from quarry.types.messages import Messages, ToolCallTypeRegistry
+from quarry.types.messages import Messages, ToolCall, ToolCallTypeRegistry
+from quarry.types.origins import SourceText
 from quarry.types.parameters import ParameterValue
 from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+def _timeline_key(item: Any) -> tuple[str, int | str]:
+    return (
+        ("tool_call_id", item.id)
+        if isinstance(item, ToolCall)
+        else ("message_index", item.message_index)
+    )
+
+
+def _project_chunk_timeline(
+    positions: Mapping[tuple[str, int | str], int],
+    extensions: tuple[tuple[int, Any], ...],
+    chunk: list[tuple[int, Any]],
+) -> list[tuple[int, Any]] | None:
+    """Keep the supplied order when a selected messages value is an ordered transcript view."""
+    selected: list[tuple[int, Any]] = []
+    previous = -1
+    for _, item in chunk:
+        position = positions.get(_timeline_key(item))
+        if position is None or position <= previous:
+            return None
+        selected.append((position, item))
+        previous = position
+    ordered = sorted((*selected, *extensions), key=lambda entry: entry[0])
+    return list(enumerate(item for _, item in ordered))
 
 
 def _required_surfaces(artifact: CompiledRuleArtifact) -> set[str]:
@@ -761,6 +788,52 @@ class DSLScanner:
                 nested_ctx._timeline_cache = None
                 nested_ctx.evaluation_warnings = rule_ctx.evaluation_warnings
                 check = artifact.split_checks[spec.atom_id]
+                uses_events = bool(check.read_surfaces & self.input_registry.event_surfaces)
+                nested_ctx.ordered_timeline = None
+                if not uses_events:
+                    nested_ctx.extension_event_surfaces = {}
+                    nested_ctx.extension_event_sequence = ()
+                elif rule_ctx.ordered_timeline is not None:
+                    extension_ids = {id(item) for item in rule_ctx.extension_event_sequence}
+                    nested_ctx.extension_event_sequence = tuple(
+                        item for _, item in rule_ctx.ordered_timeline if id(item) in extension_ids
+                    )
+                    if check.flow_requirements and selected.shares_root_with(
+                        rule_ctx.conversation.messages
+                    ):
+                        positions = {
+                            _timeline_key(item): position
+                            for position, item in rule_ctx.ordered_timeline
+                            if id(item) not in extension_ids
+                        }
+                        extensions = tuple(
+                            (position, item)
+                            for position, item in rule_ctx.ordered_timeline
+                            if id(item) in extension_ids
+                        )
+                        nested_ctx.ordered_timeline = _project_chunk_timeline(
+                            positions, extensions, nested_ctx.timeline
+                        )
+                nested_input = build_evaluation_input(nested_ctx)
+                if (
+                    uses_events
+                    and nested_ctx.ordered_timeline is None
+                    and check.flow_requirements
+                    and cross_source_flow_has_candidates(
+                        check,
+                        nested_input,
+                        regex_backend or RE2_REGEX,
+                        raise_if_evaluation_expired,
+                    )
+                ):
+                    if rule_ctx.ordered_timeline is None:
+                        raise ConversationValidationError(
+                            "An explicit timeline is required for before/after across "
+                            "conversation and input items"
+                        )
+                    raise ConversationValidationError(
+                        "The input timeline cannot order a derived messages check"
+                    )
                 nested_detector = self._make_async_detector(
                     nested_ctx,
                     artifact=check,
@@ -779,7 +852,7 @@ class DSLScanner:
 
                 nested = await evaluate_async(
                     check,
-                    build_evaluation_input(nested_ctx),
+                    nested_input,
                     async_detector=grounded,
                     async_collector=self._make_async_collector(
                         nested_ctx, regex_backend=regex_backend
@@ -798,14 +871,26 @@ class DSLScanner:
                     if isinstance(score, int | float) and not isinstance(score, bool)
                     else None
                 )
-                pieces = (
-                    [
-                        selected[index : index + 1].span.to_dict()
-                        for index in range(min(len(selected), 16))
+                if selected.shares_root_with(rule_ctx.conversation.messages):
+                    all_pieces = [
+                        selected[index : index + 1].span.to_dict() for index in range(len(selected))
                     ]
-                    if selected.shares_root_with(rule_ctx.conversation.messages)
-                    else []
-                )
+                    constructed = False
+                else:
+                    all_pieces = []
+                    constructed = False
+                    for ordinal in selected._ordinals:
+                        origin = selected._root._origins[ordinal]
+                        if origin is None:
+                            constructed = True
+                            continue
+                        item = selected._root._items[ordinal]
+                        all_pieces.extend(
+                            SourceText(item.content, origin, item.message_index).pieces(
+                                0, len(item.content)
+                            )
+                        )
+                pieces = all_pieces[:16]
                 chunk = {
                     "ordinal": 0,
                     "context": None,
@@ -814,9 +899,9 @@ class DSLScanner:
                     "value": score,
                     "refused": any(item.refusals for item in evidence),
                 }
-                if len(selected) > len(pieces) and pieces:
-                    chunk["omitted_pieces"] = len(selected) - len(pieces)
-                if not selected.shares_root_with(rule_ctx.conversation.messages):
+                if len(all_pieces) > len(pieces):
+                    chunk["omitted_pieces"] = len(all_pieces) - len(pieces)
+                if constructed:
                     chunk["constructed"] = True
                 summary = {"chunks": [chunk]}
                 if nested.matched:
@@ -1538,6 +1623,7 @@ class DSLScanner:
                     regex_backend = RE2_REGEX
                     detector = self._make_async_detector(
                         rule_ctx,
+                        artifact=artifact,
                         explain=bool(enable_explain) or reports_path,
                         regex_backend=regex_backend,
                     )

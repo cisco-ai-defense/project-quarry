@@ -104,6 +104,10 @@ def clock_feeds_settled(
         _settled(requirement, static_value)
         for requirement in artifact.flow_requirements
         if missing.intersection(requirement.clock_surfaces)
+    ) and all(
+        clock_feeds_settled(check, missing, evaluation_input, regex_backend, check_deadline)
+        for atom_id, check in artifact.split_checks.items()
+        if atom_id in artifact.automaton_atoms and missing.intersection(check.clock_only_surfaces)
     )
 
 

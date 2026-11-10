@@ -322,6 +322,24 @@
       "checks": [
         {
           "expected_match": true,
+          "input_path": "examples/public-rule-call.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/public-rule-call.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:imports"
+      ],
+      "id": "example:public-rule-call",
+      "requires_backend": false,
+      "rule_path": "examples/public-rule-call.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
           "input_path": "examples/span-inside.matching.json"
         },
         {
@@ -1469,6 +1487,16 @@
       "syntax": "comparison: in_expr \">=\" in_expr"
     },
     {
+      "description": "Name public rules to call on a messages value in `condition:`.",
+      "handler": "imports_block",
+      "id": "construct:imports",
+      "kind": "construct",
+      "name": "imports",
+      "source": "quarry.dsl.transformer.DSLTransformer.imports_block",
+      "summary": "Name public rules to call on a messages value in `condition:`.",
+      "syntax": "imports_block: \"imports:\" import_group+"
+    },
+    {
       "description": "Test whether one span is covered by a span from the right-hand list.",
       "handler": "inside_op",
       "id": "construct:inside",
@@ -1626,7 +1654,7 @@
       "name": "rule",
       "source": "quarry.dsl.transformer.DSLTransformer.rule",
       "summary": "Define one named rule with a required condition and optional metadata, strings, variables, parameters, and typed collection output.",
-      "syntax": "rule: \"rule\" STRING metadata_block? strings_block? variables_block? parameters_block? \"condition:\" condition collect_block?"
+      "syntax": "rule: \"rule\" STRING imports_block? metadata_block? strings_block? variables_block? parameters_block? \"condition:\" condition collect_block?"
     },
     {
       "description": "Select one collection item by position, such as `messages[-1]`.\n\nNegative positions count backward from the end of the collection.",
@@ -3342,6 +3370,15 @@
       "source": "quarry.dsl.syntax.TOKEN_RECORDS",
       "spelling": "if",
       "summary": "Quarry operator `if`."
+    },
+    {
+      "category": "block_keyword",
+      "id": "token:imports",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "imports:",
+      "summary": "Quarry block keyword `imports:`."
     },
     {
       "category": "operator",

@@ -61,3 +61,86 @@ def test_called_rule_strings_and_evidence_keep_the_callee_identity() -> None:
     assert sorted(result.rule_matches) == ["PI", "R"]
     assert "PI::$i" in scanner.compiled_rules["R"].decision_tree.nodes[0].label
     assert evidence.model_results[0].score_summary["chunks"][0]["outcome"] is True
+
+
+def test_called_rule_reads_an_input_item_as_located_message() -> None:
+    source = (
+        'rule "PI" condition: any m in messages where m.content contains "ignore all"\n'
+        'rule "R" imports: pi = "PI" condition: any w in memory.notes where pi(w)'
+    )
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(source,),
+            inputs={"memory.notes": {"content": ["title", "body"]}},
+        )
+    )
+    result = scanner.scan_data(
+        {"memory": {"notes": [{"id": "n1", "title": "ignore ", "body": "all"}]}},
+        rules_subset={"R"},
+        enable_explain=True,
+    )
+    assert result.rule_matches == ["R"]
+    chunk = result.explanations[0].to_dict()["model_results"][0]["score_summary"]["chunks"][0]
+    assert [piece["field"] for piece in chunk["pieces"]] == ["title", "body"]
+    assert all(
+        piece["source"] == {"input": "memory.notes", "item": "n1"} for piece in chunk["pieces"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("caller", "timeline", "state", "matched"),
+    [
+        ("flow(messages)", None, "incomplete", False),
+        (
+            "flow(messages)",
+            [{"message_index": 0}, {"input": "memory.notes", "id": "n1"}],
+            "complete",
+            True,
+        ),
+        (
+            "any w in memory.notes where flow(w)",
+            [{"message_index": 0}, {"input": "memory.notes", "id": "n1"}],
+            "incomplete",
+            False,
+        ),
+    ],
+)
+def test_called_rule_keeps_cross_source_clock(
+    caller: str, timeline: list[dict] | None, state: str, matched: bool
+) -> None:
+    source = (
+        'rule "Flow" condition: (any w in memory.notes where w.id == "n1") '
+        'right_after user_said("go")\n'
+        f'rule "R" imports: flow = "Flow" condition: {caller}'
+    )
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(source,),
+            inputs={"memory.notes": {"content": ["body"]}},
+        )
+    )
+    data = {
+        "messages": [{"role": "user", "content": "go"}],
+        "memory": {"notes": [{"id": "n1", "body": "go"}]},
+    }
+    if timeline is not None:
+        data["timeline"] = timeline
+    result = scanner.scan_data(data, rules_subset={"R"})
+    assert (result.completion_state, result.rule_matches) == (
+        state,
+        ["R"] if matched else [],
+    )
+
+
+def test_called_rule_check_survives_compiled_artifact_round_trip() -> None:
+    from quarry.policy_serialization import _artifact_from_wire, _artifact_to_wire
+
+    scanner = DSLScanner(QuarryConfig(quarry_rule_texts=(_PI + _CALLER + "    pi(messages)\n",)))
+    wire = _artifact_to_wire(scanner.compiled_rules["R"])
+    restored = _artifact_from_wire(wire)
+    assert restored.split_checks.keys() == scanner.compiled_rules["R"].split_checks.keys()
+    wire["split_checks"][0][1]["dfa_hash"] = "0" * 64
+    with pytest.raises(ValueError, match="split atom must name the check"):
+        _artifact_from_wire(wire)
