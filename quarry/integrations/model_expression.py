@@ -1044,17 +1044,23 @@ async def _evaluate_extract_windows(expression, context, event, environment, tra
     texts = await _span_source_texts(text_source, context, event, environment, trace, regex_backend)
     if not texts:
         return MISSING
-    spans = await evaluate_model_expression(
-        spans_source,
-        context,
-        event=event,
-        bindings=environment,
-        trace=trace,
-        regex_backend=regex_backend,
-    )
-    if not isinstance(spans, CollectionResult):
-        raise TypeError("text.extract() requires a span collection")
-    _check_span_limit(context, len(spans.items), "text.extract() spans")
+    if spans_source.kind == "string_spans":
+        selected = await _cut_pattern_spans(
+            spans_source, context, event, environment, trace, regex_backend
+        )
+    else:
+        spans = await evaluate_model_expression(
+            spans_source,
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(spans, CollectionResult):
+            raise TypeError("text.extract() requires a span collection")
+        _check_span_limit(context, len(spans.items), "text.extract() spans")
+        selected = [item.value for item in spans.items]
     left, right, head = [
         await evaluate_model_expression(
             bound,
@@ -1078,8 +1084,7 @@ async def _evaluate_extract_windows(expression, context, event, environment, tra
         for text in texts
     }
     ranges = {place: [] for place in by_place}
-    for item in spans.items:
-        span = item.value
+    for span in selected:
         found = span._found_in
         key = ("found", found[0]) if found is not None else (span.position, span.field)
         text = by_place.get(key)
@@ -1096,6 +1101,37 @@ async def _evaluate_extract_windows(expression, context, event, environment, tra
                 piece for begin, end in windows for piece in text.pieces(begin, end)
             )
     return "\n".join(rendered)
+
+
+async def _cut_pattern_spans(
+    source, context, event, environment, trace, regex_backend
+) -> list[Span]:
+    """Cap each pattern's cut windows while retaining the rest of its text."""
+
+    text_source, *patterns_sources = source.children
+    texts = await _span_source_texts(text_source, context, event, environment, trace, regex_backend)
+    pattern_sets = [
+        await evaluate_model_expression(child, context, regex_backend=regex_backend)
+        for child in patterns_sources
+    ]
+    patterns = [
+        (pattern, Modifiers.from_flags(flags)) for names, flags in pattern_sets for pattern in names
+    ]
+    kept = []
+    for text in texts:
+        counts: dict[int, int] = {}
+        for (begin, end), matched in matching_patterns(text.text, patterns, regex=regex_backend):
+            raise_if_evaluation_expired()
+            span = text.span(begin, end)
+            over = False
+            for index in matched:
+                counts[index] = counts.get(index, 0) + 1
+                over = over or counts[index] > 256
+            kept.append(text.rest(span) if over else span)
+            _check_span_limit(context, len(kept), "text.extract() spans")
+            if over:
+                break
+    return kept
 
 
 async def _evaluate_model_call(expression, context, event, bindings, trace, regex_backend) -> Any:

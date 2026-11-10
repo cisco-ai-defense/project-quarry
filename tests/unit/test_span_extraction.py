@@ -258,6 +258,16 @@ async def test_input_text_spans_keep_field_provenance_across_a_projection() -> N
     )
     found = await evaluate_model_expression(body, context, bindings={"item": optional})
     assert found.items[0].value.to_dict()["field"] == "body"
+    context.limits = SafetyLimits(max_comprehension_size=257)
+    long_text = ("x" + "z" * 20) * 300
+    x = E("string_spans", "x", (projected, E("string_patterns", "0000", (E("literal", "x"),))))
+    cut = E(
+        "extract_windows", None, (projected, x, E("literal", 0), E("literal", 0), E("literal", 0))
+    )
+    rendered = await evaluate_model_expression(
+        cut, context, bindings={"item": {"id": "n3", "body": long_text}}
+    )
+    assert rendered.endswith(("x" + "z" * 20) * 44)
 
 
 async def test_tool_argument_spans_keep_each_calls_place_and_nested_path() -> None:
