@@ -71,6 +71,25 @@ ORDERS_INPUT_ITEMS = "orders input items"
 COMPOSED_CHECK = "\x00composed"
 
 
+def _without_check_bodies(node):
+    """Treat a called rule's body as its own rule when checking outer model nesting."""
+
+    if isinstance(node, (AnyComprehension, AllComprehension)) and node.variable.startswith(
+        COMPOSED_CHECK
+    ):
+        return _without_check_bodies(node.collection)
+    changes = {}
+    for name in condition_child_fields(node):
+        value = getattr(node, name)
+        if hasattr(value, "__dataclass_fields__"):
+            rewritten = _without_check_bodies(value)
+            if rewritten is not value:
+                changes[name] = rewritten
+        elif isinstance(value, (list, tuple)):
+            changes[name] = type(value)(_without_check_bodies(item) for item in value)
+    return replace(node, **changes) if changes else node
+
+
 @dataclass(frozen=True)
 class _Binding:
     """An element variable in scope: the rule's ``name`` for it, its core variable ``var``
@@ -286,8 +305,9 @@ class Desugarer:
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
             chunk = self._bind(node.variable, "\x00chunks", C.Events("\x00chunks"))
             return C.ChunkQuant(q, chunk.var, node.collection, self.cond(node.condition, (chunk,)))
-        if self._t.contains_model_call(node.condition):
-            self._check_model_comprehension(node, scope)
+        outer = _without_check_bodies(node.condition)
+        if self._t.contains_model_call(outer):
+            self._check_model_comprehension(replace(node, condition=outer), scope)
         if self._t.is_tools(node.collection):
             binding = self._bind(node.variable, "tools", C.Events("tools"))
             body = self.cond(node.condition, (*scope, binding))
