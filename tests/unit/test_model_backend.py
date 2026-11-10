@@ -30,6 +30,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from quarry.cli import format_results
@@ -941,6 +942,12 @@ def _synthetic_provider_error(name: str, status: int | None) -> Exception:
     return error_type("provider detail from https://provider.invalid/models/physical-id")
 
 
+def _httpx_provider_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://provider.invalid/models/physical-id")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError("provider-controlled response", request=request, response=response)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "code", "phrase"),
@@ -985,6 +992,21 @@ def _synthetic_provider_error(name: str, status: int | None) -> Exception:
             "provider_error",
             "Inference model 'head' failed",
         ),
+        (
+            _httpx_provider_error(401),
+            "authentication",
+            "credentials",
+        ),
+        (
+            _httpx_provider_error(404),
+            "model_not_found",
+            "check the configured model name",
+        ),
+        (
+            _httpx_provider_error(400),
+            "bad_request",
+            "rejected the request as invalid",
+        ),
     ],
     ids=[
         "authentication-type",
@@ -995,6 +1017,9 @@ def _synthetic_provider_error(name: str, status: int | None) -> Exception:
         "bad-request-status",
         "context-window",
         "unknown",
+        "httpx-authentication-status",
+        "httpx-model-not-found-status",
+        "httpx-bad-request-status",
     ],
 )
 async def test_a_non_retryable_provider_failure_has_a_safe_stable_cause(

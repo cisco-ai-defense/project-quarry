@@ -1002,7 +1002,8 @@ def _provider_failure(exc: BaseException, model_id: str) -> LLMError:
         (
             value
             for link in chain
-            if isinstance(value := getattr(link, "status_code", None), int)
+            for source in (link, getattr(link, "response", None))
+            if isinstance(value := getattr(source, "status_code", None), int)
             and not isinstance(value, bool)
         ),
         None,
@@ -1407,6 +1408,22 @@ async def _system_one_request(
         raise LLMError("System One request was rate limited", {"code": "rate_limit"})
     if isinstance(status_code, int) and 500 <= status_code < 600:
         raise LLMError("System One provider is unavailable", {"code": "provider_unavailable"})
+    if status_code in {401, 403}:
+        raise LLMError(
+            "System One request was refused: credentials are missing, expired, invalid, or "
+            "not authorized for this model",
+            {"code": "authentication"},
+        )
+    if status_code == 404:
+        raise LLMError(
+            "System One model was not found: check the configured model name",
+            {"code": "model_not_found"},
+        )
+    if status_code in {400, 422}:
+        raise LLMError(
+            "System One rejected the request as invalid",
+            {"code": "bad_request"},
+        )
     if status_code != 200:
         # The body can echo request content, so only the status leaves the adapter.
         raise LLMError(
