@@ -45,7 +45,7 @@ from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
 from quarry.config import InferenceModelConfig, QuarryConfig, ScoreConfig
 from quarry.core.conversation import Conversation
-from quarry.integrations.model_usage import ModelUsage
+from quarry.integrations.model_usage import ModelRetryHistory, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError, clamp_to_evaluation_deadline
@@ -150,20 +150,31 @@ def _attributed_failure(
     model_names = {
         name for name in (private_model, exc.details.get("model")) if isinstance(name, str) and name
     }
+    private_names = model_names - {model_id}
+
+    def names_private_model(text: str) -> bool:
+        return any(name in text for name in private_names)
+
     for name in model_names:
         source_prefix = f"Inference model '{name}'"
         if message.startswith(source_prefix):
-            public_message = f"{prefix}{message[len(source_prefix) :]}"
+            suffix = message[len(source_prefix) :]
+            public_message = (
+                f"{prefix} failed: provider request failed"
+                if names_private_model(suffix)
+                else f"{prefix}{suffix}"
+            )
             break
     else:
         if message.startswith(prefix):
-            public_message = message
-        else:
-            cause = (
-                "provider request failed"
-                if any(name in message for name in model_names)
+            suffix = message[len(prefix) :]
+            public_message = (
+                f"{prefix} failed: provider request failed"
+                if names_private_model(suffix)
                 else message
             )
+        else:
+            cause = "provider request failed" if names_private_model(message) else message
             public_message = f"{prefix} failed: {cause}"
 
     return LLMError(
@@ -1863,6 +1874,7 @@ class ModelInferenceBackend:
         """
 
         send = getattr(adapter, method)
+        retry_history = ModelRetryHistory()
 
         async def request(*, timeout: float | None) -> Any:
             try:
@@ -1877,6 +1889,7 @@ class ModelInferenceBackend:
                     rate_limit_model,
                     lambda attempt_timeout: send(model, *arguments, timeout=attempt_timeout),
                     timeout=timeout,
+                    retry_history=retry_history,
                 )
             except LLMError as exc:
                 reason = _refusal_reason(exc) if refusals else None
@@ -1912,10 +1925,10 @@ class ModelInferenceBackend:
                     timeout=provider_timeout,
                 )
         except TimeoutError as exc:
-            raise _llm_error(
-                "timeout",
-                "timed out",
+            raise ModelUsage._timeout_error(
                 model_id,
+                retry_history.last_failure,
+                retry_history.failed_attempts,
             ) from exc
         except LLMError as exc:
             # A request another alias started fails under that alias's name; report it
@@ -1970,6 +1983,7 @@ class ModelInferenceBackend:
         operation: Callable[[float | None], Awaitable[Any]],
         *,
         timeout: float | None,
+        retry_history: ModelRetryHistory,
     ) -> Any:
         """Run one logical model call and normalize its final provider failure."""
 
@@ -1979,6 +1993,7 @@ class ModelInferenceBackend:
                 operation,
                 budget_alias=model_id,
                 timeout=timeout,
+                retry_history=retry_history,
             )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the

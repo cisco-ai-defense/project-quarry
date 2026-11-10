@@ -107,6 +107,57 @@ async def test_retry_timeout_names_the_alias_and_last_completed_failure(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_timeout_waiting_for_a_retry_slot_keeps_the_completed_attempt(
+    monkeypatch,
+) -> None:
+    now = 0.0
+    tickets = 0
+    attempts = 0
+
+    @asynccontextmanager
+    async def limit(_bucket: str):
+        nonlocal now, tickets
+        tickets += 1
+        if tickets == 2:
+            now = 2.0
+        yield 0.0
+
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    async def fail(_timeout: float | None) -> str:
+        nonlocal attempts
+        attempts += 1
+        raise LLMError("provider-controlled detail", {"code": "connection"})
+
+    monkeypatch.setattr(model_usage, "monotonic", lambda: now)
+    monkeypatch.setattr(model_usage, "_sleep", no_delay)
+    usage = ModelUsage(SimpleNamespace(limit=limit))
+
+    with model_call_budget(2) as budget, pytest.raises(LLMError) as exc_info:
+        await usage.run(
+            "provider/physical-model",
+            fail,
+            budget_alias="guard",
+            timeout=1.0,
+        )
+
+    assert tickets == 2
+    assert attempts == 1
+    assert budget is not None
+    assert budget.calls_by_alias == {"guard": 1}
+    assert exc_info.value.details == {
+        "code": "timeout",
+        "model": "guard",
+        "last_failure": "connection",
+    }
+    assert str(exc_info.value) == (
+        "Inference model 'guard' ran out of time after 1 failed attempt; "
+        "last recorded failure: connection error"
+    )
+
+
+@pytest.mark.asyncio
 async def test_model_call_cost_limit_counts_attempts_per_alias(monkeypatch) -> None:
     attempts = 0
 

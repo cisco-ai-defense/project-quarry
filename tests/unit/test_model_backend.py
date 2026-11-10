@@ -652,6 +652,39 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Inference model 'physical-private' failed: physical-private unavailable",
+        "Inference model 'safety' failed: physical-private unavailable",
+    ],
+    ids=["private-prefix", "public-prefix"],
+)
+async def test_alias_attribution_removes_private_model_names_from_the_whole_message(
+    tmp_path, message
+) -> None:
+    class LeakingAdapter(ModelAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            raise LLMError(
+                message,
+                {"code": "invalid_output", "model": "physical-private"},
+            )
+
+    backend = _v2_backend(
+        tmp_path,
+        {"safety": model_entry(classify=0, physical_model="physical-private")},
+        LeakingAdapter(),
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("safety", _INPUT, timeout=1.0)
+
+    assert raised.value.details == {"code": "invalid_output", "model": "safety"}
+    assert str(raised.value) == "Inference model 'safety' failed: provider request failed"
+    assert "physical-private" not in str(raised.value)
+
+
 def test_the_model_call_limit_is_per_configured_model_and_resets_every_scan(tmp_path) -> None:
     rules = {
         "Budgeted": 'model("safety").complete(message("user", "a")).content == "blocked" and '
@@ -931,6 +964,39 @@ class _FailsOnceAdapter(ModelAdapter):
         if len(self.timeouts) == 1:
             raise LLMError("try again", {"code": "connection"})
         return await super().classify_messages(config, messages, tools, timeout=timeout)
+
+
+class _FailsThenHangsAdapter(ModelAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    async def classify_messages(self, config, messages, tools, *, timeout=None):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise LLMError("provider-controlled detail", {"code": "connection"})
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_backend_timeout_keeps_the_last_completed_retry_failure(tmp_path) -> None:
+    adapter = _FailsThenHangsAdapter()
+    backend = _v2_backend(tmp_path, {"guard": model_entry(classify=0)}, adapter)
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("guard", _INPUT, timeout=0.35)
+
+    assert adapter.attempts == 2
+    assert raised.value.details == {
+        "code": "timeout",
+        "model": "guard",
+        "last_failure": "connection",
+    }
+    assert str(raised.value) == (
+        "Inference model 'guard' ran out of time after 1 failed attempt; "
+        "last recorded failure: connection error"
+    )
+    assert "provider-controlled detail" not in str(raised.value)
 
 
 @pytest.mark.asyncio
