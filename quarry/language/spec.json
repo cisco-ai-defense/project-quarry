@@ -322,6 +322,24 @@
       "checks": [
         {
           "expected_match": true,
+          "input_path": "examples/span-inside.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/span-inside.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:inside"
+      ],
+      "id": "example:span-inside",
+      "requires_backend": false,
+      "rule_path": "examples/span-inside.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
           "input_path": "examples/string-operations.matching.json"
         },
         {
@@ -1449,6 +1467,16 @@
       "source": "quarry.dsl.transformer.DSLTransformer.gte_op",
       "summary": "Match when the left number is greater than or equal to the right number.",
       "syntax": "comparison: in_expr \">=\" in_expr"
+    },
+    {
+      "description": "Test whether one span is covered by a span from the right-hand list.",
+      "handler": "inside_op",
+      "id": "construct:inside",
+      "kind": "construct",
+      "name": "inside",
+      "source": "quarry.dsl.transformer.DSLTransformer.inside_op",
+      "summary": "Test whether one span is covered by a span from the right-hand list.",
+      "syntax": "in_expr: arith_expr \"inside\" arith_expr"
     },
     {
       "description": "Match when the left number is less than the right number.",
@@ -3325,6 +3353,15 @@
       "summary": "Quarry operator `in`."
     },
     {
+      "category": "operator",
+      "id": "token:inside",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "inside",
+      "summary": "Quarry operator `inside`."
+    },
+    {
       "category": "punctuation",
       "id": "token:left-brace",
       "kind": "token",
@@ -3744,6 +3781,7 @@
         "~",
         "matches",
         "in",
+        "inside",
         "as"
       ],
       "precedence": 6
