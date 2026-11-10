@@ -1,0 +1,8 @@
+rule "Blocked request"
+condition:
+    user_said("ignore previous instructions")
+rule "Blocked request in user messages"
+imports:
+    blocked = "Blocked request"
+condition:
+    blocked(messages.user_messages)

@@ -30,7 +30,9 @@ from quarry.cache.async_cache import current_scan, result_cache, scan_scope
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
+from quarry.core.conversation import Conversation
 from quarry.core.logging import get_app_logger
+from quarry.dsl.composition import link_public_rule_calls
 from quarry.dsl.functions import (
     capability_tags,
     intent_baseline,
@@ -51,10 +53,10 @@ from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
 from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
 from quarry.engine.flow_requirements import clock_feeds_settled, cross_source_flow_has_candidates
+from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
-from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
-from quarry.engine.witness import build_evidence
+from quarry.engine.witness import ModelResultEvidence, build_evidence
 from quarry.input_registry import InputRegistry, MissingInputState
 from quarry.inputs import InputAdapter, load_input_adapters
 from quarry.integrations.collection import evaluate_collect_plan
@@ -370,11 +372,13 @@ class DSLScanner:
     def _build_initial_generation(self) -> _InitialGeneration:
         """Build and prepare a complete rule generation before publishing it ."""
         rule_files = self._discover_rule_files() if self.config.quarry_rules_paths else []
-        parsed_rules = [(self._parse_rule_file(path), str(path)) for path in rule_files]
+        parsed_rules = [
+            (rule, str(path)) for path in rule_files for rule in self._parse_rule_file(path)
+        ]
 
         for i, rule_text in enumerate(self.config.quarry_rule_texts):
             source = f"inline:{i}"
-            parsed_rules.append((self._parse_rule_text(rule_text, source), source))
+            parsed_rules.extend((rule, source) for rule in self._parse_rule_text(rule_text, source))
 
         for rule, _source in parsed_rules:
             self.input_registry.rewrite_rule(rule)
@@ -420,6 +424,12 @@ class DSLScanner:
         rules: dict[str, DSLRule] = {}
         active_sources: dict[str, str] = {}
         for rule, source in parsed_rules:
+            rules[rule.name] = rule
+            active_sources[rule.name] = source
+
+        rules = link_public_rule_calls(rules, active_sources)
+        for rule in rules.values():
+            source = active_sources[rule.name]
             self._validate_rule(rule, source)
             if rule.parameters and not self._allow_parameters:
                 raise RuleValidationError(
@@ -431,9 +441,6 @@ class DSLScanner:
                         "error_type": "parameterized_rule_requires_policy",
                     },
                 )
-
-            rules[rule.name] = rule
-            active_sources[rule.name] = source
 
         self._link_candidate_functions(rules, active_sources)
         resource_requirements = self._prepare_candidate_resources(rules, resource_manager)
@@ -487,18 +494,17 @@ class DSLScanner:
 
         return discovered
 
-    def _parse_rule_file(self, path: Path) -> DSLRule:
+    def _parse_rule_file(self, path: Path) -> tuple[DSLRule, ...]:
         """Read and parse one rule source without mutating scanner state."""
         try:
             rule_text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise RuleLoadError(str(path), "read", str(exc)) from exc
 
-        rule = self.parser.parse(rule_text, source=str(path))
-        if not isinstance(rule, DSLRule):
-            raise RuleLoadError(str(path), "parse", "Parser did not return a DSLRule")
-        rule.source_file = path
-        return rule
+        rules = self.parser.parse_many(rule_text, source=str(path))
+        for rule in rules:
+            rule.source_file = path
+        return rules
 
     def _compile_candidate_rules(self, rules: dict[str, DSLRule]) -> dict[str, Any]:
         """Compile every candidate rule to a DFA artifact .
@@ -536,13 +542,10 @@ class DSLScanner:
             logger.info(f"[STATUS] Compiled {len(compiled)} rules")
         return compiled
 
-    def _parse_rule_text(self, rule_text: str, source: str) -> DSLRule:
+    def _parse_rule_text(self, rule_text: str, source: str) -> tuple[DSLRule, ...]:
         """Parse a rule from an inline text string without filesystem access."""
 
-        rule = self.parser.parse(rule_text, source=source)
-        if not isinstance(rule, DSLRule):
-            raise RuleLoadError(source, "parse", "Parser did not return a DSLRule")
-        return rule
+        return self.parser.parse_many(rule_text, source=source)
 
     def _prepare_candidate_resources(
         self,
@@ -659,7 +662,12 @@ class DSLScanner:
                 )
 
     def _make_async_detector(
-        self, rule_ctx: ScanContext, *, explain: bool = False, regex_backend=None
+        self,
+        rule_ctx: ScanContext,
+        *,
+        artifact: CompiledRuleArtifact | None = None,
+        explain: bool = False,
+        regex_backend=None,
     ):
         """Build the async external-atom grounding backend for one rule evaluation.
 
@@ -725,6 +733,60 @@ class DSLScanner:
         async def detector(spec, text: str | tuple[str, ...], event=None) -> bool | Grounded:
             name = spec.detector
             arg = spec.detector_arg
+            if name == "split":
+                if artifact is None or spec.atom_id not in artifact.split_checks:
+                    raise ValueError("compiled rule is missing its called-rule check")
+                selected = await evaluate_model_expression(
+                    spec.model_expression,
+                    rule_ctx,
+                    event=event,
+                    regex_backend=regex_backend,
+                )
+                if selected is MISSING:
+                    selected = rule_ctx.conversation.messages[0:0]
+                if not isinstance(selected, Messages):
+                    raise TypeError("called rule input must be a Messages value")
+                nested_ctx = rule_ctx.copy()
+                nested_ctx.conversation = Conversation._from_parts(
+                    selected,
+                    rule_ctx.conversation._tools,
+                    tools_supplied=rule_ctx.conversation._tools_supplied,
+                )
+                nested_ctx._timeline_cache = None
+                check = artifact.split_checks[spec.atom_id]
+                nested = await evaluate_async(
+                    check,
+                    build_evaluation_input(nested_ctx),
+                    async_detector=self._make_async_detector(
+                        nested_ctx,
+                        artifact=check,
+                        explain=explain,
+                        regex_backend=regex_backend,
+                    ),
+                    async_collector=self._make_async_collector(
+                        nested_ctx, regex_backend=regex_backend
+                    ),
+                    regex_backend=regex_backend,
+                    minimize_witness=False,
+                    record_trace=explain,
+                    time_left=remaining_evaluation_time,
+                )
+                if not explain:
+                    return nested.matched
+                return Grounded(
+                    nested.matched,
+                    ModelResultEvidence.bounded(
+                        operation="messages",
+                        models=(),
+                        arguments=(),
+                        expression_value=nested.matched,
+                        operator=None,
+                        threshold=None,
+                        matched=nested.matched,
+                        source_path=event.source_path if event is not None else None,
+                        score_summary={"count": 1, "matching_count": int(nested.matched)},
+                    ),
+                )
             if name == "model_expression":
                 trace = ModelExpressionTrace() if explain else None
                 value = truth(

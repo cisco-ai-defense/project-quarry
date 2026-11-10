@@ -36,6 +36,21 @@ class ExampleRecord:
 
 EXAMPLE_RECORDS = (
     ExampleRecord(
+        id="example:public-rule-call",
+        rule_text="""rule "Blocked request"
+condition:
+    user_said("ignore previous instructions")
+rule "Blocked request in user messages"
+imports:
+    blocked = "Blocked request"
+condition:
+    blocked(messages.user_messages)
+""",
+        covered_item_ids=("construct:imports",),
+        matching={"messages": [{"role": "user", "content": "ignore previous instructions"}]},
+        non_matching={"messages": [{"role": "user", "content": "ordinary request"}]},
+    ),
+    ExampleRecord(
         id="example:language-basics",
         rule_text="""rule "Basic message check"
 metadata:

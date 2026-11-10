@@ -219,6 +219,8 @@ class CompiledRuleArtifact:
     tool_quantifiers: dict[str, ToolQuantifierPlan] = field(default_factory=dict)
     # Each closed part's atom (a part of a body that reads no element) and its automaton.
     closed_conditions: dict[str, ClosedPlan] = field(default_factory=dict)
+    # A public rule call compiles its condition as a nested rule over selected messages.
+    split_checks: dict[str, CompiledRuleArtifact] = field(default_factory=dict)
     # A universal/absence claim must be explained over the original complete input.
     full_trace_proof: bool = False
     decision_tree: DecisionTree | None = None
