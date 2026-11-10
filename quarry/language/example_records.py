@@ -44,6 +44,7 @@ rule "Blocked request in user messages"
 imports:
     blocked = "Blocked request"
 condition:
+    user_said("ignore previous instructions") and
     blocked(messages.user_messages)
 """,
         covered_item_ids=("construct:imports",),
