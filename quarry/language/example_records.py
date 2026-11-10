@@ -550,6 +550,7 @@ strings:
     $secret = "password"
     $quote = "\\\"password\\\""
 condition:
+    user_said("password") and
     any s in $secret.spans(user_messages) where s inside $quote.spans(user_messages)
 """,
         covered_item_ids=("construct:inside",),
