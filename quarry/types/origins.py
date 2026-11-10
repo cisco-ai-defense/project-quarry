@@ -28,7 +28,7 @@ from array import array
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from typing import Any
 
 from quarry.types.results import PRECISIONS, InputText, Span, text_part
 
@@ -39,8 +39,6 @@ LINEAR, WHOLE = 0, 1
 # The fields of one run, flat in ``Derived.runs``: output start and end, the index of its
 # source, source start and end, and its kind.
 RUN_FIELDS = 6
-# The most runs one transformed unit keeps; a larger map is coarsened, never refused.
-MAX_RUNS_PER_UNIT = 512
 EXACT, INTERPOLATED, ENCLOSING = range(len(PRECISIONS))
 
 
@@ -192,27 +190,6 @@ def field_part(owner: Any, field: str, source: InputText | None) -> tuple[int, i
     return text_part(owner, field)
 
 
-def reads(origin: Origin, start: int, end: int) -> Iterator[tuple[Point, Point]]:
-    """The ranges of the conversation ``text[start:end]`` of the text at ``origin`` was made
-    from, each from where it starts to where it ends, in the order the text holds them: one
-    for a conversation text, and for a made text one for each place each of its runs reads,
-    a derived source's in turn. When each range starts where the one before it ends or
-    later, every span found in the text starts at or after the spans found before it."""
-
-    if isinstance(origin, Place):
-        key = source_key(origin.source)
-        part = field_part(origin.owner, origin.field, origin.source)
-        yield (
-            (key, origin.position, part, origin.start + start),
-            (key, origin.position, part, origin.start + end),
-        )
-        return
-    for fields in origin._touched(start, end):
-        low, _ = _mapped(fields, max(start, fields[0]), end=False)
-        high, _ = _mapped(fields, min(end, fields[1]), end=True)
-        yield from reads(origin.sources[fields[2]], low, high)
-
-
 def _mapped(run: Sequence[int], at: int, *, end: bool) -> tuple[int, int]:
     """Where offset ``at`` of a run's output, as a span's start or its ``end``, lies in the
     run's source, and how closely: exactly on the run's boundary or inside an exact run, by
@@ -281,69 +258,6 @@ def _span(first: _Piece, last: _Piece) -> Span:
         place_position=start.position,
         end_place_position=finish.position,
     )._bind_to_source(start.owner)
-
-
-def checked_map(text: str, source_length: int, runs: Any) -> array:
-    """The map of ``text``, which a transformation made from one unit of text of
-    ``source_length`` characters (0 for a media part, whose text is empty), as the flat runs
-    of a ``Derived`` text of that one source: the one rule every transformation's map follows.
-
-    ``runs`` is the transformation's map, a list of runs each ``[out_start, out_end,
-    source_start, source_end]`` for a linear run or with ``"whole"`` appended for a whole one:
-    output ranges non-empty, in order and covering ``text`` exactly; source ranges inside the
-    unit, in order and not overlapping, with gaps for deleted text, each non-empty unless the
-    unit is. Without a map (None), the whole text stands for the whole unit. A map that breaks
-    the rule fails with ``ValueError`` naming what it returned; adjacent exact runs are merged,
-    and a map of more than ``MAX_RUNS_PER_UNIT`` runs is coarsened into whole runs, so the map
-    kept is at most that many runs whatever the transformation returned.
-    """
-
-    if runs is None:
-        runs = [[0, len(text), 0, source_length, "whole"]] if text else []
-    if not isinstance(runs, list | tuple):
-        raise ValueError("runs that are not a list")
-    checked: list[list[int]] = []
-    for run in runs:
-        if (
-            not isinstance(run, list | tuple)
-            or len(run) not in {4, 5}
-            or any(isinstance(value, bool) or not isinstance(value, int) for value in run[:4])
-            or (len(run) == 5 and run[4] != "whole")
-        ):
-            raise ValueError('a run that is not four integers, or four integers and "whole"')
-        out_start, out_end, source_start, source_end = cast(Sequence[int], run[:4])
-        expected_start = checked[-1][1] if checked else 0
-        if out_start != expected_start or not out_start < out_end <= len(text):
-            raise ValueError("runs that do not cover its text in order without overlap")
-        if not 0 <= source_start <= source_end <= source_length:
-            raise ValueError("a run outside the part it read")
-        if checked and source_start < checked[-1][4]:
-            raise ValueError("runs whose source ranges move back or overlap")
-        if source_start == source_end and source_length:
-            raise ValueError("a run that reads no character of a part with text")
-        kind = WHOLE if len(run) == 5 else LINEAR
-        last = checked[-1] if checked else None
-        if (
-            last is not None
-            and kind == LINEAR == last[5]
-            and last[1] - last[0] == last[4] - last[3]
-            and out_end - out_start == source_end - source_start
-            and last[4] == source_start
-        ):
-            last[1], last[4] = out_end, source_end
-        else:
-            checked.append([out_start, out_end, 0, source_start, source_end, kind])
-    if (checked[-1][1] if checked else 0) != len(text):
-        raise ValueError("runs that do not cover its text")
-    if len(checked) > MAX_RUNS_PER_UNIT:
-        size = -(-len(checked) // MAX_RUNS_PER_UNIT)
-        checked = [
-            group[0]
-            if len(group) == 1
-            else [group[0][0], group[-1][1], 0, group[0][3], group[-1][4], WHOLE]
-            for group in (checked[i : i + size] for i in range(0, len(checked), size))
-        ]
-    return array("q", (value for run in checked for value in run))
 
 
 def joined(pieces: Iterable[tuple[str, Origin | None]]) -> Derived:
