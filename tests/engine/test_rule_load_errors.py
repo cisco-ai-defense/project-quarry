@@ -275,7 +275,7 @@ _REJECTED = [
     ),
     pytest.param(
         _collect("true", 'model("guard").split(messages, 200)'),
-        "source must be a direct model().spans() call",
+        "source must be a list of spans",
         id="collect-over-chunks",
     ),
     pytest.param(

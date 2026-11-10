@@ -2171,13 +2171,21 @@ class _Compiler:
         raise UnsupportedConstruct(f"unsupported model expression {type(node).__name__}")
 
     def compile_collect(self, node) -> CollectPlan:
-        """Lower one identity filter comprehension to an AST-free collection plan."""
+        """Lower a list of located spans to an AST-free collection plan."""
 
         if not isinstance(node, FilterComprehension):
-            raise UnsupportedConstruct("collect: requires one filter comprehension")
+            source = self._lower_span_list(node, Scope())
+            return CollectPlan(
+                variable="span",
+                item_type="Span",
+                source=source,
+                local_predicate=ModelExpression("literal", True),
+                model_predicate=None,
+                has_external_work=self._contains_model_call(node),
+            )
 
-        if not isinstance(node.collection, ModelCall) or node.collection.operation != "spans":
-            raise UnsupportedConstruct("collect: source must be a direct model().spans() call")
+        if not self.lists_spans(node.collection):
+            raise UnsupportedConstruct("collect: source must be a list of spans")
 
         output_variable = node.output_variable or node.variable
         if output_variable != node.variable:
@@ -2187,14 +2195,8 @@ class _Compiler:
         if self._find_flow(node.condition) is not None:
             raise UnsupportedConstruct("temporal expressions are not supported in collect:")
 
-        source, source_type = self._lower_model_expression(
-            node.collection, Scope(), allow_collection_source=True
-        )
-        if not source_type.endswith("[]"):
-            raise UnsupportedConstruct("collect: source must produce a collection")
-
-        item_type = source_type[:-2]
-        item_scope = Scope().bind(node.variable, "collect_items", item_type)
+        source = self._lower_span_list(node.collection, Scope())
+        item_scope = Scope().bind(node.variable, "collect_items", "Span")
         local_terms: list[ModelExpression] = []
         model_terms: list[ModelExpression] = []
         for term in self._collect_conjuncts(node.condition):
@@ -2215,7 +2217,7 @@ class _Compiler:
 
         return CollectPlan(
             variable=node.variable,
-            item_type=item_type,
+            item_type="Span",
             source=source,
             local_predicate=self._join_collect_predicates(local_terms),
             model_predicate=(self._join_collect_predicates(model_terms) if model_terms else None),
