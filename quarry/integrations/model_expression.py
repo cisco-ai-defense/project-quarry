@@ -129,6 +129,13 @@ async def evaluate_model_expression(
         return getattr(context.conversation.messages, str(expression.value))
     if kind == "tools":
         return context.conversation.tools
+    if kind == "input_state":
+        name = str(expression.value)
+        return (
+            MISSING
+            if name in context.missing_extension_states
+            else context.extension_state_values[name]
+        )
     if kind == "binding":
         name = str(expression.value)
         if name in environment:

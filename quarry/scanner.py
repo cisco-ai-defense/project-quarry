@@ -17,6 +17,7 @@
 """Scanner engine."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -48,10 +49,14 @@ from quarry.engine.compiler import compile_rule
 from quarry.engine.contracts import CompiledRuleArtifact, ScanRecord
 from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
+from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
+from quarry.engine.flow_requirements import clock_feeds_settled, cross_source_flow_has_candidates
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
 from quarry.engine.witness import build_evidence
+from quarry.input_registry import InputRegistry, MissingInputState
+from quarry.inputs import InputAdapter, load_input_adapters
 from quarry.integrations.collection import evaluate_collect_plan
 from quarry.integrations.model_expression import (
     ModelExpressionTrace,
@@ -64,22 +69,25 @@ from quarry.integrations.resources import ResourceManager
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
+    surface_names,
     token_spellings,
 )
 from quarry.rule_versioning import check_rule_compatibility
-from quarry.safety.limits import SafetyLimits
+from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.safety.timer import (
     QuarryTimeoutError,
     current_evaluation_deadline,
     evaluation_deadline,
     evidence_deadline,
+    raise_if_evaluation_expired,
     remaining_evaluation_time,
     scan_deadline,
 )
 from quarry.safety.validator import (
     RuleValidator,
     Severity,
+    _validate_json_tree,
     validate_conversation,
     validate_conversation_arguments,
 )
@@ -99,6 +107,11 @@ from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+def _required_surfaces(artifact: CompiledRuleArtifact) -> set[str]:
+    """Selectors whose presence or absence can affect a compiled verdict."""
+    return set(artifact.read_surfaces)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +230,7 @@ class DSLScanner:
         tool_call_types: ToolCallTypeRegistry | None = None,
         llm_rate_limiter: LLMRateLimiter | None = None,
         _allow_parameters: bool = False,
+        input_adapters: Mapping[str, InputAdapter] | None = None,
     ):
         """
         Initialize scanner with config.
@@ -230,6 +244,7 @@ class DSLScanner:
             tool_call_types: Optional mapping of tool call types for input normalization.
             model_inference_backend: Optional separately constructed model backend.
             llm_rate_limiter: Optional limiter shared across scanner instances.
+            input_adapters: Named converters for native input formats.
         """
         self._initialize_execution(
             config,
@@ -243,7 +258,11 @@ class DSLScanner:
             allow_parameters=_allow_parameters,
         )
         self.parser = DSLParser()
-        self.validator = RuleValidator()
+        self.input_adapters, declarations = load_input_adapters(
+            self.config.adapters, self.config.inputs, input_adapters
+        )
+        self.input_registry = InputRegistry(declarations)
+        self.validator = RuleValidator(self.input_registry.event_surfaces)
 
         if not self.config.quarry_rules_paths and not self.config.quarry_rule_texts:
             raise ConfigurationError(
@@ -309,6 +328,7 @@ class DSLScanner:
         resource_requirements: dict[str, set[Any]],
         model_inference_backend=None,
         llm_rate_limiter: LLMRateLimiter | None = None,
+        input_adapters: Mapping[str, InputAdapter] | None = None,
     ) -> "DSLScanner":
         """Build an execution-only scanner without constructing a parser or compiler."""
 
@@ -324,6 +344,10 @@ class DSLScanner:
             llm_rate_limiter=llm_rate_limiter,
             allow_parameters=True,
         )
+        scanner.input_adapters, declarations = load_input_adapters(
+            config.adapters, config.inputs, input_adapters
+        )
+        scanner.input_registry = InputRegistry(declarations)
         resource_manager = ResourceManager(
             config,
             model_inference_backend=model_inference_backend,
@@ -351,6 +375,9 @@ class DSLScanner:
         for i, rule_text in enumerate(self.config.quarry_rule_texts):
             source = f"inline:{i}"
             parsed_rules.append((self._parse_rule_text(rule_text, source), source))
+
+        for rule, _source in parsed_rules:
+            self.input_registry.rewrite_rule(rule)
 
         # Reject a duplicate rule name across files up front: silently overwriting would make
         # which rule "wins" depend on load order (fail closed for deterministic loading).
@@ -483,14 +510,22 @@ class DSLScanner:
             logger.info("[STATUS] Compiling rules to DFA artifacts...")
         compiled: dict[str, Any] = {}
         for name, rule in rules.items():
-            result = compile_rule(
-                rule,
-                response_schemas={
-                    alias: model.complete.response_schema
-                    for alias, model in self.config.models.items()
-                    if model.complete is not None
-                },
-            )
+            event_token = EVENT_SURFACES.set(self.input_registry.event_surfaces)
+            static_token = STATIC_SURFACES.set(self.input_registry.state_surfaces)
+            texts_token = INPUT_TEXTS.set(self.input_registry.text_fields)
+            try:
+                result = compile_rule(
+                    rule,
+                    response_schemas={
+                        alias: model.complete.response_schema
+                        for alias, model in self.config.models.items()
+                        if model.complete is not None
+                    },
+                )
+            finally:
+                INPUT_TEXTS.reset(texts_token)
+                STATIC_SURFACES.reset(static_token)
+                EVENT_SURFACES.reset(event_token)
             if not result.ok:
                 msgs = "; ".join(d.message for d in result.diagnostics.errors) or "unknown error"
                 raise RuleValidationError(
@@ -867,6 +902,55 @@ class DSLScanner:
         self._external_rule_cache[rule_name] = result
         return result
 
+    def _adapted(
+        self,
+        key: str,
+        native: Any,
+        read: frozenset[str],
+        data: Mapping[str, Any],
+        sections: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Convert only sections selected rules read from one native input."""
+
+        adapter = self.input_adapters[key]
+        conversation = surface_names() - {"tools"}
+        wanted = frozenset(
+            section
+            for section in adapter.sections
+            if (section == "messages" and read & conversation)
+            or (section == "tools" and "tools" in read)
+            or section in read
+        )
+        for section in wanted:
+            if section in data or section in sections:
+                raise ConversationValidationError(
+                    f"{section} is carried directly and by adapter key {key!r}"
+                )
+        if not wanted:
+            return {}
+        if self.limits.enforce_limits and (
+            json_size(native, self.limits.max_total_size) > self.limits.max_total_size
+        ):
+            raise ConversationValidationError(f"{key!r} exceeds max_total_size")
+        _validate_json_tree(native, key, self.limits.max_nesting_depth)
+        converted = adapter.convert(native, wanted)
+        unexpected = sorted(set(converted) - wanted)
+        if unexpected:
+            raise ValueError(f"returned {', '.join(unexpected)}, which it was not asked for")
+        unfilled = sorted((wanted & {"messages", "tools"}) - set(converted))
+        if unfilled:
+            raise ValueError(f"did not return {', '.join(unfilled)}, which it was asked for")
+        return dict(converted)
+
+    def _adapter_surfaces(self, key: str) -> frozenset[str]:
+        supplied: set[str] = set()
+        for section in self.input_adapters[key].sections:
+            if section == "messages":
+                supplied |= surface_names() - {"tools"}
+            else:
+                supplied.add(section)
+        return frozenset(supplied)
+
     def scan_data(
         self,
         data: dict[str, Any],
@@ -968,7 +1052,6 @@ class DSLScanner:
 
         start_time = datetime.now()
         timed_out_rules = []
-
         selected_names = rules_subset if rules_subset is not None else set(self.compiled_rules)
         parameter_schema = tuple(
             spec
@@ -986,33 +1069,30 @@ class DSLScanner:
                 validation_error=message,
             )
         bound_parameters = parameters or {}
-
-        try:
-            validate_conversation(
-                data,
-                parse_arguments=False,
-                max_nesting_depth=self.limits.max_nesting_depth,
-            )
-        except ConversationValidationError as e:
-            message = str(e)
-            return ScanResult(
-                file_path=file_path,
-                rule_matches=[],
-                scan_time=0.0,
-                error=f"Conversation validation error: {message}",
-                validation_error=message,
-            )
-        except Exception as e:
-            # Whole-conversation validation failure → the scan is INVALID (it never ran).
-            # Surfaced via ``validation_error`` so ``completion_state`` is "invalid" and a
-            # guard's ``raise_for_status`` fails closed distinctly from a per-rule error.
-            return ScanResult(
-                file_path=file_path,
-                rule_matches=[],
-                scan_time=0.0,
-                validation_error=f"Conversation validation error: {e}",
-            )
-
+        legacy_chat = not self.input_registry.declarations and not self.input_adapters
+        if legacy_chat:
+            try:
+                validate_conversation(
+                    data,
+                    parse_arguments=False,
+                    max_nesting_depth=self.limits.max_nesting_depth,
+                )
+            except ConversationValidationError as exc:
+                message = str(exc)
+                return ScanResult(
+                    file_path=file_path,
+                    rule_matches=[],
+                    scan_time=0.0,
+                    error=f"Conversation validation error: {message}",
+                    validation_error=message,
+                )
+            except Exception as exc:
+                return ScanResult(
+                    file_path=file_path,
+                    rule_matches=[],
+                    scan_time=0.0,
+                    validation_error=f"Conversation validation error: {exc}",
+                )
         if rules_subset is not None:
             unknown_rules = sorted(rules_subset - self.loaded_rules.keys())
             if not rules_subset or unknown_rules:
@@ -1028,20 +1108,142 @@ class DSLScanner:
                     error=f"Rule selection error: {reason}",
                 )
 
-        messages = data.get("messages", [])
-        tools = data.get("tools", data.get("functions", []))
+        selected_artifacts = [
+            self.compiled_rules[name] for name in selected_names if name in self.compiled_rules
+        ]
+        read = frozenset().union(*(artifact.read_surfaces for artifact in selected_artifacts))
+        orders_items = any(artifact.orders_input_items for artifact in selected_artifacts)
+        raw_sections: dict[str, Any] = {}
+        input_faults: dict[str, str] = {}
+        part_faults: dict[str, Exception] = {}
+        supplied_namespaces: set[str] = set()
+        timeline_entries: list[dict[str, Any]] | None = None
+        timeline_fault: str | None = None
+        chat_surfaces = surface_names()
+
+        def every_rule_reads(surfaces: frozenset[str]) -> bool:
+            return all(artifact.read_surfaces & surfaces for artifact in selected_artifacts)
+
+        try:
+            if not isinstance(data, dict):
+                raise ConversationValidationError("A conversation must be an object")
+            carried = {"messages", "tools", "timeline", *self.input_registry.definitions}
+            carried |= set(self.input_adapters)
+            if not data:
+                raise ConversationValidationError(
+                    "The conversation carries nothing; it holds any of "
+                    + ", ".join(sorted(carried))
+                )
+            chat = {
+                key: value
+                for key, value in data.items()
+                if key != "timeline"
+                and key not in self.input_registry.definitions
+                and key not in self.input_adapters
+            }
+            for key, value in sorted(data.items(), key=lambda item: item[0] in self.input_adapters):
+                if key in chat:
+                    continue
+                if key == "timeline":
+                    if orders_items:
+                        timeline_entries = value
+                elif key in self.input_registry.definitions:
+                    supplied_namespaces.add(key)
+                    sections_of = [
+                        section
+                        for section in self.input_registry.declarations
+                        if section.startswith(f"{key}.")
+                    ]
+                    if not any(section in read for section in sections_of):
+                        continue
+                    if not isinstance(value, dict):
+                        reason = f"{key!r} must be an object of its sections"
+                        input_faults.update(dict.fromkeys(sections_of, reason))
+                        continue
+                    for section in read:
+                        namespace, _, name = section.partition(".")
+                        if namespace == key and name in value:
+                            raw_sections[section] = value[name]
+                else:
+                    try:
+                        adapted = self._adapted(key, value, read, data, raw_sections)
+                    except Exception as exc:
+                        supplied = self._adapter_surfaces(key)
+                        if every_rule_reads(supplied):
+                            raise ConversationValidationError(
+                                f"Input adapter {key!r} failed: {type(exc).__name__}: {exc}"
+                            ) from exc
+                        part_faults.update(dict.fromkeys(supplied, exc))
+                        continue
+                    for section, converted in adapted.items():
+                        if section in {"messages", "tools"}:
+                            chat[section] = converted
+                        else:
+                            raw_sections[section] = converted
+
+            # Unknown top-level keys are invalid for the scan, even when no selected rule
+            # reads the chat. A declared namespace with an unread section remains untouched.
+            unknown = sorted(set(chat) - {"messages", "tools"})
+            if unknown:
+                raise ConversationValidationError(
+                    f"Conversation contains unsupported top-level keys: {unknown}"
+                )
+            conversation_supplied = "messages" in chat
+            chat_read = legacy_chat or bool(read & (chat_surfaces - {"tools"}))
+            if not chat_read:
+                chat.pop("messages", None)
+            if "tools" not in read and not legacy_chat:
+                chat.pop("tools", None)
+            chat.setdefault("messages", [])
+            try:
+                if (
+                    not legacy_chat
+                    and self.limits.enforce_limits
+                    and (json_size(chat, self.limits.max_total_size) > self.limits.max_total_size)
+                ):
+                    raise ConversationValidationError("Conversation exceeds max_total_size")
+                if not legacy_chat:
+                    validate_conversation(
+                        chat,
+                        parse_arguments=False,
+                        max_nesting_depth=self.limits.max_nesting_depth,
+                        allow_empty=(
+                            not conversation_supplied
+                            or not chat_read
+                            or bool(raw_sections)
+                            or bool(supplied_namespaces)
+                            or bool(input_faults)
+                            or bool(part_faults)
+                            or any(key in data for key in self.input_adapters)
+                        ),
+                    )
+            except ConversationValidationError as exc:
+                if every_rule_reads(chat_surfaces):
+                    raise
+                part_faults.update(dict.fromkeys(chat_surfaces, exc))
+                chat = {"messages": []}
+        except ConversationValidationError as exc:
+            message = str(exc)
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=0.0,
+                error=f"Conversation validation error: {message}",
+                validation_error=message,
+            )
+
         try:
             context = ScanContext(
-                messages,
-                tools,
+                chat["messages"],
+                chat.get("tools", []),
                 self.limits,
                 self.resource_manager,
                 tool_call_types=self.tool_call_types,
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
             )
-        except ConversationValidationError as e:
-            message = str(e)
+        except ConversationValidationError as exc:
+            message = str(exc)
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
@@ -1049,8 +1251,8 @@ class DSLScanner:
                 error=f"Conversation validation error: {message}",
                 validation_error=message,
             )
-        except Exception as e:
-            diagnostic = f"{type(e).__name__}: {e}"
+        except Exception as exc:
+            diagnostic = f"{type(exc).__name__}: {exc}"
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
@@ -1059,46 +1261,104 @@ class DSLScanner:
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
-        # Size limits run before decoding argument JSON. Validate every call before
-        # evaluating any rule, including rules that only inspect tool names, so bad
-        # arguments cannot contribute to an authoritative verdict.
+        if legacy_chat:
+            try:
+                validate_conversation_arguments(context.conversation.messages)
+            except QuarryTimeoutError as exc:
+                if self.limits.fail_on_timeout:
+                    raise
+                return ScanResult(
+                    file_path=file_path,
+                    rule_matches=[],
+                    scan_time=(datetime.now() - start_time).total_seconds(),
+                    error=f"Tool argument validation timed out: {exc}",
+                )
+            except ConversationValidationError as exc:
+                message = str(exc)
+                return ScanResult(
+                    file_path=file_path,
+                    rule_matches=[],
+                    scan_time=(datetime.now() - start_time).total_seconds(),
+                    error=f"Conversation validation error: {message}",
+                    validation_error=message,
+                )
+
         try:
-            validate_conversation_arguments(context.conversation.messages)
-        except QuarryTimeoutError as e:
-            if self.limits.fail_on_timeout:
-                raise
-            return ScanResult(
-                file_path=file_path,
-                rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
-                error=f"Tool argument validation timed out: {e}",
+            wanted = {section: value for section, value in raw_sections.items() if section in read}
+            prepared = self.input_registry.prepare(
+                wanted,
+                self.limits,
+                {section: reason for section, reason in input_faults.items() if section in read},
             )
-        except ConversationValidationError as e:
-            message = str(e)
+            missing_event_surfaces = {
+                section
+                for section in self.input_registry.event_surfaces
+                if section not in raw_sections and section not in prepared.faults
+            }
+            context.extension_event_surfaces = dict(prepared.lists)
+            context.extension_event_sequence = tuple(
+                item for items in prepared.lists.values() for item in items
+            )
+            context.extension_state_values = dict(prepared.singles)
+            context.input_faults = dict(prepared.faults)
+            context.missing_extension_states = frozenset(
+                section
+                for section, value in context.extension_state_values.items()
+                if isinstance(value, MissingInputState)
+            )
+            context.ordered_timeline = None
+            if timeline_entries is not None:
+                timeline_entries = self.input_registry.timeline_read(
+                    timeline_entries, frozenset(wanted), data, chat_read
+                )
+                try:
+                    context.ordered_timeline = self.input_registry.order_timeline(
+                        context.timeline, prepared, timeline_entries, self.limits
+                    )
+                except ConversationValidationError as exc:
+                    timeline_fault, timeline_entries = str(exc), None
+        except ConversationValidationError as exc:
+            message = str(exc)
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
-                error=f"Conversation validation error: {message}",
+                scan_time=0.0,
+                error=f"Input validation error: {message}",
                 validation_error=message,
             )
+        except Exception as exc:
+            diagnostic = type(exc).__name__
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=0.0,
+                error=f"Input preparation failed: {diagnostic}",
+                evaluation_errors={"input_preparation": diagnostic},
+            )
 
-        # No post-construction limit handling. ``ScanContext`` raises on any breach and the
-        # handler above turns that into an INVALID result naming the limit, so there is no
-        # over-limit conversation left here to report as merely truncated.
+        # Inputs exceeding a limit have been refused before any rule runs.
 
         # Explain/witness is produced by the DFA path (minimize_witness + build_rule_evidence
         # below), not by a ScanContext capture hook — no context.enable_capturing() on the
         # compiled engine.
 
-        shared_input: list[EvaluationInput] = []
+        shared_input: dict[tuple[bool, bool], EvaluationInput] = {}
 
-        def scan_input() -> EvaluationInput:
-            # The input depends only on the conversation, which every rule context shares, so
-            # one input serves all rules; a failed build is retried by the next rule.
-            if not shared_input:
-                shared_input.append(build_evaluation_input(context))
-            return shared_input[0]
+        def scan_input(include_extension_events: bool, use_mixed_timeline: bool) -> EvaluationInput:
+            # Conversation-only flows retain their canonical clock even when the
+            # host supplies unrelated extension events between two messages.
+            key = (include_extension_events, use_mixed_timeline)
+            if key not in shared_input:
+                if include_extension_events and use_mixed_timeline:
+                    source = context
+                else:
+                    source = context.copy()
+                    source.ordered_timeline = None
+                    if not include_extension_events:
+                        source.extension_event_surfaces = {}
+                        source.extension_event_sequence = ()
+                shared_input[key] = build_evaluation_input(source)
+            return shared_input[key]
 
         async def evaluate_rule(rule_name: str, rule) -> dict[str, Any]:
             """Evaluate a single rule with isolated context."""
@@ -1117,27 +1377,55 @@ class DSLScanner:
             path_record = record if reports_path else None
             try:
                 rule_start = datetime.now()
-                evaluation_input = scan_input()
-                # Fail closed BEFORE any provider dispatch if a version 1 model-input reference
-                # points at a message index that does not exist (e.g. messages[99].content on a
-                # short conversation): the requested content cannot be built, so the rule is
-                # incomplete rather than a silent no-match.
-                self._reject_out_of_range_dynamic_indexes(artifact, rule_ctx.conversation)
-                warnings: list[str] = []
-                regex_backend = RE2_REGEX
-                detector = self._make_async_detector(
-                    rule_ctx,
-                    explain=bool(enable_explain) or reports_path,
-                    regex_backend=regex_backend,
-                )
-                collector = self._make_async_collector(
-                    rule_ctx,
-                    regex_backend=regex_backend,
-                )
                 # Version 1 preserves its separate external-inference budget. Version 2 uses
                 # one optional rule-wide budget for local work, limiter waits, retries, and
                 # provider calls. The inspection deadline remains an independent upper bound.
                 with evaluation_deadline(rule_timeout, f"Rule {rule_name} timeout"):
+                    selectors = artifact.read_surfaces
+                    if faulty := sorted(selectors & part_faults.keys()):
+                        raise part_faults[faulty[0]]
+                    if faulty := sorted(selectors & context.input_faults.keys()):
+                        raise ConversationValidationError(
+                            "; ".join(context.input_faults[surface] for surface in faulty)
+                        )
+                    if missing := selectors & context.missing_extension_states:
+                        raise ConversationValidationError(
+                            "The conversation does not carry " + ", ".join(sorted(missing))
+                        )
+                    if timeline_fault is not None and artifact.orders_input_items:
+                        raise ConversationValidationError(timeline_fault)
+                    if (
+                        timeline_entries is None
+                        and context.extension_event_sequence
+                        and cross_source_flow_has_candidates(
+                            artifact,
+                            scan_input(True, False),
+                            RE2_REGEX,
+                            raise_if_evaluation_expired,
+                        )
+                    ):
+                        raise ConversationValidationError(
+                            "A timeline is required for before/after across the "
+                            "conversation and input items"
+                        )
+                    uses_extension_events = bool(selectors & self.input_registry.event_surfaces)
+                    evaluation_input = scan_input(
+                        uses_extension_events,
+                        uses_extension_events and timeline_entries is not None,
+                    )
+                    # A bad dynamic index cannot become a silent no-match or reach a provider.
+                    self._reject_out_of_range_dynamic_indexes(artifact, rule_ctx.conversation)
+                    warnings: list[str] = []
+                    regex_backend = RE2_REGEX
+                    detector = self._make_async_detector(
+                        rule_ctx,
+                        explain=bool(enable_explain) or reports_path,
+                        regex_backend=regex_backend,
+                    )
+                    collector = self._make_async_collector(
+                        rule_ctx,
+                        regex_backend=regex_backend,
+                    )
                     active_deadline = current_evaluation_deadline()
                     effective_timeout = remaining_evaluation_time()
                     try:
@@ -1221,6 +1509,32 @@ class DSLScanner:
             if rules_subset is not None
             else self.loaded_rules
         )
+        # An omitted source is unknown, not an observed empty source. Hosts can
+        # pass an explicit empty conversation or [] when they have seen no facts.
+        skipped_rules: list[str] = []
+        selected_rules: dict[str, DSLRule] = {}
+        conversation_surfaces = surface_names() - {"tools"}
+        for name, rule in rules_to_run.items():
+            artifact = self.compiled_rules[name]
+            selectors = artifact.read_surfaces
+            missing = selectors & missing_event_surfaces
+            if (
+                missing
+                and missing <= artifact.clock_only_surfaces
+                and clock_feeds_settled(
+                    artifact,
+                    missing,
+                    scan_input(True, False),
+                    RE2_REGEX,
+                    raise_if_evaluation_expired,
+                )
+            ):
+                missing = frozenset()
+            if (not conversation_supplied and bool(selectors & conversation_surfaces)) or missing:
+                skipped_rules.append(name)
+            else:
+                selected_rules[name] = rule
+        rules_to_run = selected_rules
         call_limit = self.limits.max_model_calls if self.limits.enforce_limits else None
         with model_call_budget(call_limit):
             tasks = [
@@ -1353,7 +1667,7 @@ class DSLScanner:
                 was_truncated=context.was_truncated,
                 truncation_info=context.truncation_info if context.was_truncated else None,
                 timed_out_rules=timed_out_rules if timed_out_rules else None,
-                skipped_rules=None,
+                skipped_rules=skipped_rules or None,
                 evaluation_errors=evaluation_errors if evaluation_errors else None,
                 rule_timings=rule_timings if rule_timings else None,
                 evaluation_warnings=context.evaluation_warnings

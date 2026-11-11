@@ -232,7 +232,15 @@ def _follow_fields(
     return current, None
 
 
-def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _ValueShape]:
+def _is_extension_collection(node: ConditionNode, extension_event_surfaces: frozenset[str]) -> bool:
+    while isinstance(node, FunctionCall) and node.name == "_slice" and node.args:
+        node = node.args[0]
+    return isinstance(node, Identifier) and node.name in extension_event_surfaces
+
+
+def _scopes_from_ancestors(
+    ancestors: tuple[ConditionNode, ...], extension_event_surfaces: frozenset[str] = frozenset()
+) -> dict[str, _ValueShape]:
     scopes: dict[str, _ValueShape] = {}
     comprehension_types = (
         AnyComprehension,
@@ -246,6 +254,10 @@ def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _V
         collection = _expression_shape(ancestor.collection, scopes)
         if collection is not None and collection.element is not None:
             scopes[ancestor.variable] = collection.element
+        elif _is_extension_collection(ancestor.collection, extension_event_surfaces):
+            # The scanner's registered extension schema types this collection.
+            # Its element must still shadow any outer binding of the same name.
+            scopes[ancestor.variable] = _ValueShape("extension event", open_fields=True)
     return scopes
 
 
@@ -505,6 +517,7 @@ def validate_conversation(
     data: dict,
     *,
     parse_arguments: bool = True,
+    allow_empty: bool = False,
     allowed_roles: set[str] | frozenset[str] | None = None,
     max_nesting_depth: int = 100,
 ) -> None:
@@ -555,7 +568,7 @@ def validate_conversation(
             f"'messages' must be a list, got {type(messages).__name__}"
         )
 
-    if not messages:
+    if not messages and not allow_empty:
         raise ConversationValidationError("'messages' list is empty. Nothing to scan.")
 
     seen_call_ids: set[str] = set()
@@ -787,7 +800,8 @@ def _validate_tool_call(
 class RuleValidator:
     """Validates rules for performance and correctness issues."""
 
-    def __init__(self):
+    def __init__(self, extension_event_surfaces: frozenset[str] = frozenset()):
+        self.extension_event_surfaces = extension_event_surfaces
         self.max_flow_ops = 5
         self.max_nested_comprehensions = 3
         self.max_total_comprehensions = 10
@@ -1100,7 +1114,7 @@ class RuleValidator:
             ):
                 self._check_field_access(
                     current,
-                    _scopes_from_ancestors(visit.ancestors),
+                    _scopes_from_ancestors(visit.ancestors, self.extension_event_surfaces),
                     errors,
                 )
 
@@ -1155,7 +1169,7 @@ class RuleValidator:
         parent = ancestors[-1]
         if parent.operator != "matches" or parent.right is not pattern:
             return
-        scopes = _scopes_from_ancestors(ancestors)
+        scopes = _scopes_from_ancestors(ancestors, self.extension_event_surfaces)
         subject = _expression_shape(parent.left, scopes)
         if subject is None:
             return

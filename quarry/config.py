@@ -28,6 +28,13 @@ from typing import cast
 import yaml
 
 from quarry.cache.constants import RESULT_CACHE_MAX_ENTRIES, RESULT_CACHE_TTL_SECONDS
+from quarry.inputs import (
+    AdapterConfig,
+    InputDeclaration,
+    parse_adapters,
+    parse_declaration,
+    parse_inputs,
+)
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.rate_limit import RateLimitConfig
@@ -55,6 +62,8 @@ _CONFIG_FIELDS = frozenset(
         "rules",
         "config_version",
         "models",
+        "inputs",
+        "adapters",
         "texts",
         "judge_prompts",
         "llm_rate_limits",
@@ -272,6 +281,8 @@ class QuarryConfig:
 
     safety_limits: SafetyLimits | None = None
     models: Mapping[str, InferenceModelConfig] = field(default_factory=dict)
+    inputs: Mapping[str, InputDeclaration] = field(default_factory=dict)
+    adapters: Mapping[str, AdapterConfig] = field(default_factory=dict)
     model_cache: ModelCacheConfig = field(default_factory=ModelCacheConfig)
 
     quarry_rule_texts: tuple[str, ...] = ()
@@ -296,6 +307,47 @@ class QuarryConfig:
         object.__setattr__(self, "quarry_rules_paths", _frozen_tuple(self.quarry_rules_paths))
         object.__setattr__(self, "quarry_rule_texts", _frozen_tuple(self.quarry_rule_texts))
         object.__setattr__(self, "models", _frozen_mapping(self.models))
+        for section, declaration in self.inputs.items():
+            if isinstance(declaration, InputDeclaration) and declaration.section != section:
+                raise ConfigurationError(
+                    f"inputs {section!r} holds the declaration of {declaration.section!r}"
+                )
+        object.__setattr__(
+            self,
+            "inputs",
+            _frozen_mapping(
+                {
+                    section: parse_declaration(
+                        section,
+                        {
+                            key: value
+                            for key, value in declaration.describe().items()
+                            if key != "section"
+                        },
+                    )
+                    if isinstance(declaration, InputDeclaration)
+                    else parse_declaration(section, declaration)
+                    for section, declaration in self.inputs.items()
+                }
+            ),
+        )
+        for key, entry in self.adapters.items():
+            if isinstance(entry, AdapterConfig) and entry.key != key:
+                raise ConfigurationError(f"adapters {key!r} holds the entry of {entry.key!r}")
+        object.__setattr__(
+            self,
+            "adapters",
+            _frozen_mapping(
+                parse_adapters(
+                    {
+                        key: {"adapter": entry.adapter}
+                        if isinstance(entry, AdapterConfig)
+                        else entry
+                        for key, entry in self.adapters.items()
+                    }
+                )
+            ),
+        )
         object.__setattr__(self, "judge_prompts", _frozen_mapping(self.judge_prompts))
         object.__setattr__(self, "llm_rate_limits", _frozen_mapping(self.llm_rate_limits))
 
@@ -474,6 +526,8 @@ class QuarryConfig:
             config_version=config_version,
             quarry_rules_paths=rules_paths,
             models=models,
+            inputs=parse_inputs(document.get("inputs")),
+            adapters=parse_adapters(document.get("adapters")),
             judge_prompts=judge_prompts,
             llm_rate_limits=llm_rate_limits,
             safety_limits=safety_limits,
