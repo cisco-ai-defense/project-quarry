@@ -134,6 +134,7 @@ async def quarry_reference(
     offset: Annotated[int, Field(ge=0, strict=True)] = 0,
     verbosity: Literal["compact", "full"] | None = None,
     include_precedence: bool | None = None,
+    include_models: bool | None = None,
 ) -> dict[str, Any]:
     """Discover the installed Quarry language.
 
@@ -148,10 +149,10 @@ async def quarry_reference(
     ``missing_ids`` means no such record, while ``filtered_ids`` means the ID was right and
     the request's own ``kinds`` excluded it, so widen that filter instead of searching again.
 
-    Every response lists ``model_aliases``: each alias a rule may name in ``model("alias")``,
-    its configured ``operations`` (``complete``, ``score``, ``input_tokens``, ``split``,
-    ``classify``, ``spans``), and its optional ``description``. Pick the alias whose description
-    fits the rule; compiling the rule verifies that its adapter serves the requested operation.
+    ``model_aliases`` accompanies ``index``. Pass ``include_models=true`` to read it with another
+    action, or false to omit it from ``index``. ``runtime_config_version`` identifies whether its
+    ``operations`` are version 1 compatibility functions or version 2 ``model("alias")`` methods.
+    Pick the alias whose optional description fits the rule; compilation verifies its operation.
 
     Use ``rejected`` to read the spellings Quarry refuses and what to write instead. It
     returns the complete table, or only matching rows when a ``query`` substring is given.
@@ -175,6 +176,7 @@ async def quarry_reference(
         offset=offset,
         verbosity=verbosity,
         include_precedence=include_precedence,
+        include_models=include_models,
     )
 
 

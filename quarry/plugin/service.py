@@ -374,6 +374,7 @@ class QuarryPlugin:
         offset: int = 0,
         verbosity: ReferenceVerbosity | None = None,
         include_precedence: bool | None = None,
+        include_models: bool | None = None,
     ) -> dict[str, Any]:
         """Browse, search, or retrieve records from the installed language catalog.
 
@@ -390,6 +391,8 @@ class QuarryPlugin:
         example's coverage list and conversation, so an absence can be read as one.
         ``include_precedence`` asks for or refuses the operator-precedence table on any action;
         left unset, it arrives with ``index``, the action an author calls to orient themselves.
+        ``include_models`` does the same for trusted model aliases and their version-specific
+        operations, so repeated searches and gets do not repeat their descriptions.
         """
 
         if limit is not None and (
@@ -417,11 +420,19 @@ class QuarryPlugin:
             raise PluginInputError("verbosity applies only to get")
         if include_precedence is not None and not isinstance(include_precedence, bool):
             raise PluginInputError("include_precedence must be true or false")
+        if include_models is not None and not isinstance(include_models, bool):
+            raise PluginInputError("include_models must be true or false")
 
         response = self._version_envelope()
         response["action"] = action
         response["runtime_capabilities"] = self._runtime_capabilities()
-        response["model_aliases"] = self._model_aliases()
+        # Model aliases are trusted server configuration, not catalog search results. Return
+        # them once with the browsing action unless the caller explicitly asks elsewhere.
+        wants_models = action == "index" if include_models is None else include_models
+        if wants_models:
+            config = self._runtime_config
+            response["runtime_config_version"] = config.config_version if config is not None else 1
+            response["model_aliases"] = self._model_aliases()
         # The table is the same on every call and is what an author reads once, before writing
         # anything, so it rides along with the browsing action and is asked for explicitly
         # anywhere else. Repeating it on every search and every get charged the caller for it
@@ -1239,18 +1250,29 @@ class QuarryPlugin:
         config = self._runtime_config
         if config is None:
             return {}
+        version_two = config.config_version == 2
         aliases: dict[str, dict[str, Any]] = {}
         for alias, model in sorted(config.models.items()):
             entry: dict[str, Any] = {
                 "operations": [
                     operation
                     for operation, configured in (
-                        ("complete", True),
-                        ("score", model.score is not None),
-                        ("input_tokens", model.tokens is not None),
-                        ("split", model.tokens is not None),
-                        ("classify", model.classify is not None),
-                        ("spans", model.spans is not None),
+                        ("complete" if version_two else "llm_complete", True),
+                        ("score" if version_two else "llm_score", model.score is not None),
+                        (
+                            "input_tokens" if version_two else "llm_input_tokens",
+                            model.tokens is not None,
+                        ),
+                        (
+                            "split" if version_two else "llm_split_conversation",
+                            model.tokens is not None,
+                        ),
+                        (
+                            "classify" if version_two else "model_scan",
+                            model.classify is not None,
+                        ),
+                        ("model_score", not version_two and model.classify is not None),
+                        ("spans", version_two and model.spans is not None),
                     )
                     if configured
                 ]
