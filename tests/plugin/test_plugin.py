@@ -302,6 +302,88 @@ async def test_plugin_reference_compile_and_scan_work_as_one_public_flow():
     assert non_matching["matched"] is False
 
 
+def test_reference_publishes_model_alias_operations_and_optional_descriptions(
+    tmp_path, monkeypatch
+):
+    head = {
+        **SCORE_MODEL,
+        "model": "head-v1",
+        "description": "Primary model for every supported operation.",
+        "classify": {"class_index": 1},
+        "tokens": {"adapter": "fake", "endpoint": None, "extraction": {"count": "count"}},
+        "category": "EMAIL",
+        "spans": {"class_index": 1},
+    }
+    judge = {
+        **SCORE_MODEL,
+        "model": "judge-v1",
+        "description": "Constitution judge; 1.0 means the policy is violated.",
+    }
+    plain = {"adapter": "fake", "model": "plain-v1"}
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _HeadAdapter(),
+        {"head": head, "judge": judge, "plain": plain},
+    )
+
+    default_search = plugin.reference(action="search", query="model")
+    response = plugin.reference(action="search", query="model", include_models=True)
+
+    assert "model_aliases" not in default_search
+    assert response["runtime_config_version"] == 2
+    assert response["model_aliases"] == {
+        "head": {
+            "operations": [
+                "complete",
+                "score",
+                "input_tokens",
+                "split",
+                "classify",
+                "spans",
+            ],
+            "description": "Primary model for every supported operation.",
+        },
+        "judge": {
+            "operations": ["complete", "score"],
+            "description": "Constitution judge; 1.0 means the policy is violated.",
+        },
+        "plain": {"operations": ["complete"]},
+    }
+    assert plugin.reference(action="index", limit=1)["model_aliases"] == response["model_aliases"]
+    assert "model_aliases" not in plugin.reference(action="index", limit=1, include_models=False)
+
+
+def test_reference_publishes_only_operations_callable_in_the_active_version(tmp_path, monkeypatch):
+    adapter = _HeadAdapter()
+    monkeypatch.setattr(model_inference, "_default_adapters", lambda: {"fake": adapter})
+    model = {
+        **SCORE_MODEL,
+        "model": "judge-v1",
+        "description": "Legacy decision model.",
+        "classify": {"class_index": 1},
+        "tokens": {"adapter": "fake", "endpoint": None, "extraction": {"count": "count"}},
+    }
+    config = QuarryConfig.from_mapping({"models": {"judge": model}}, tmp_path, require_rules=False)
+
+    response = QuarryPlugin(config).reference(action="index", limit=1)
+
+    assert response["runtime_config_version"] == 1
+    assert response["model_aliases"] == {
+        "judge": {
+            "operations": [
+                "llm_complete",
+                "llm_score",
+                "llm_input_tokens",
+                "llm_split_conversation",
+                "model_scan",
+                "model_score",
+            ],
+            "description": "Legacy decision model.",
+        }
+    }
+
+
 async def test_scan_returns_no_visualization_unless_requested():
     plugin = QuarryPlugin()
 
@@ -2578,7 +2660,7 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
     assert after_exit == b""
 
 
-async def test_a_search_then_get_workflow_stays_inside_its_reference_budget():
+async def test_a_search_then_get_workflow_stays_inside_its_reference_budget(tmp_path, monkeypatch):
     """Reference output is the agent's context; the budget counts what the MCP client receives.
 
     The server serializes each tool result into the text block that lands in the agent's
@@ -2590,7 +2672,29 @@ async def test_a_search_then_get_workflow_stays_inside_its_reference_budget():
     # dependency must fail it rather than silently skip. CI installs .[dev,plugin].
     import tiktoken
 
-    from quarry.plugin.server import mcp
+    from quarry.plugin import server as plugin_server
+
+    monkeypatch.setattr(
+        model_inference,
+        "_default_adapters",
+        lambda: {"fake": _HeadAdapter()},
+    )
+    models = {
+        f"alias_{index}": {
+            "adapter": "fake",
+            "model": f"model-{index}",
+            "description": (f"Purpose of alias {index}. " + "Detailed model guidance. " * 30)[:500],
+        }
+        for index in range(10)
+    }
+    config = QuarryConfig.from_mapping(
+        {"config_version": 2, "models": models}, tmp_path, require_rules=False
+    )
+    monkeypatch.setattr(plugin_server, "_service", QuarryPlugin(config))
+    mcp = plugin_server.mcp
+
+    index = await mcp.call_tool("quarry_reference", {"action": "index", "limit": 1})
+    assert len(index.structured_content["model_aliases"]) == 10
 
     search = await mcp.call_tool(
         "quarry_reference",
@@ -2602,6 +2706,8 @@ async def test_a_search_then_get_workflow_stays_inside_its_reference_budget():
     )
 
     assert detail.structured_content["missing_ids"] == []
+    assert "model_aliases" not in search.structured_content
+    assert "model_aliases" not in detail.structured_content
     client_text = "".join(
         block.text for block in (*search.content, *detail.content) if block.type == "text"
     )
@@ -2687,6 +2793,8 @@ def test_host_manifests_start_the_same_server_and_keep_metadata_aligned():
     skill = (REPO_ROOT / "skills" / "quarry-policy" / "SKILL.md").read_text()
     assert "Add parentheses when a condition mixes" in skill
     assert "include_precedence: true" in skill
+    assert "include_models: true" in skill
+    assert "runtime_config_version" in skill
     assert 'A missing key means "not applicable"' in skill
 
 
