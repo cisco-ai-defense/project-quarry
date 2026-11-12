@@ -161,7 +161,10 @@ def _validated_score(value: Any, model_id: str, source: str) -> float:
 
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _llm_error("invalid_output", f"{source} must return a number", model_id)
-    score = float(value)
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _llm_error("invalid_output", f"{source} is outside [0, 1]", model_id) from exc
     if not math.isfinite(score) or not 0.0 <= score <= 1.0:
         raise _llm_error("invalid_output", f"{source} is outside [0, 1]", model_id)
     return score
@@ -1134,6 +1137,63 @@ async def _vllm_tokenize(endpoint: str, payload: dict[str, Any], timeout: float 
 
 
 _ANSWER = re.compile(r"[ \t]*ANSWER:[ \t]*(\S+)[ \t]*")
+_JUDGE_ANSWER = re.compile(r"[ \t]*ANSWER:[ \t]*(.+?)[ \t]*")
+_MAX_SCORE_ALTERNATIVES = 20
+_JUDGE_REPLY_FORMAT_ALLOWANCE = 64
+
+
+def _final_answer_logprob(entries: list[Any], content: str, token: str) -> Any:
+    """Find probabilities for the final verdict only when token text reconstructs the reply.
+
+    Missing/partial/misaligned provider metadata is not evidence about the answer. In that
+    case use the validated emitted verdict instead of probabilities from explanation text.
+    """
+
+    if len(entries) > len(content):
+        return None
+    pieces: list[str] = []
+    length = 0
+    for entry in entries:
+        piece = _response_value(entry, "token")
+        if not isinstance(piece, str):
+            return None
+        piece = str.__str__(piece)
+        if len(piece) > len(content) - length:
+            return None
+        length += len(piece)
+        pieces.append(piece)
+    if "".join(pieces) != content:
+        return None
+    final = content.rstrip()
+    line_start = final.rfind("\n") + 1
+    answer = _JUDGE_ANSWER.fullmatch(final[line_start:])
+    if answer is None:
+        return None
+    literal = answer.group(1)
+    # Quote and whitespace tokens may surround the verdict's one probability-bearing token.
+    start = line_start + answer.start(1) + (len(literal) - len(literal.lstrip('"')))
+    end = line_start + answer.end(1) - (len(literal) - len(literal.rstrip('"')))
+    offset = 0
+    for entry, piece in zip(entries, pieces, strict=True):
+        stop = offset + len(piece)
+        if offset <= start and stop >= end and piece.strip().strip('"') == token:
+            return entry
+        offset = stop
+    return None
+
+
+def _logprob_probability(value: Any) -> float | None:
+    """Ignore invalid probability metadata rather than letting it corrupt a valid verdict."""
+
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        logprob = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(logprob) or logprob > 0:
+        return None
+    return math.exp(logprob)
 
 
 class LiteLLMAdapter:
@@ -1230,7 +1290,11 @@ class LiteLLMAdapter:
             raise ConfigurationError("LiteLLM scoring requires positive and negative tokens")
         litellm = _load_litellm()
         wants_probabilities = score_config.probabilities_field is not None
-        logprob_options = {"logprobs": True, "top_logprobs": 20} if wants_probabilities else {}
+        logprob_options = (
+            {"logprobs": True, "top_logprobs": _MAX_SCORE_ALTERNATIVES}
+            if wants_probabilities
+            else {}
+        )
         reasoning = score_config.reasoning_max_tokens
         explanation = score_config.explanation_max_tokens
         multiline = reasoning is not None or explanation is not None
@@ -1257,16 +1321,40 @@ class LiteLLMAdapter:
         if not isinstance(content, str):
             raise _refused(INVALID_OUTPUT, "LiteLLM score response has no token")
 
+        if explanation is not None:
+            content = str.__str__(content)
+            token_length = max(
+                len(negative_token),
+                len(positive_token),
+                len(json.dumps(negative_token)),
+                len(json.dumps(positive_token)),
+            )
+            if len(content) > MAX_JUDGE_REASON_CHARS + token_length + _JUDGE_REPLY_FORMAT_ALLOWANCE:
+                raise _refused(
+                    INVALID_OUTPUT, "Judge explanation reply exceeds its character limit"
+                )
         token = content.strip()
         if multiline:
             # Reasoning must end with a standalone ANSWER line. Earlier or embedded text
             # can contain an echoed verdict and is not the model's final decision.
-            answer = _ANSWER.fullmatch(content.rstrip().rsplit("\n", 1)[-1])
+            answer_pattern = _JUDGE_ANSWER if explanation is not None else _ANSWER
+            answer = answer_pattern.fullmatch(content.rstrip().rsplit("\n", 1)[-1])
             if answer is None:
                 raise _refused(
                     INVALID_OUTPUT, "Inference model reasoned without a final ANSWER line"
                 )
-            token = answer.group(1).strip('"')
+            token = answer.group(1)
+            if explanation is not None:
+                # The prompt quotes verdicts as JSON. Prefer that canonical spelling when
+                # one verdict's quoted form also equals another verdict's raw text.
+                try:
+                    decoded = json.loads(token)
+                except (ValueError, RecursionError):
+                    decoded = None
+                if isinstance(decoded, str) and decoded in {negative_token, positive_token}:
+                    token = decoded
+            else:
+                token = token.strip('"')
         # Alternatives in top_logprobs do not validate the token the model actually emitted.
         if token not in {negative_token, positive_token}:
             raise _refused(INVALID_OUTPUT, "Inference model returned an unexpected score token")
@@ -1279,7 +1367,9 @@ class LiteLLMAdapter:
                 # is a decision token. Without one, the logprobs belong to no decision, and
                 # the score falls back to the answer token.
                 decision = logprob_content[0]
-                if multiline:
+                if explanation is not None:
+                    decision = _final_answer_logprob(logprob_content, content, token)
+                elif multiline:
                     decision = next(
                         (
                             item
@@ -1293,15 +1383,23 @@ class LiteLLMAdapter:
                 top_logprobs = (
                     None if decision is None else _response_value(decision, "top_logprobs")
                 )
-                if isinstance(top_logprobs, list):
+                if isinstance(top_logprobs, list) and len(top_logprobs) <= _MAX_SCORE_ALTERNATIVES:
                     for item in top_logprobs:
                         candidate_token = _response_value(item, "token")
                         logprob = _response_value(item, "logprob")
-                        if isinstance(candidate_token, str) and isinstance(logprob, int | float):
+                        probability = _logprob_probability(logprob)
+                        if isinstance(candidate_token, str) and probability is not None:
+                            candidate_token = str.__str__(candidate_token)
+                            if (
+                                explanation is not None
+                                and len(candidate_token)
+                                > token_length + _JUDGE_REPLY_FORMAT_ALLOWANCE
+                            ):
+                                continue
                             normalized = candidate_token.strip()
-                            probabilities[normalized] = probabilities.get(
-                                normalized, 0.0
-                            ) + math.exp(float(logprob))
+                            probabilities[normalized] = (
+                                probabilities.get(normalized, 0.0) + probability
+                            )
             negative = probabilities.get(negative_token)
             positive = probabilities.get(positive_token)
             if negative is not None and positive is not None:
@@ -1312,13 +1410,14 @@ class LiteLLMAdapter:
         if raw_score is None:
             raw_score = 1.0 if token == positive_token else 0.0
         if explanation is not None:
-            lines = content.rstrip().split("\n")
+            lines = content.rstrip().split("\n", 2)
             prefix = lines[:-1]
             reason = None
             if prefix:
                 if len(prefix) != 1 or not prefix[0].startswith("REASON: "):
                     raise _refused(INVALID_OUTPUT, "Judge explanation has an invalid format")
-                reason = prefix[0][len("REASON: ") :]
+                # Accept CRLF as a line separator, but never a bare CR within reason text.
+                reason = prefix[0].removesuffix("\r")[len("REASON: ") :]
             try:
                 return JudgeResult(raw_score, reason)
             except (TypeError, ValueError) as exc:
@@ -2112,7 +2211,7 @@ class ModelInferenceBackend:
             if isinstance(raw_score, JudgeResult):
                 try:
                     validated = JudgeResult(raw_score.score, raw_score.reason)
-                except (TypeError, ValueError) as exc:
+                except (AttributeError, TypeError, ValueError, OverflowError) as exc:
                     raise _llm_error(
                         "invalid_output", "Judge adapter output is invalid", model_id
                     ) from exc

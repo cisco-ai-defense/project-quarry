@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
 import pytest
@@ -260,8 +260,6 @@ def test_reasons_are_opt_in_and_cache_separates_explained_requests(tmp_path, cap
     assert "judge reason (untrusted, judge)" in formatted
     assert "[bold]untrusted display" in formatted
     assert "text[/bold]" in formatted
-    # Path/telemetry records must remain text-free.
-    assert adapter.result.reason not in json.dumps(result.decision_paths or {})
 
 
 def test_plain_float_adapter_has_no_invented_explanation(tmp_path):
@@ -406,3 +404,371 @@ def test_disabled_explanations_preserve_preexisting_compiled_policy_identity(tmp
     )
     data = {"messages": [{"role": "user", "content": "synthetic"}]}
     assert restored.scan(data).policy_digest == policy.scan(data).policy_digest
+
+
+@pytest.mark.parametrize("mentioned", ["0", "1"])
+def test_partial_explanation_logprobs_cannot_supply_the_verdict(tmp_path, monkeypatch, mentioned):
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+    _reply(
+        monkeypatch,
+        f"REASON: token {mentioned} appears in input\nANSWER: 0",
+        logprobs=[
+            {
+                "token": mentioned,
+                "top_logprobs": [
+                    {"token": "1", "logprob": -0.001},
+                    {"token": "0", "logprob": -8},
+                ],
+            }
+        ],
+    )
+    assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 0.0
+
+
+def test_explanation_uses_only_aligned_final_answer_logprobs(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+    text = 'REASON: token 1 appears in input\nANSWER: "0"\n'
+    _reply(
+        monkeypatch,
+        text,
+        logprobs=[
+            {"token": "REASON: token "},
+            {"token": "1", "top_logprobs": [{"token": "1", "logprob": 0}]},
+            {"token": ' appears in input\nANSWER: "'},
+            {
+                "token": "0",
+                "top_logprobs": [
+                    {"token": "1", "logprob": -2},
+                    {"token": "0", "logprob": -0.1},
+                ],
+            },
+            {"token": '"\n'},
+        ],
+    )
+    result = asyncio.run(LiteLLMAdapter().score(config, []))
+    import math
+
+    assert result.score == pytest.approx(math.exp(-2) / (math.exp(-2) + math.exp(-0.1)))
+    assert result.reason == "token 1 appears in input"
+
+
+@pytest.mark.parametrize(
+    "bad", [True, False, float("nan"), float("inf"), float("-inf"), 1000, 10**1000, -(10**1000)]
+)
+def test_malformed_probability_metadata_falls_back_without_raw_errors(tmp_path, monkeypatch, bad):
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+    _reply(
+        monkeypatch,
+        "REASON: brief\nANSWER: 0",
+        logprobs=[
+            {"token": "REASON: brief\nANSWER: "},
+            {
+                "token": "0",
+                "top_logprobs": [
+                    {"token": "1", "logprob": bad},
+                    {"token": "0", "logprob": -0.1},
+                ],
+            },
+        ],
+    )
+    assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 0.0
+
+
+@pytest.mark.parametrize("answer", ['1"', '""1""', '"1', '"1""'])
+def test_explanation_answer_requires_balanced_quotes(tmp_path, monkeypatch, answer):
+    _reply(monkeypatch, f"REASON: brief\nANSWER: {answer}")
+    with pytest.raises(LLMError) as caught:
+        asyncio.run(LiteLLMAdapter().score(_config(tmp_path), []))
+    assert caught.value.details["code"] == "model_refused"
+
+
+def test_custom_judge_override_cannot_change_the_numeric_scan_verdict(tmp_path):
+    from quarry.integrations.model_inference import ModelInferenceBackend
+
+    class CustomJudgeBackend(ModelInferenceBackend):
+        async def model_judge_messages(self, *args, **kwargs):
+            return JudgeResult(0.1, "overridden judge")
+
+    scanner = _scanner(tmp_path, JudgeAdapter())
+    backend = scanner.resource_manager.inference_backend
+    backend.__class__ = CustomJudgeBackend
+    data = {"messages": [{"role": "user", "content": "synthetic"}]}
+    plain = scanner.scan_data(data)
+    explained = scanner.scan_data(data, enable_explain=True)
+    assert explained.is_complete
+    assert plain.rule_matches == explained.rule_matches == ["R"]
+    assert all(
+        not item.judge_reasons
+        for atom in explained.explanations[0].atoms
+        for item in atom.model_results
+    )
+
+
+def test_judge_reason_normalizes_string_subclasses_before_validation():
+    class CustomText(str):
+        def strip(self):
+            return ["not a string"]
+
+        def __len__(self):
+            return 0
+
+        def __iter__(self):
+            return iter(())
+
+    result = JudgeResult(0.8, CustomText(" brief "))
+    assert type(result.reason) is str
+    assert result.reason == "brief"
+    with pytest.raises(ValueError):
+        JudgeResult(0.8, CustomText("x" * 1025))
+    with pytest.raises(ValueError):
+        JudgeResult(0.8, CustomText("two\nlines"))
+
+
+@pytest.mark.parametrize("field", ["score", "reason"])
+def test_custom_judge_missing_fields_raise_normalized_model_errors(tmp_path, field):
+    adapter = JudgeAdapter()
+    object.__delattr__(adapter.result, field)
+    scanner = _scanner(tmp_path, adapter)
+    messages = Messages.from_openai([{"role": "user", "content": "synthetic"}])
+    with pytest.raises(LLMError) as caught:
+        asyncio.run(
+            scanner.resource_manager.inference_backend.model_judge_messages(
+                "judge", "criterion", messages
+            )
+        )
+    assert caught.value.details["code"] == "invalid_output"
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_oversized_numeric_model_output_is_normalized(tmp_path, structured):
+    adapter = JudgeAdapter()
+    if structured:
+        object.__setattr__(adapter.result, "score", 10**1000)
+    else:
+        adapter.result = 10**1000
+    scanner = _scanner(tmp_path, adapter)
+    messages = Messages.from_openai([{"role": "user", "content": "synthetic"}])
+    with pytest.raises(LLMError) as caught:
+        asyncio.run(
+            scanner.resource_manager.inference_backend.model_judge_messages(
+                "judge", "criterion", messages
+            )
+        )
+    assert caught.value.details["code"] == "invalid_output"
+
+
+@pytest.mark.parametrize("explain", [False, True])
+@pytest.mark.parametrize("explore", [False, True])
+def test_exported_decision_records_exclude_reasons_after_deferred_exploration(
+    tmp_path, explain, explore
+):
+    from dataclasses import asdict
+
+    from quarry.decision_report import path_report, report_tree, scanner_digests, telemetry_record
+
+    reason = "SENSITIVE_SYNTHETIC_REASON"
+    adapter = JudgeAdapter(reason=reason)
+    scanner = _scanner(tmp_path, adapter)
+    condition = 'model("judge").score(messages, "criterion") > 0.5'
+    if explore:
+        condition = f'user_said("synthetic") or ({condition})'
+    source = f'rule "R"\ncondition: {condition}'
+    backend = scanner.resource_manager.inference_backend
+    policy = compile_policy(source, runtime_config=scanner.config, model_inference_backend=backend)
+    conversations = [
+        {"messages": [{"role": "user", "content": f"synthetic {i}"}]} for i in range(2)
+    ]
+    results = asyncio.run(
+        policy.scan_many_async(
+            conversations,
+            explain=explain,
+            decision_paths=True,
+            explore_rate=float(explore),
+        )
+    )
+    tree = report_tree(
+        policy._scanner.compiled_rules["R"], scanner_digests(policy._scanner, policy._evidence_key)
+    )
+    for conversation, result in zip(conversations, results, strict=True):
+        assert result.is_complete
+        record = result.decision_paths["R"]
+        assert record.observations
+        observed = [
+            item.evidence for item in record.observations if hasattr(item.evidence, "judge_reasons")
+        ]
+        assert observed
+        if explore:
+            assert any(item.origin == "explored" for item in record.observations)
+        assert all(not item.judge_reasons and not item.omitted_judge_reasons for item in observed)
+        assert reason not in json.dumps(asdict(record))
+        path = path_report(
+            tree,
+            record,
+            matched=True,
+            conversation=conversation,
+            parameter_digest=result.parameter_digest,
+            explain=explain,
+            explore_rate=float(explore),
+        )
+        assert reason not in json.dumps(telemetry_record(tree.report, path))
+        if explain:
+            assert reason in json.dumps([asdict(item) for item in result.explanations])
+        else:
+            assert result.explanations is None
+
+
+@pytest.mark.parametrize("explain", [False, True])
+def test_failed_scan_decision_record_cannot_retain_an_earlier_reason(tmp_path, explain):
+    from dataclasses import asdict
+
+    class FailedSecondAdapter(JudgeAdapter):
+        async def score(self, config, messages, *, timeout=None):
+            if config.model == "failed-model":
+                raise LLMError("Synthetic model failure", {"code": "bad_request"})
+            return await super().score(config, messages, timeout=timeout)
+
+    reason = "EARLIER_SYNTHETIC_REASON"
+    models = {"judge": _model(), "failed": _model()}
+    models["failed"]["model"] = "failed-model"
+    scanner = _scanner(tmp_path, FailedSecondAdapter(reason=reason), models=models)
+    policy = compile_policy(
+        'rule "R"\ncondition: model("judge").score(messages,"criterion") > .5 and model("failed").score(messages,"criterion") > .5',
+        runtime_config=scanner.config,
+        model_inference_backend=scanner.resource_manager.inference_backend,
+    )
+    (result,) = asyncio.run(
+        policy.scan_many_async(
+            [{"messages": [{"role": "user", "content": "synthetic"}]}],
+            explain=explain,
+            decision_paths=True,
+        )
+    )
+    assert result.completion_state == "incomplete"
+    record = result.decision_paths["R"]
+    assert record.observations
+    assert reason not in json.dumps(asdict(record))
+
+
+def test_large_explanation_is_rejected_before_splitting_or_metadata_iteration(
+    tmp_path, monkeypatch
+):
+    class UnprocessedText(str):
+        def rstrip(self, *args):
+            raise AssertionError("oversized text must be bounded first")
+
+        def split(self, *args):
+            raise AssertionError("oversized text must be bounded first")
+
+    class UnprocessedMetadata(list):
+        def __iter__(self):
+            raise AssertionError("oversized text must be bounded first")
+
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+    _reply(
+        monkeypatch,
+        UnprocessedText("REASON: " + "x" * 1_000_000 + "\nANSWER: 1"),
+        logprobs=UnprocessedMetadata([{}] * 10000),
+    )
+    with pytest.raises(LLMError) as caught:
+        asyncio.run(LiteLLMAdapter().score(config, []))
+    assert caught.value.details["reason"] == "invalid_output"
+
+
+def test_explanation_probability_metadata_is_bounded_before_iteration(tmp_path, monkeypatch):
+    class UnprocessedMetadata(list):
+        def __iter__(self):
+            raise AssertionError("excess metadata must be bounded first")
+
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+    for metadata in (
+        UnprocessedMetadata([{}] * 10000),
+        [
+            {"token": "REASON: brief\nANSWER: "},
+            {"token": "0", "top_logprobs": UnprocessedMetadata([{}] * 21)},
+        ],
+        [{"token": "x" * 1000000}],
+    ):
+        _reply(monkeypatch, "REASON: brief\nANSWER: 0", logprobs=metadata)
+        assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 0
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("positive", [False, True])
+def test_explanation_preserves_configured_verdicts_with_spaces_and_json_escapes(
+    tmp_path, monkeypatch, quoted, positive
+):
+    config = _config(tmp_path)
+    config = replace(
+        config,
+        score=replace(config.score, negative_token='not "safe"', positive_token="safe \\ choice"),
+    )
+    expected = config.score.positive_token if positive else config.score.negative_token
+    emitted = json.dumps(expected) if quoted else expected
+    _reply(monkeypatch, f"REASON: brief\n \tANSWER: {emitted}\t \n")
+    result = asyncio.run(LiteLLMAdapter().score(config, []))
+    assert result == JudgeResult(float(positive), "brief")
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r\n"])
+def test_explanation_accepts_common_line_endings_without_retaining_control_text(
+    tmp_path, monkeypatch, separator
+):
+    _reply(monkeypatch, f"REASON: brief{separator}ANSWER: 1{separator}")
+    assert asyncio.run(LiteLLMAdapter().score(_config(tmp_path), [])) == JudgeResult(1, "brief")
+
+
+@pytest.mark.parametrize("field", ["adapter", "logprob", "calibrator"])
+def test_numeric_subclass_conversion_failures_are_normalized_without_raw_details(
+    tmp_path, monkeypatch, field
+):
+    class FailedConversion(float):
+        def __float__(self):
+            raise ValueError("synthetic raw provider detail")
+
+    if field == "logprob":
+        config = _config(tmp_path)
+        config = replace(config, score=replace(config.score, probabilities_field="logprobs"))
+        _reply(
+            monkeypatch,
+            "REASON: brief\nANSWER: 0",
+            logprobs=[
+                {"token": "REASON: brief\nANSWER: "},
+                {
+                    "token": "0",
+                    "top_logprobs": [
+                        {"token": "1", "logprob": FailedConversion(-2)},
+                        {"token": "0", "logprob": -0.1},
+                    ],
+                },
+            ],
+        )
+        assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 0
+    else:
+        adapter = JudgeAdapter()
+        scanner = _scanner(tmp_path, adapter)
+        backend = scanner.resource_manager.inference_backend
+        if field == "adapter":
+            adapter.result = FailedConversion(0.8)
+        else:
+            backend.calibrators["judge"] = lambda _: FailedConversion(0.8)
+        messages = Messages.from_openai([{"role": "user", "content": "synthetic"}])
+        with pytest.raises(LLMError) as caught:
+            asyncio.run(backend.model_judge_messages("judge", "criterion", messages))
+        assert caught.value.details["code"] == "invalid_output"
+        assert "synthetic raw provider detail" not in str(caught.value)
+
+
+@pytest.mark.parametrize("positive", [False, True])
+def test_canonical_json_answer_disambiguates_quoted_and_unquoted_verdicts(
+    tmp_path, monkeypatch, positive
+):
+    config = _config(tmp_path)
+    config = replace(config, score=replace(config.score, negative_token='"1"', positive_token="1"))
+    expected = config.score.positive_token if positive else config.score.negative_token
+    _reply(monkeypatch, f"REASON: brief\nANSWER: {json.dumps(expected)}")
+    assert asyncio.run(LiteLLMAdapter().score(config, [])).score == float(positive)

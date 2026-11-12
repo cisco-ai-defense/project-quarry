@@ -627,6 +627,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
             and isinstance(backend, ModelInferenceBackend)
             and isinstance(numeric, MethodType)
             and numeric.__func__ is ModelInferenceBackend.model_score_messages
+            and isinstance(backend.model_judge_messages, MethodType)
+            and backend.model_judge_messages.__func__ is ModelInferenceBackend.model_judge_messages
         ):
             judged = await backend.model_judge_messages(
                 alias, constitution, messages, tools, timeout=context.limits.rule_timeout

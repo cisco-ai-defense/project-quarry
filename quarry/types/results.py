@@ -65,15 +65,22 @@ class JudgeResult:
     reason: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "score", Score(self.score).value)
+        try:
+            score = Score(self.score).value
+        except OverflowError as exc:
+            raise ValueError("judge score must be finite and between 0 and 1") from exc
+        object.__setattr__(self, "score", score)
         if self.reason is not None:
             if not isinstance(self.reason, str):
                 raise TypeError("judge reason must be text or None")
-            if len(self.reason) > MAX_JUDGE_REASON_CHARS:
+            # Normalize string subclasses before calling overridable operations such as
+            # len/iteration/strip. Their underlying text must satisfy the same contract.
+            reason = str.__str__(self.reason)
+            if len(reason) > MAX_JUDGE_REASON_CHARS:
                 raise ValueError("judge reason exceeds its character limit")
-            if any(unicodedata.category(char) in _UNSAFE_REASON_CATEGORIES for char in self.reason):
+            if any(unicodedata.category(char) in _UNSAFE_REASON_CATEGORIES for char in reason):
                 raise ValueError("judge reason must be a single line without control characters")
-            object.__setattr__(self, "reason", self.reason.strip() or None)
+            object.__setattr__(self, "reason", reason.strip() or None)
 
     def to_dict(self) -> dict[str, float | str | None]:
         """Return the JSON-ready result, with no provider metadata."""
