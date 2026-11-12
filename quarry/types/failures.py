@@ -17,24 +17,25 @@
 """Stable public failure contracts, independent of scan execution."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import StrEnum, auto, unique
 
 
+@unique
 class ScanFailureCategory(StrEnum):
     """Stable public scan-failure categories; diagnostic text is not a classifier."""
 
-    INVALID_INPUT = "invalid_input"
-    RULE_SELECTION = "rule_selection"
-    INPUT_READ = "input_read"
-    PREPARATION = "preparation"
-    MODEL = "model"
-    RESOURCE = "resource"
-    EVALUATION = "evaluation"
-    TIMEOUT = "timeout"
-    SKIPPED = "skipped"
-    TRUNCATED_INPUT = "truncated_input"
-    EVALUATION_LIMIT = "evaluation_limit"
-    UNKNOWN = "unknown"
+    INVALID_INPUT = auto()
+    RULE_SELECTION = auto()
+    INPUT_READ = auto()
+    PREPARATION = auto()
+    MODEL = auto()
+    RESOURCE = auto()
+    EVALUATION = auto()
+    TIMEOUT = auto()
+    SKIPPED = auto()
+    TRUNCATED_INPUT = auto()
+    EVALUATION_LIMIT = auto()
+    UNKNOWN = auto()
 
 
 @dataclass(frozen=True, slots=True)

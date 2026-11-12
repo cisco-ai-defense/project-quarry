@@ -97,9 +97,10 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
+from quarry.types.failures import ScanFailureCategory
 from quarry.types.messages import Messages, ToolCallTypeRegistry
 from quarry.types.parameters import ParameterValue
-from quarry.types.rules import DSLRule, ExplainLevel, ScanFailureCategory, ScanResult
+from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
@@ -107,11 +108,11 @@ logger = get_app_logger()
 
 def _failure_category(error: Exception) -> ScanFailureCategory:
     """Classify a caught exception by trusted Python type, never by its text or details."""
-    if isinstance(error, (QuarryTimeoutError, TimeoutError, EvaluationTimeoutError)):
+    if isinstance(error, QuarryTimeoutError | TimeoutError | EvaluationTimeoutError):
         return ScanFailureCategory.TIMEOUT
     if isinstance(error, ConversationValidationError):
         return ScanFailureCategory.INVALID_INPUT
-    if isinstance(error, (LLMError, ModelError)):
+    if isinstance(error, LLMError | ModelError):
         return ScanFailureCategory.MODEL
     if isinstance(error, ResourceError):
         return ScanFailureCategory.RESOURCE
@@ -1566,7 +1567,7 @@ class DSLScanner:
                 error=str(e),
                 error_category=(
                     ScanFailureCategory.INPUT_READ
-                    if isinstance(e, (OSError, orjson.JSONDecodeError))
+                    if isinstance(e, OSError | orjson.JSONDecodeError)
                     else _failure_category(e)
                 ),
             )

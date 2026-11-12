@@ -65,6 +65,24 @@ def scanner():
     )
 
 
+def test_failure_category_wire_values_remain_stable():
+    """Member refactors must preserve the public serialization contract."""
+    assert [category.value for category in Category] == [
+        "invalid_input",
+        "rule_selection",
+        "input_read",
+        "preparation",
+        "model",
+        "resource",
+        "evaluation",
+        "timeout",
+        "skipped",
+        "truncated_input",
+        "evaluation_limit",
+        "unknown",
+    ]
+
+
 @pytest.mark.parametrize("flags", list(itertools.product([False, True], repeat=7)))
 def test_exhaustive_completion_state_and_failure_presence(flags):
     """Check every subset of the seven legacy completion signals (128 cases)."""
