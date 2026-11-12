@@ -156,6 +156,30 @@ def test_automata_agree_with_finite_trace_semantics(case, traces):
         )
 
 
+@given(
+    steps=st.lists(st.tuples(st.booleans(), st.booleans()), min_size=1, max_size=7),
+    bound=st.integers(min_value=0, max_value=4),
+)
+def test_projected_clock_operators(steps, bound):
+    # A false tick represents an unrelated extension event between conversation steps.
+    tick, atom = T.Atom("tick"), T.Atom("a")
+    trace = [{"tick": selected, "a": value} for selected, value in steps]
+    values = [value for selected, value in steps if selected]
+    following = [value for i, (selected, value) in enumerate(steps) if i and selected]
+    previous = PastDef(f"{PAST_PREFIX}previous", "Y", atom, tick=tick)
+    once = PastDef(f"{PAST_PREFIX}once", "O", atom, bound, tick)
+    covered = all(any(values[max(0, i - bound) : i + 1]) for i in range(len(values)))
+    cases = (
+        (T.Next(T.ClockedEventually(atom, bound, tick)), (), any(following[: bound + 1])),
+        (T.Eventually(T.And(tick, T.Atom(previous.token))), (previous,), any(values[:-1])),
+        (T.Globally(T.Implies(tick, T.Atom(once.token))), (once,), covered),
+    )
+    for formula, past, expected in cases:
+        with spending(WorkBudget(1_000_000)):
+            dfa = compile_dfa(formula, "projected_clock", past=past)
+        assert run_trace(dfa, trace) == expected, (formula, steps)
+
+
 @given(case=_cases())
 def test_empty_trace_is_vacuously_satisfied(case):
     # The trace semantics above start at step 0, so they cannot read the empty word; the

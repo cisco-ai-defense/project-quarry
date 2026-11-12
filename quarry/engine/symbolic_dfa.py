@@ -107,12 +107,14 @@ class PastDef:
     ``op`` is ``"Y"`` (``operand`` held at the previous step; false at the first step) or
     ``"O"`` (``operand`` held at some step from ``bound`` steps before now up to now;
     ``bound=None`` is unbounded). ``operand`` is propositional over rule atoms and the tokens
-    of earlier definitions."""
+    of earlier definitions. ``tick`` optionally selects the steps that advance this past
+    clock; omitted means every step."""
 
     token: str
     op: str
     operand: Formula
     bound: int | None = None
+    tick: Formula | None = None
 
 
 # Memory per definition: Y keeps the operand's value at the previous step; unbounded O
@@ -135,6 +137,10 @@ def _check_past(formula: Formula, past: tuple[PastDef, ...]) -> None:
             raise ValueError(f"past definition {d.token!r} has an invalid bound {d.bound!r}")
         if not is_propositional(d.operand):
             raise ValueError(f"past definition {d.token!r} has a non-propositional operand")
+        if d.tick is not None and (
+            not is_propositional(d.tick) or any(a.startswith(PAST_PREFIX) for a in atoms_of(d.tick))
+        ):
+            raise ValueError(f"past definition {d.token!r} has an invalid clock")
         unknown = {a for a in atoms_of(d.operand) if a.startswith(PAST_PREFIX)} - defined
         if unknown:
             raise ValueError(
@@ -168,23 +174,31 @@ def _substitute(formula: Formula, values: dict[str, Formula]) -> Formula:
 
 def _step_equations(
     past: tuple[PastDef, ...], memory: Memory
-) -> tuple[dict[str, Formula], list[Formula]]:
+) -> tuple[dict[str, Formula], list[tuple[Formula, ...]]]:
     """Each token's value at this step, and each definition's memory update, as formulas
     over the step's rule atoms (inner tokens already substituted)."""
     now: dict[str, Formula] = {}
-    updates: list[Formula] = []
+    updates: list[tuple[Formula, ...]] = []
     for d, mem in zip(past, memory, strict=True):
         operand = simplify(_substitute(d.operand, now))
+        tick = simplify(d.tick) if d.tick is not None else TRUE
         if d.op == "Y":
             now[d.token] = TRUE if mem else FALSE
-            updates.append(operand)
+            updates.append((tick, operand) if d.tick is not None else (operand,))
         elif d.bound is None:
-            now[d.token] = TRUE if mem else operand
-            updates.append(now[d.token])
+            held = simplify(And(tick, operand))
+            now[d.token] = TRUE if mem else held
+            updates.append((now[d.token],))
         else:
             within = mem is not None and mem + 1 <= d.bound
-            now[d.token] = TRUE if within else operand
-            updates.append(operand)
+            if d.tick is None:
+                now[d.token] = TRUE if within else operand
+                updates.append((operand,))
+            else:
+                at_tick = TRUE if within else operand
+                off_tick = TRUE if mem is not None else FALSE
+                now[d.token] = simplify(Or(And(tick, at_tick), And(Not(tick), off_tick)))
+                updates.append((tick, operand))
     return now, updates
 
 
@@ -195,6 +209,11 @@ def _step_values(
     now: dict[str, bool] = {}
     new: list = []
     for d, mem in zip(past, memory, strict=True):
+        selected = d.tick is None or is_const_true(simplify(progress(d.tick, valuation, False)))
+        if not selected:
+            now[d.token] = bool(mem) if d.op != "O" or d.bound is None else mem is not None
+            new.append(mem)
+            continue
         held = is_const_true(simplify(progress(d.operand, {**valuation, **now}, False)))
         if d.op == "Y":
             now[d.token] = bool(mem)
@@ -234,6 +253,12 @@ def _settle(past: tuple[PastDef, ...], residual: Formula, memory: Memory):
     order finds every fixed token."""
     fixed: dict[str, Formula] = {}
     for d, mem in zip(past, memory, strict=True):
+        if d.tick is not None:
+            # A constant operand does not settle a projected clock before its next
+            # selected step. Unbounded once remains true after it has held.
+            if d.op == "O" and d.bound is None and mem:
+                fixed[d.token] = TRUE
+            continue
         operand = simplify(_substitute(d.operand, fixed))
         if d.op == "Y":
             if bool(mem) and is_const_true(operand):
@@ -344,10 +369,14 @@ class _GuardBuilder:
         live_defs = _live_past(self._past, residual)
         parts = (
             simplify(_substitute(skeleton, now)),
-            *(update for i, update in enumerate(updates) if i in live_defs),
+            *(update for i, group in enumerate(updates) if i in live_defs for update in group),
         )
         read = set(branch_atoms(residual)) | {
-            a for i in live_defs for a in atoms_of(self._past[i].operand)
+            a
+            for i in live_defs
+            for formula in (self._past[i].operand, self._past[i].tick)
+            if formula is not None
+            for a in atoms_of(formula)
         }
         live = [a for a in atoms if a in read]
         return self._expand(residual, parts, live, 0, {})
@@ -646,7 +675,11 @@ def compile_dfa(
     atoms = [
         a
         for a in dict.fromkeys(
-            [*atoms_of(formula), *(a for d in by_token for a in atoms_of(d.operand))]
+            [
+                *atoms_of(formula),
+                *(a for d in by_token for a in atoms_of(d.operand)),
+                *(a for d in by_token if d.tick is not None for a in atoms_of(d.tick)),
+            ]
         )
         if a not in tokens
     ]

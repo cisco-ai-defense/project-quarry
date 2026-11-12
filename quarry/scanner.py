@@ -17,8 +17,10 @@
 """Scanner engine."""
 
 import asyncio
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
@@ -48,10 +50,13 @@ from quarry.engine.compiler import compile_rule
 from quarry.engine.contracts import CompiledRuleArtifact, ScanRecord
 from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
+from quarry.engine.extension_surfaces import EVENT_SURFACES, STATIC_SURFACES
+from quarry.engine.flow_requirements import cross_source_flow_has_candidates
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
 from quarry.engine.witness import build_evidence
+from quarry.extensions import ExtensionRegistry, ExtensionSpec, MissingExtensionState
 from quarry.integrations.collection import evaluate_collect_plan
 from quarry.integrations.model_expression import (
     ModelExpressionTrace,
@@ -64,6 +69,7 @@ from quarry.integrations.resources import ResourceManager
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
+    surface_names,
     token_spellings,
 )
 from quarry.rule_versioning import check_rule_compatibility
@@ -74,6 +80,7 @@ from quarry.safety.timer import (
     current_evaluation_deadline,
     evaluation_deadline,
     evidence_deadline,
+    raise_if_evaluation_expired,
     remaining_evaluation_time,
     scan_deadline,
 )
@@ -83,7 +90,7 @@ from quarry.safety.validator import (
     validate_conversation,
     validate_conversation_arguments,
 )
-from quarry.types.context import ScanContext
+from quarry.types.context import ScanContext, _bounded_deep_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -99,6 +106,19 @@ from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+def _required_surfaces(artifact: CompiledRuleArtifact) -> set[str]:
+    """Selectors whose presence or absence can affect a compiled verdict."""
+    surfaces = {
+        artifact.atom_specs[atom_id].selector
+        for atom_id in artifact.automaton_atoms
+        if atom_id in artifact.atom_specs
+    }
+    for requirement in artifact.flow_requirements:
+        surfaces.update(requirement.ambient_surfaces)
+        surfaces.update(requirement.clock_surfaces)
+    return surfaces
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +237,7 @@ class DSLScanner:
         tool_call_types: ToolCallTypeRegistry | None = None,
         llm_rate_limiter: LLMRateLimiter | None = None,
         _allow_parameters: bool = False,
+        extensions: list[ExtensionSpec] | None = None,
     ):
         """
         Initialize scanner with config.
@@ -230,6 +251,7 @@ class DSLScanner:
             tool_call_types: Optional mapping of tool call types for input normalization.
             model_inference_backend: Optional separately constructed model backend.
             llm_rate_limiter: Optional limiter shared across scanner instances.
+            extensions: Trusted event and state schemas registered on this scanner.
         """
         self._initialize_execution(
             config,
@@ -243,7 +265,8 @@ class DSLScanner:
             allow_parameters=_allow_parameters,
         )
         self.parser = DSLParser()
-        self.validator = RuleValidator()
+        self.extensions = ExtensionRegistry(extensions)
+        self.validator = RuleValidator(self.extensions.event_surfaces)
 
         if not self.config.quarry_rules_paths and not self.config.quarry_rule_texts:
             raise ConfigurationError(
@@ -324,6 +347,7 @@ class DSLScanner:
             llm_rate_limiter=llm_rate_limiter,
             allow_parameters=True,
         )
+        scanner.extensions = ExtensionRegistry()
         resource_manager = ResourceManager(
             config,
             model_inference_backend=model_inference_backend,
@@ -351,6 +375,9 @@ class DSLScanner:
         for i, rule_text in enumerate(self.config.quarry_rule_texts):
             source = f"inline:{i}"
             parsed_rules.append((self._parse_rule_text(rule_text, source), source))
+
+        for rule, _source in parsed_rules:
+            self.extensions.rewrite_rule(rule)
 
         # Reject a duplicate rule name across files up front: silently overwriting would make
         # which rule "wins" depend on load order (fail closed for deterministic loading).
@@ -483,14 +510,20 @@ class DSLScanner:
             logger.info("[STATUS] Compiling rules to DFA artifacts...")
         compiled: dict[str, Any] = {}
         for name, rule in rules.items():
-            result = compile_rule(
-                rule,
-                response_schemas={
-                    alias: model.complete.response_schema
-                    for alias, model in self.config.models.items()
-                    if model.complete is not None
-                },
-            )
+            event_token = EVENT_SURFACES.set(self.extensions.event_surfaces)
+            static_token = STATIC_SURFACES.set(self.extensions.state_surfaces)
+            try:
+                result = compile_rule(
+                    rule,
+                    response_schemas={
+                        alias: model.complete.response_schema
+                        for alias, model in self.config.models.items()
+                        if model.complete is not None
+                    },
+                )
+            finally:
+                STATIC_SURFACES.reset(static_token)
+                EVENT_SURFACES.reset(event_token)
             if not result.ok:
                 msgs = "; ".join(d.message for d in result.diagnostics.errors) or "unknown error"
                 raise RuleValidationError(
@@ -869,11 +902,16 @@ class DSLScanner:
 
     def scan_data(
         self,
-        data: dict[str, Any],
+        data: dict[str, Any] | None,
         file_path: Path | None = None,
         enable_explain: ExplainLevel = False,
         rules_subset: set[str] | None = None,
         deadline_seconds: float | None = None,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        event_feeds: Collection[str] | None = None,
+        extension_state: dict[str, Any] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (sync wrapper)."""
         return asyncio.run(
@@ -883,16 +921,25 @@ class DSLScanner:
                 enable_explain,
                 rules_subset,
                 deadline_seconds,
+                events=events,
+                event_feeds=event_feeds,
+                extension_state=extension_state,
+                timeline=timeline,
             )
         )
 
     async def scan_data_async(
         self,
-        data: dict[str, Any],
+        data: dict[str, Any] | None,
         file_path: Path | None = None,
         enable_explain: ExplainLevel = False,
         rules_subset: set[str] | None = None,
         deadline_seconds: float | None = None,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        event_feeds: Collection[str] | None = None,
+        extension_state: dict[str, Any] | None = None,
+        timeline: list[dict[str, Any]] | None = None,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (async).
 
@@ -909,6 +956,10 @@ class DSLScanner:
                 record_traces=False,
                 rules_subset=rules_subset,
                 parameters=None,
+                extension_events=events,
+                extension_event_feeds=event_feeds,
+                extension_state=extension_state,
+                extension_timeline=timeline,
             )
 
     async def _scan_data_with_parameters_async(
@@ -940,7 +991,7 @@ class DSLScanner:
 
     async def _scan_data_async(
         self,
-        data: dict[str, Any],
+        data: dict[str, Any] | None,
         *,
         file_path: Path | None,
         enable_explain: ExplainLevel,
@@ -950,6 +1001,10 @@ class DSLScanner:
         decision_paths: bool = False,
         explore: bool = False,
         deferred_evidence: list | None = None,
+        extension_events: list[dict[str, Any]] | None = None,
+        extension_event_feeds: Collection[str] | None = None,
+        extension_state: dict[str, Any] | None = None,
+        extension_timeline: list[dict[str, Any]] | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
 
@@ -968,6 +1023,7 @@ class DSLScanner:
 
         start_time = datetime.now()
         timed_out_rules = []
+        conversation_supplied = data is not None
 
         selected_names = rules_subset if rules_subset is not None else set(self.compiled_rules)
         parameter_schema = tuple(
@@ -988,10 +1044,23 @@ class DSLScanner:
         bound_parameters = parameters or {}
 
         try:
+            if data is None:
+                if (
+                    extension_events is None
+                    and extension_state is None
+                    and not extension_event_feeds
+                ):
+                    raise ConversationValidationError("An event-only scan requires extension input")
+                data = {"messages": []}
             validate_conversation(
                 data,
                 parse_arguments=False,
                 max_nesting_depth=self.limits.max_nesting_depth,
+                allow_empty=(
+                    extension_events is not None
+                    or extension_state is not None
+                    or bool(extension_event_feeds)
+                ),
             )
         except ConversationValidationError as e:
             message = str(e)
@@ -1083,22 +1152,132 @@ class DSLScanner:
                 validation_error=message,
             )
 
-        # No post-construction limit handling. ``ScanContext`` raises on any breach and the
-        # handler above turns that into an INVALID result naming the limit, so there is no
-        # over-limit conversation left here to report as merely truncated.
+        try:
+            if self.limits.enforce_limits and any(
+                item is not None for item in (extension_events, extension_state, extension_timeline)
+            ):
+                combined = {
+                    "conversation": data,
+                    "events": extension_events,
+                    "state": extension_state,
+                    "timeline": extension_timeline,
+                }
+                try:
+                    too_large = (
+                        _bounded_deep_size(combined, self.limits.max_total_size)
+                        > self.limits.max_total_size
+                    )
+                except RecursionError as exc:
+                    raise ConversationValidationError(
+                        "Extension input exceeds max_nesting_depth"
+                    ) from exc
+                if too_large:
+                    raise ConversationValidationError("Combined input exceeds max_total_size")
+
+            if (
+                self.limits.enforce_limits
+                and self.limits.max_timeline_items
+                and isinstance(extension_events, list)
+                and len(context.timeline) + len(extension_events) > self.limits.max_timeline_items
+            ):
+                raise ConversationValidationError("Combined input exceeds max_timeline_items")
+
+            views = self.extensions.prepare(extension_events, extension_state, self.limits)
+            observed_feeds = {event["type"].split(".", 1)[0] for event in (extension_events or ())}
+            if extension_event_feeds is None:
+                # Preserve the existing complete-empty feed contract. With a
+                # nonempty list, only represented namespaces are known complete.
+                available_feeds = (
+                    set(self.extensions.definitions) if extension_events == [] else observed_feeds
+                )
+            else:
+                if not isinstance(extension_event_feeds, Collection) or isinstance(
+                    extension_event_feeds, (str, bytes, Mapping)
+                ):
+                    raise ConversationValidationError(
+                        "event_feeds must be a collection of namespaces"
+                    )
+                declared_feeds = tuple(
+                    islice(extension_event_feeds, len(self.extensions.definitions) + 1)
+                )
+                if any(not isinstance(name, str) for name in declared_feeds):
+                    raise ConversationValidationError("event_feeds contains invalid namespaces")
+                if len(set(declared_feeds)) != len(declared_feeds):
+                    raise ConversationValidationError("event_feeds contains duplicate namespaces")
+                if len(declared_feeds) > len(self.extensions.definitions):
+                    raise ConversationValidationError("event_feeds contains invalid namespaces")
+                available_feeds = set(declared_feeds)
+                if available_feeds - set(self.extensions.definitions):
+                    raise ConversationValidationError(
+                        "event_feeds contains an unregistered namespace"
+                    )
+                if observed_feeds - available_feeds:
+                    raise ConversationValidationError(
+                        "An extension event has no declared complete feed"
+                    )
+            missing_event_surfaces = {
+                surface
+                for surface in self.extensions.event_surfaces
+                if surface.split(".", 1)[0] not in available_feeds
+            }
+            collections = self.extensions.event_collections(views)
+            by_id = {event.id: event for items in collections.values() for event in items}
+            context.extension_event_surfaces = collections
+            context.extension_event_sequence = tuple(
+                by_id[event["id"]] for event in (extension_events or ())
+            )
+            context.extension_state_values = self.extensions.state_values(views)
+            context.missing_extension_states = frozenset(
+                name
+                for name, value in context.extension_state_values.items()
+                if isinstance(value, MissingExtensionState)
+            )
+            if extension_timeline is not None:
+                context.ordered_timeline = self.extensions.order_timeline(
+                    context.timeline, views, extension_timeline, self.limits
+                )
+        except ConversationValidationError as exc:
+            message = str(exc)
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=f"Extension validation error: {message}",
+                validation_error=message,
+            )
+        except Exception as exc:
+            diagnostic = type(exc).__name__
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=f"Extension preparation failed: {diagnostic}",
+                evaluation_errors={"extension_preparation": diagnostic},
+            )
+
+        # Inputs exceeding a limit have been refused before any rule runs.
 
         # Explain/witness is produced by the DFA path (minimize_witness + build_rule_evidence
         # below), not by a ScanContext capture hook — no context.enable_capturing() on the
         # compiled engine.
 
-        shared_input: list[EvaluationInput] = []
+        shared_input: dict[tuple[bool, bool], EvaluationInput] = {}
 
-        def scan_input() -> EvaluationInput:
-            # The input depends only on the conversation, which every rule context shares, so
-            # one input serves all rules; a failed build is retried by the next rule.
-            if not shared_input:
-                shared_input.append(build_evaluation_input(context))
-            return shared_input[0]
+        def scan_input(include_extension_events: bool, use_mixed_timeline: bool) -> EvaluationInput:
+            # Conversation-only flows retain their canonical clock even when the
+            # host supplies unrelated extension events between two messages.
+            key = (include_extension_events, use_mixed_timeline)
+            if key not in shared_input:
+                if include_extension_events and use_mixed_timeline:
+                    source = context
+                else:
+                    source = context.copy()
+                    source.ordered_timeline = None
+                    if not include_extension_events:
+                        source.extension_event_surfaces = {}
+                        source.extension_event_sequence = ()
+                shared_input[key] = build_evaluation_input(source)
+            return shared_input[key]
 
         async def evaluate_rule(rule_name: str, rule) -> dict[str, Any]:
             """Evaluate a single rule with isolated context."""
@@ -1117,27 +1296,48 @@ class DSLScanner:
             path_record = record if reports_path else None
             try:
                 rule_start = datetime.now()
-                evaluation_input = scan_input()
-                # Fail closed BEFORE any provider dispatch if a version 1 model-input reference
-                # points at a message index that does not exist (e.g. messages[99].content on a
-                # short conversation): the requested content cannot be built, so the rule is
-                # incomplete rather than a silent no-match.
-                self._reject_out_of_range_dynamic_indexes(artifact, rule_ctx.conversation)
-                warnings: list[str] = []
-                regex_backend = RE2_REGEX
-                detector = self._make_async_detector(
-                    rule_ctx,
-                    explain=bool(enable_explain) or reports_path,
-                    regex_backend=regex_backend,
-                )
-                collector = self._make_async_collector(
-                    rule_ctx,
-                    regex_backend=regex_backend,
-                )
                 # Version 1 preserves its separate external-inference budget. Version 2 uses
                 # one optional rule-wide budget for local work, limiter waits, retries, and
                 # provider calls. The inspection deadline remains an independent upper bound.
                 with evaluation_deadline(rule_timeout, f"Rule {rule_name} timeout"):
+                    selectors = _required_surfaces(artifact)
+                    if missing := selectors & context.missing_extension_states:
+                        raise ConversationValidationError(
+                            "Missing extension state for " + ", ".join(sorted(missing))
+                        )
+                    if (
+                        extension_timeline is None
+                        and extension_events
+                        and context.timeline
+                        and cross_source_flow_has_candidates(
+                            artifact,
+                            scan_input(True, False),
+                            RE2_REGEX,
+                            raise_if_evaluation_expired,
+                        )
+                    ):
+                        raise ConversationValidationError(
+                            "An explicit timeline is required for before/after across "
+                            "conversation and extension events"
+                        )
+                    uses_extension_events = bool(selectors & self.extensions.event_surfaces)
+                    evaluation_input = scan_input(
+                        uses_extension_events,
+                        uses_extension_events and extension_timeline is not None,
+                    )
+                    # A bad dynamic index cannot become a silent no-match or reach a provider.
+                    self._reject_out_of_range_dynamic_indexes(artifact, rule_ctx.conversation)
+                    warnings: list[str] = []
+                    regex_backend = RE2_REGEX
+                    detector = self._make_async_detector(
+                        rule_ctx,
+                        explain=bool(enable_explain) or reports_path,
+                        regex_backend=regex_backend,
+                    )
+                    collector = self._make_async_collector(
+                        rule_ctx,
+                        regex_backend=regex_backend,
+                    )
                     active_deadline = current_evaluation_deadline()
                     effective_timeout = remaining_evaluation_time()
                     try:
@@ -1221,6 +1421,20 @@ class DSLScanner:
             if rules_subset is not None
             else self.loaded_rules
         )
+        # An omitted source is unknown, not an observed empty source. Hosts can
+        # pass an explicit empty conversation or [] when they have seen no facts.
+        skipped_rules: list[str] = []
+        selected_rules: dict[str, DSLRule] = {}
+        conversation_surfaces = surface_names()
+        for name, rule in rules_to_run.items():
+            selectors = _required_surfaces(self.compiled_rules[name])
+            if (not conversation_supplied and selectors & conversation_surfaces) or (
+                selectors & missing_event_surfaces
+            ):
+                skipped_rules.append(name)
+            else:
+                selected_rules[name] = rule
+        rules_to_run = selected_rules
         call_limit = self.limits.max_model_calls if self.limits.enforce_limits else None
         with model_call_budget(call_limit):
             tasks = [
@@ -1353,7 +1567,7 @@ class DSLScanner:
                 was_truncated=context.was_truncated,
                 truncation_info=context.truncation_info if context.was_truncated else None,
                 timed_out_rules=timed_out_rules if timed_out_rules else None,
-                skipped_rules=None,
+                skipped_rules=skipped_rules or None,
                 evaluation_errors=evaluation_errors if evaluation_errors else None,
                 rule_timings=rule_timings if rule_timings else None,
                 evaluation_warnings=context.evaluation_warnings
