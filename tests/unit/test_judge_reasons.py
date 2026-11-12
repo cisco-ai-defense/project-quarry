@@ -772,3 +772,31 @@ def test_canonical_json_answer_disambiguates_quoted_and_unquoted_verdicts(
     expected = config.score.positive_token if positive else config.score.negative_token
     _reply(monkeypatch, f"REASON: brief\nANSWER: {json.dumps(expected)}")
     assert asyncio.run(LiteLLMAdapter().score(config, [])).score == float(positive)
+
+
+def test_ambiguous_quoted_label_probabilities_cannot_reverse_the_canonical_verdict(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path)
+    config = replace(
+        config,
+        score=replace(
+            config.score, negative_token='"1"', positive_token="1", probabilities_field="logprobs"
+        ),
+    )
+    _reply(
+        monkeypatch,
+        'REASON: brief\nANSWER: "1"',
+        logprobs=[
+            {"token": 'REASON: brief\nANSWER: "'},
+            {
+                "token": "1",
+                "top_logprobs": [
+                    {"token": "1", "logprob": -8},
+                    {"token": '"1"', "logprob": -0.001},
+                ],
+            },
+            {"token": '"'},
+        ],
+    )
+    assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 1

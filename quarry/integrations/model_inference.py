@@ -1368,7 +1368,17 @@ class LiteLLMAdapter:
                 # the score falls back to the answer token.
                 decision = logprob_content[0]
                 if explanation is not None:
-                    decision = _final_answer_logprob(logprob_content, content, token)
+                    # Quoted, escaped and compound labels can span several provider tokens.
+                    # One token's alternatives cannot establish odds for those whole labels.
+                    single_token_labels = all(
+                        not any(char.isspace() or char in {'"', "\\"} for char in verdict)
+                        for verdict in (negative_token, positive_token)
+                    )
+                    decision = (
+                        _final_answer_logprob(logprob_content, content, token)
+                        if single_token_labels
+                        else None
+                    )
                 elif multiline:
                     decision = next(
                         (
