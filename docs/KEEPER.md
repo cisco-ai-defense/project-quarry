@@ -25,6 +25,7 @@ Everything runs **fully offline**.
   - `offline-only`: no network-type tools and no web addresses in tool calls (for SPARC).
   - `timestamp-first`: every reply with text starts with a bold New York timestamp.
   - `simple-terms-last`: replies over 600 characters include "In simple terms".
+  - `next-step-last`: replies over 200 characters end with a one-line "Next step".
 - **Guard.** `keeper check` loads the subject's rules, checks one conversation, and returns:
   - `PASS` (exit 0): every rule checked, none broken.
   - `STOP` because a rule broke (exit 1).
