@@ -41,7 +41,13 @@ from quarry.plugin.service import QuarryPlugin
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner, _failure_category
-from quarry.types.exceptions import EvaluationError, LLMError, ModelError, ResourceError
+from quarry.types.exceptions import (
+    EvaluationError,
+    EvaluationTimeoutError,
+    LLMError,
+    ModelError,
+    ResourceError,
+)
 
 CONVERSATION = {"messages": [{"role": "user", "content": "hello"}]}
 
@@ -95,6 +101,7 @@ def test_exhaustive_completion_state_and_failure_presence(flags):
         (ConversationValidationError("arbitrary"), Category.INVALID_INPUT),
         (QuarryTimeoutError("arbitrary"), Category.TIMEOUT),
         (TimeoutError("arbitrary"), Category.TIMEOUT),
+        (EvaluationTimeoutError("Check", 1), Category.TIMEOUT),
         (ValueError("authentication timeout resource limit"), Category.UNKNOWN),
         (Exception("arbitrary"), Category.UNKNOWN),
     ],
@@ -137,6 +144,7 @@ def test_legacy_results_and_later_mutation_keep_failure_projection_current():
         (ResourceError("synthetic failure"), Category.RESOURCE),
         (ValueError("synthetic failure"), Category.UNKNOWN),
         (QuarryTimeoutError("synthetic timeout"), Category.TIMEOUT),
+        (EvaluationTimeoutError("Check", 1), Category.TIMEOUT),
     ],
 )
 def test_rule_failures_keep_type_without_raw_details(monkeypatch, error, expected):

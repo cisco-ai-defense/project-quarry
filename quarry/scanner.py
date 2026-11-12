@@ -89,6 +89,7 @@ from quarry.types.exceptions import (
     ConfigurationError,
     ConversationValidationError,
     EvaluationError,
+    EvaluationTimeoutError,
     LLMError,
     ModelError,
     ResourceError,
@@ -106,7 +107,7 @@ logger = get_app_logger()
 
 def _failure_category(error: Exception) -> ScanFailureCategory:
     """Classify a caught exception by trusted Python type, never by its text or details."""
-    if isinstance(error, (QuarryTimeoutError, TimeoutError)):
+    if isinstance(error, (QuarryTimeoutError, TimeoutError, EvaluationTimeoutError)):
         return ScanFailureCategory.TIMEOUT
     if isinstance(error, ConversationValidationError):
         return ScanFailureCategory.INVALID_INPUT
