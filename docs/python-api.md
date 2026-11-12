@@ -87,7 +87,15 @@ summary. An empty batch has `invalid_input`. Both matched and unmatched complete
 an empty `failures` tuple. The projection follows active legacy failure fields even when a
 caller constructs or updates a `ScanResult` directly. Optional `error_category` and
 `evaluation_error_categories` supply typed attribution for those existing error fields;
-metadata without its corresponding active error does not create a failure.
+metadata without its corresponding active error does not create a failure. Known enum
+members and category strings are accepted as attribution. Malformed or unrecognized supplied
+metadata projects to `unknown`, so mutable caller metadata cannot interrupt failure reporting.
+A missing per-rule category preserves the legacy `evaluation` default. Explicit `ScanFailure`
+construction validates its category and rejects invalid values.
+
+Batch aggregation retains both a child's top-level error category under `conv_N` and its
+per-rule categories under `conv_N:rule`. File `input_read` failures describe the read/decode
+stage; a later scan execution failure retains its exception-based category.
 
 ## Prepared policies
 

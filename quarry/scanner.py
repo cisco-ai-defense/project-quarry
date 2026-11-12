@@ -60,7 +60,7 @@ from quarry.integrations.model_expression import (
 )
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.rate_limiter import LLMRateLimiter
-from quarry.integrations.resources import ResourceManager
+from quarry.integrations.resources import ResourceManager, ResourcePreparationError
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
@@ -97,7 +97,7 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
-from quarry.types.failures import ScanFailureCategory
+from quarry.types.failures import ScanFailureCategory, _category_from_metadata
 from quarry.types.messages import Messages, ToolCallTypeRegistry
 from quarry.types.parameters import ParameterValue
 from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
@@ -114,7 +114,7 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.INVALID_INPUT
     if isinstance(error, LLMError | ModelError):
         return ScanFailureCategory.MODEL
-    if isinstance(error, ResourceError):
+    if isinstance(error, ResourceError | ResourcePreparationError):
         return ScanFailureCategory.RESOURCE
     if isinstance(error, EvaluationError):
         return ScanFailureCategory.EVALUATION
@@ -1488,8 +1488,8 @@ class DSLScanner:
                     for rule_name, message in result.evaluation_errors.items():
                         agg_evaluation_errors[f"{label}:{rule_name}"] = message
                         agg_error_categories[f"{label}:{rule_name}"] = (
-                            result.evaluation_error_categories or {}
-                        ).get(rule_name, ScanFailureCategory.EVALUATION)
+                            result._evaluation_failure_category(rule_name)
+                        )
                 if result.was_truncated:
                     batch_was_truncated = True
                     if result.truncation_info:
@@ -1504,11 +1504,9 @@ class DSLScanner:
 
                 if result.error is not None:
                     errors.append(f"Conversation {i + 1}: {result.error}")
-                    if result.validation_error is None and not result.evaluation_errors:
+                    if result.validation_error is None:
                         agg_evaluation_errors[label] = result.error
-                        agg_error_categories[label] = (
-                            result.error_category or ScanFailureCategory.UNKNOWN
-                        )
+                        agg_error_categories[label] = _category_from_metadata(result.error_category)
 
                 if result.timed_out_rules:
                     agg_timed_out_rules.extend(f"{label}:{rule}" for rule in result.timed_out_rules)
@@ -1555,21 +1553,26 @@ class DSLScanner:
             with open(json_path, "rb") as f:
                 data = orjson.loads(f.read())
 
-            if self.batch_mode and isinstance(data, list):
-                return self.scan_batch_data(data, json_path, enable_explain)
-            else:
-                return self.scan_data(data, json_path, enable_explain)
         except Exception as e:
             return ScanResult(
                 file_path=json_path,
                 rule_matches=[],
                 scan_time=(datetime.now() - start_time).total_seconds(),
                 error=str(e),
-                error_category=(
-                    ScanFailureCategory.INPUT_READ
-                    if isinstance(e, OSError | orjson.JSONDecodeError)
-                    else _failure_category(e)
-                ),
+                error_category=ScanFailureCategory.INPUT_READ,
+            )
+
+        try:
+            if self.batch_mode and isinstance(data, list):
+                return self.scan_batch_data(data, json_path, enable_explain)
+            return self.scan_data(data, json_path, enable_explain)
+        except Exception as e:
+            return ScanResult(
+                file_path=json_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=str(e),
+                error_category=_failure_category(e),
             )
 
     def scan_directory(

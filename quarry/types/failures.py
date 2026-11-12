@@ -38,6 +38,18 @@ class ScanFailureCategory(StrEnum):
     UNKNOWN = auto()
 
 
+def _category_from_metadata(value: object) -> ScanFailureCategory:
+    """Ignore invalid attribution without coercing arbitrary caller-owned objects."""
+    if isinstance(value, ScanFailureCategory):
+        return value
+    if type(value) is str:
+        try:
+            return ScanFailureCategory(value)
+        except ValueError:
+            pass
+    return ScanFailureCategory.UNKNOWN
+
+
 @dataclass(frozen=True, slots=True)
 class ScanFailure:
     """One machine-readable failure, optionally attributed to a selected rule.

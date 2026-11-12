@@ -1322,9 +1322,9 @@ class QuarryPlugin:
     @staticmethod
     def _scan_diagnostics(result) -> list[dict[str, Any]]:
         diagnostics = []
-        if result.validation_error:
+        if result.validation_error is not None:
             diagnostics.append({"code": "invalid_conversation", "message": result.validation_error})
-        if result.error and not result.validation_error:
+        if result.error is not None and result.validation_error is None:
             diagnostics.append({"code": "scan_error", "message": result.error})
         for name in result.timed_out_rules or []:
             diagnostics.append({"code": "rule_timeout", "rule_name": name})

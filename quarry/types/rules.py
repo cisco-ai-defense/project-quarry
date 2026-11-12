@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from quarry.types.dsl import ConditionNode
 from quarry.types.exceptions import ConversationValidationError, IncompleteScanError
-from quarry.types.failures import ScanFailure, ScanFailureCategory
+from quarry.types.failures import ScanFailure, ScanFailureCategory, _category_from_metadata
 from quarry.types.parameters import ParameterSpec
 from quarry.types.results import CollectionResult
 
@@ -119,11 +119,9 @@ class ScanResult:
         if self.validation_error is not None:
             failures.append(ScanFailure(ScanFailureCategory.INVALID_INPUT))
         elif self.error is not None:
-            failures.append(ScanFailure(self.error_category or ScanFailureCategory.UNKNOWN))
+            failures.append(ScanFailure(_category_from_metadata(self.error_category)))
         for name in self.evaluation_errors or ():
-            category = (self.evaluation_error_categories or {}).get(
-                name, ScanFailureCategory.EVALUATION
-            )
+            category = self._evaluation_failure_category(name)
             failures.append(ScanFailure(category, name))
         failures.extend(
             ScanFailure(ScanFailureCategory.TIMEOUT, name) for name in self.timed_out_rules or ()
@@ -136,6 +134,19 @@ class ScanResult:
         if self.evaluation_warnings:
             failures.append(ScanFailure(ScanFailureCategory.EVALUATION_LIMIT))
         return tuple(failures)
+
+    def _evaluation_failure_category(self, rule_name: str) -> ScanFailureCategory:
+        """Resolve optional mutable attribution without changing the failure signal."""
+        categories = self.evaluation_error_categories
+        if categories is None:
+            return ScanFailureCategory.EVALUATION
+        if not isinstance(categories, dict):
+            return ScanFailureCategory.UNKNOWN
+        # A supplied malformed value is unknown; an absent value preserves the legacy
+        # evaluation category. Bypass overrides on caller-supplied dict subclasses.
+        return _category_from_metadata(
+            dict.get(categories, rule_name, ScanFailureCategory.EVALUATION)
+        )
 
     @property
     def detailed_matches(self) -> list[Any] | None:

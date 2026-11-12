@@ -25,6 +25,8 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from quarry import (
     ConversationValidationError,
@@ -37,6 +39,7 @@ from quarry import (
 )
 from quarry.cli import format_results
 from quarry.config import QuarryConfig
+from quarry.integrations.resources import ResourcePreparationError
 from quarry.plugin.service import QuarryPlugin
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
@@ -115,6 +118,7 @@ def test_exhaustive_completion_state_and_failure_presence(flags):
         (LLMError("provider text", {"code": "timeout"}), Category.MODEL),
         (ModelError("arbitrary"), Category.MODEL),
         (ResourceError("arbitrary"), Category.RESOURCE),
+        (ResourcePreparationError("arbitrary", {}), Category.RESOURCE),
         (EvaluationError("arbitrary"), Category.EVALUATION),
         (ConversationValidationError("arbitrary"), Category.INVALID_INPUT),
         (QuarryTimeoutError("arbitrary"), Category.TIMEOUT),
@@ -160,6 +164,7 @@ def test_legacy_results_and_later_mutation_keep_failure_projection_current():
     [
         (LLMError("synthetic provider reply", {"endpoint": "not returned"}), Category.MODEL),
         (ResourceError("synthetic failure"), Category.RESOURCE),
+        (ResourcePreparationError("synthetic failure", {}), Category.RESOURCE),
         (ValueError("synthetic failure"), Category.UNKNOWN),
         (QuarryTimeoutError("synthetic timeout"), Category.TIMEOUT),
         (EvaluationTimeoutError("Check", 1), Category.TIMEOUT),
@@ -293,3 +298,241 @@ def test_exhaustive_batch_completion_preserves_every_child_failure(monkeypatch, 
     assert bool(batch.failures) is (not child.is_complete)
     for failure in child.failures:
         assert failure.category in {f.category for f in batch.failures}
+
+
+_JSON_METADATA = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.text(max_size=30),
+    lambda values: (
+        st.lists(values, max_size=3) | st.dictionaries(st.text(max_size=10), values, max_size=3)
+    ),
+    max_leaves=8,
+)
+
+
+@pytest.fixture(scope="module")
+def payload_serializers():
+    return scanner(), QuarryPlugin()
+
+
+def assert_failure_serializers_agree(result, subject, plugin):
+    expected = [failure.to_dict() for failure in result.failures]
+    assert result.completion_state != "complete"
+    with pytest.raises(IncompleteScanError) as caught:
+        result.raise_for_status()
+    assert caught.value.details["failures"] == expected
+    assert json.loads(format_results([result], "json"))[0]["failures"] == expected
+    row = next(csv.DictReader(StringIO(format_results([result], "csv"))))
+    assert json.loads(row["failures"]) == expected
+    assert plugin._scan_payload(subject, result, None)["failures"] == expected
+
+
+@settings(max_examples=50, deadline=None)
+@given(metadata=_JSON_METADATA | st.sampled_from([category.value for category in Category]))
+def test_mutated_error_metadata_cannot_break_fail_closed_serialization(
+    payload_serializers, metadata
+):
+    subject, plugin = payload_serializers
+    result = result_with(error="")
+    result.error_category = metadata
+    assert_failure_serializers_agree(result, subject, plugin)
+    expected = (
+        Category(metadata)
+        if type(metadata) is str and metadata in {category.value for category in Category}
+        else Category.UNKNOWN
+    )
+    assert result.failures == (ScanFailure(expected),)
+    result.error = None
+    assert result.is_complete
+    assert result.failures == ()
+
+
+@settings(max_examples=50, deadline=None)
+@given(metadata=_JSON_METADATA | st.sampled_from([category.value for category in Category]))
+def test_mutated_rule_metadata_cannot_break_fail_closed_serialization(
+    payload_serializers, metadata
+):
+    subject, plugin = payload_serializers
+    result = result_with(evaluation_errors={"Check": ""})
+    result.evaluation_error_categories = {"Check": metadata}
+    assert_failure_serializers_agree(result, subject, plugin)
+    expected = (
+        Category(metadata)
+        if type(metadata) is str and metadata in {category.value for category in Category}
+        else Category.UNKNOWN
+    )
+    assert result.failures == (ScanFailure(expected, "Check"),)
+    result.evaluation_errors.clear()
+    assert result.is_complete
+    assert result.failures == ()
+
+
+@pytest.mark.parametrize("metadata", [[], ["model"], True, 3, "model", {"Other": "model"}, None])
+def test_malformed_category_mapping_preserves_fail_closed_batch(monkeypatch, metadata):
+    child = result_with(evaluation_errors={"Check": ""})
+    child.evaluation_error_categories = metadata
+    expected = (
+        Category.EVALUATION if metadata is None or isinstance(metadata, dict) else Category.UNKNOWN
+    )
+    assert child.failures == (ScanFailure(expected, "Check"),)
+    subject = scanner()
+    monkeypatch.setattr(subject, "scan_data", lambda *args: child)
+    batch = subject.scan_batch_data([CONVERSATION], Path("batch.json"))
+    assert batch.completion_state == "incomplete"
+    assert batch.failures == (ScanFailure(expected, "conv_1:Check"),)
+
+
+def test_failure_projection_never_coerces_arbitrary_metadata():
+    class NoCoercion:
+        def __str__(self):
+            pytest.fail("category metadata must not be stringified")
+
+        def __bool__(self):
+            pytest.fail("category metadata must not be tested for truthiness")
+
+        def __hash__(self):
+            pytest.fail("category metadata must not be hashed")
+
+    class NoOverrides(dict):
+        def __bool__(self):
+            pytest.fail("category dictionaries must not be tested for truthiness")
+
+        def get(self, *args):
+            pytest.fail("category dictionaries must not execute overridden get")
+
+        def __contains__(self, key):
+            pytest.fail("category dictionaries must not execute overridden contains")
+
+        def __getitem__(self, key):
+            pytest.fail("category dictionaries must not execute overridden getitem")
+
+    result = result_with(error="", evaluation_errors={"Check": ""})
+    result.error_category = NoCoercion()
+    result.evaluation_error_categories = NoOverrides(Check=NoCoercion())
+    assert result.failures == (
+        ScanFailure(Category.UNKNOWN),
+        ScanFailure(Category.UNKNOWN, "Check"),
+    )
+
+
+def test_batch_keeps_top_level_category_alongside_rule_error_category(monkeypatch):
+    child = result_with(
+        error="preparation failed",
+        error_category=Category.PREPARATION,
+        evaluation_errors={"conversation_preparation": "failure"},
+        evaluation_error_categories={"conversation_preparation": Category.RESOURCE},
+    )
+    subject = scanner()
+    monkeypatch.setattr(subject, "scan_data", lambda *args: child)
+    batch = subject.scan_batch_data([CONVERSATION], Path("batch.json"))
+    assert ScanFailure(Category.PREPARATION, "conv_1") in batch.failures
+    assert ScanFailure(Category.RESOURCE, "conv_1:conversation_preparation") in batch.failures
+
+
+@pytest.mark.parametrize("field", ["validation_error", "error"])
+def test_plugin_keeps_empty_diagnostics_for_present_failure_fields(field):
+    result = result_with(**{field: ""})
+    payload = QuarryPlugin()._scan_payload(scanner(), result, None)
+    assert payload["diagnostics"] == [
+        {
+            "code": "invalid_conversation" if field == "validation_error" else "scan_error",
+            "message": "",
+        }
+    ]
+    assert bool(payload["failures"])
+
+
+@pytest.mark.parametrize(
+    "exception,expected",
+    [
+        (OSError("runtime failure"), Category.UNKNOWN),
+        (ResourceError("runtime failure"), Category.RESOURCE),
+        (ResourcePreparationError("runtime failure", {}), Category.RESOURCE),
+        (QuarryTimeoutError("runtime failure"), Category.TIMEOUT),
+    ],
+)
+def test_file_execution_failure_is_not_misreported_as_a_read_failure(
+    monkeypatch, tmp_path, exception, expected
+):
+    file_path = tmp_path / "conversation.json"
+    file_path.write_text(json.dumps(CONVERSATION))
+    subject = scanner()
+
+    def fail(*args):
+        raise exception
+
+    monkeypatch.setattr(subject, "scan_data", fail)
+    result = subject.scan_file(file_path)
+    assert result.failures == (ScanFailure(expected),)
+
+
+_BATCH_PROFILES = [
+    {},
+    {"validation_error": ""},
+    {"error": "", "error_category": Category.PREPARATION},
+    {"evaluation_errors": {"Check": ""}, "evaluation_error_categories": {"Check": Category.MODEL}},
+    {"timed_out_rules": ["Check"]},
+    {"skipped_rules": ["Check"]},
+    {"was_truncated": True},
+    {"evaluation_warnings": [""]},
+    {
+        "error": "",
+        "error_category": Category.RESOURCE,
+        "evaluation_errors": {"Check": ""},
+        "evaluation_error_categories": {"Check": Category.MODEL},
+    },
+]
+
+
+@pytest.mark.parametrize("profiles", itertools.product(_BATCH_PROFILES, repeat=2))
+def test_batch_pairwise_composition_preserves_categories_and_provenance(monkeypatch, profiles):
+    children = [result_with(**profile) for profile in profiles]
+    pending = iter(children)
+    subject = scanner()
+    monkeypatch.setattr(subject, "scan_data", lambda *args: next(pending))
+    batch = subject.scan_batch_data([CONVERSATION] * len(children), Path("batch.json"))
+    assert batch.is_complete is all(child.is_complete for child in children)
+    for index, child in enumerate(children, start=1):
+        label = f"conv_{index}"
+        for failure in child.failures:
+            if failure.rule_name is not None:
+                assert (
+                    ScanFailure(failure.category, f"{label}:{failure.rule_name}") in batch.failures
+                )
+            elif failure.category in {
+                Category.INVALID_INPUT,
+                Category.PREPARATION,
+                Category.RESOURCE,
+            }:
+                assert ScanFailure(failure.category, label) in batch.failures
+            else:
+                assert failure.category in {entry.category for entry in batch.failures}
+
+
+def test_failure_projection_preserves_legacy_signal_order_and_repeated_rule_names():
+    result = result_with(
+        error="",
+        error_category=Category.RESOURCE,
+        evaluation_errors={"second": "", "first": ""},
+        evaluation_error_categories={"second": Category.MODEL, "first": Category.TIMEOUT},
+        timed_out_rules=["first", "first"],
+        skipped_rules=["second"],
+        was_truncated=True,
+        evaluation_warnings=[""],
+    )
+    expected = (
+        ScanFailure(Category.RESOURCE),
+        ScanFailure(Category.MODEL, "second"),
+        ScanFailure(Category.TIMEOUT, "first"),
+        ScanFailure(Category.TIMEOUT, "first"),
+        ScanFailure(Category.TIMEOUT, "first"),
+        ScanFailure(Category.SKIPPED, "second"),
+        ScanFailure(Category.TRUNCATED_INPUT),
+        ScanFailure(Category.EVALUATION_LIMIT),
+    )
+    assert result.failures == expected
+    assert result.failures == expected
+    result.evaluation_error_categories.clear()
+    assert result.failures[1:3] == (
+        ScanFailure(Category.EVALUATION, "second"),
+        ScanFailure(Category.EVALUATION, "first"),
+    )
