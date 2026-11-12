@@ -43,6 +43,7 @@ A model alias names an adapter, model, and the operations a rule may use. Here i
 ```yaml
 models:
   guard:
+    description: Policy judge; 1.0 means the conversation violates the supplied policy.
     adapter: litellm
     model: ${MODEL_ID}
     score:
@@ -52,5 +53,10 @@ models:
         negative: "0"
         positive: "1"
 ```
+
+`description` is optional and limited to 500 characters. Use it to explain what the alias is for
+and what its output means. The agent plugin returns it beside the alias's supported operations so
+rule authors can select the right model. Descriptions are human-facing metadata: changing one does
+not change provider requests, model-result cache keys, or compiled-policy model digests.
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
