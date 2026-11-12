@@ -19,7 +19,7 @@
 import os
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
@@ -102,6 +102,16 @@ class ScoreConfig:
     # With a budget, the model reasons before it answers, ending on ``ANSWER: <token>``,
     # instead of answering with the token alone.
     reasoning_max_tokens: int | None = None
+    # A short user-facing explanation, separately opted into from private reasoning.
+    explanation_max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        budget = self.explanation_max_tokens
+        if budget is not None:
+            if isinstance(budget, bool) or not isinstance(budget, int) or not 16 <= budget <= 4096:
+                raise ValueError("score explanation max_tokens must be an integer from 16 to 4096")
+            if self.reasoning_max_tokens is not None:
+                raise ValueError("score explanation and reasoning are mutually exclusive")
 
 
 @dataclass(frozen=True)
@@ -147,6 +157,18 @@ class InferenceModelConfig:
     classify: ClassifyConfig | None = None
     spans: SpanConfig | None = None
     complete: CompleteConfig | None = None
+
+    def identity_dict(self) -> dict[str, object]:
+        """Canonical model configuration, retaining pre-explanation policy identity.
+
+        Disabled optional explanation generation has exactly the old configuration shape.
+        An enabled budget remains part of policy and served-model fingerprints.
+        """
+
+        document = asdict(self)
+        if self.score is not None and self.score.explanation_max_tokens is None:
+            document["score"].pop("explanation_max_tokens")
+        return document
 
 
 def _default_llm_rate_limits() -> dict[str, RateLimitConfig]:
@@ -691,7 +713,15 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
     fields: dict[object, object] = dict(value)
     _reject_unknown_fields(
         fields,
-        {"message_builder", "boundary_seed", "tokens", "extraction", "calibration", "reasoning"},
+        {
+            "message_builder",
+            "boundary_seed",
+            "tokens",
+            "extraction",
+            "calibration",
+            "reasoning",
+            "explanation",
+        },
         owner,
     )
 
@@ -735,6 +765,22 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
         ):
             raise ValueError(f"{owner} reasoning max_tokens must be an integer of at least 16")
 
+    explanation_max_tokens = None
+    if "explanation" in fields:
+        explanation = fields["explanation"]
+        if not isinstance(explanation, dict):
+            raise ValueError(f"{owner} explanation must be a mapping")
+        _reject_unknown_fields(explanation, {"max_tokens"}, f"{owner} explanation")
+        explanation_max_tokens = explanation.get("max_tokens")
+        if (
+            isinstance(explanation_max_tokens, bool)
+            or not isinstance(explanation_max_tokens, int)
+            or not 16 <= explanation_max_tokens <= 4096
+        ):
+            raise ValueError(f"{owner} explanation max_tokens must be an integer from 16 to 4096")
+        if reasoning_max_tokens is not None:
+            raise ValueError(f"{owner} explanation and reasoning are mutually exclusive")
+
     return ScoreConfig(
         message_builder=_optional_string(fields, "message_builder", owner) or "constitution",
         boundary_seed=boundary_seed,
@@ -745,6 +791,7 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
             _optional_string(fields, "calibration", owner), owner
         ),
         reasoning_max_tokens=reasoning_max_tokens,
+        explanation_max_tokens=explanation_max_tokens,
     )
 
 

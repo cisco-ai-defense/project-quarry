@@ -60,3 +60,15 @@ result.raise_for_status()
 Authenticate stored compiled bytes before passing them to the loader. The loader checks the wire version, compiler version, rule requirement, and runtime resource identity; it does not prove arbitrary bytes came from your build. Recompile source after an incompatible version change. Policies with bound text parameters also require the host to manage their evidence key and follow the loader's key requirements.
 
 See [parameters](parameters.md) for binding and digest behavior. Public result, exception, conversation, and message types are exported from `quarry`; configuration classes live in `quarry.config`.
+
+## Judge results
+
+`ModelInferenceBackend.model_judge_messages(alias, constitution, messages, tools=None, timeout=None)` is async and returns the public immutable `JudgeResult`:
+
+```python
+judge = await backend.model_judge_messages("judge", "Detect unsafe requests.", messages)
+assert 0 <= judge.score <= 1
+payload = judge.to_dict()  # {"score": 0.8, "reason": "..."} or reason=None
+```
+
+The score is calibrated exactly as in `model_score_messages`; both methods share the same request cache. The reason is present only when the configured alias enables `score.explanation` and its adapter returns a valid reason. Neither absent reasons nor float-only adapters imply an error. Refused, malformed and failed calls raise the existing model errors and never return a successful judge result. See [model-inference.md](model-inference.md#optional-judge-explanations) for limits and safe handling of untrusted generated text.

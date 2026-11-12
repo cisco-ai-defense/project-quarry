@@ -169,6 +169,8 @@ class ModelResultEvidence:
     input_span: dict[str, Any] | None = None
     # Each refused call the atom read, as (model alias, operation, reason); never model text.
     refusals: tuple[tuple[str, str, str], ...] = ()
+    judge_reasons: tuple[tuple[int, str, str], ...] = ()
+    omitted_judge_reasons: int = 0
 
     @classmethod
     def bounded(
@@ -185,6 +187,8 @@ class ModelResultEvidence:
         score_summary: dict[str, Any] | None = None,
         input_span: dict[str, Any] | None = None,
         refusals=(),
+        judge_reasons=(),
+        omitted_judge_reasons: int = 0,
     ) -> ModelResultEvidence:
         """Redact and cap caller-controlled strings, aliases, and arguments."""
 
@@ -205,6 +209,12 @@ class ModelResultEvidence:
             matched=matched,
             source_path=_excerpt(source_path) if source_path is not None else None,
             input_span=input_span,
+            judge_reasons=tuple(
+                (ordinal, _excerpt(str(model)) or "", _excerpt(reason) or "")
+                for ordinal, model, reason in judge_reasons[:_MODEL_ALIASES_LIMIT]
+            ),
+            omitted_judge_reasons=omitted_judge_reasons
+            + max(0, len(judge_reasons) - _MODEL_ALIASES_LIMIT),
             refusals=tuple(
                 (_excerpt(str(model)) or "", operation_name, reason)
                 for model, operation_name, reason in refusals
@@ -214,7 +224,7 @@ class ModelResultEvidence:
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-ready model evidence shape."""
 
-        return {
+        result = {
             "operation": self.operation,
             "models": list(self.models),
             "omitted_models": self.omitted_models,
@@ -232,6 +242,14 @@ class ModelResultEvidence:
                 for model, operation, reason in self.refusals
             ],
         }
+
+        if self.judge_reasons or self.omitted_judge_reasons:
+            result["judge_reasons"] = [
+                {"call": ordinal, "model": model, "text": reason, "untrusted": True}
+                for ordinal, model, reason in self.judge_reasons
+            ]
+            result["omitted_judge_reasons"] = self.omitted_judge_reasons
+        return result
 
 
 @dataclass(frozen=True)
@@ -496,6 +514,8 @@ class AtomEvidence:
             lines.append(f'    [{position}] "{text}"')
         for result in self.model_results:
             lines.append(f"    {result.operation}: {result.expression_value}")
+            for _, model, reason in result.judge_reasons:
+                lines.append(f"    judge reason (untrusted, {model}): {reason}")
         if self.note:
             lines.append(f"    note: {self.note}")
         return lines

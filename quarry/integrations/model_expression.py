@@ -82,6 +82,9 @@ class ModelExpressionTrace:
     # Per split chunk, whether its score call was refused, so a fallback value is not
     # presented as a measured score.
     split_refused: list[bool] | None = None
+    # Explicit user-facing explanations only; never provider private reasoning.
+    judge_reasons: list[tuple[int, str, str]] = field(default_factory=list)
+    omitted_judge_reasons: int = 0
 
 
 def _finite(value: Any) -> Any:
@@ -329,6 +332,13 @@ async def evaluate_model_expression(
             result = any(truth(value) for value in values)
             if trace is not None:
                 for child_trace in child_traces:
+                    offset = len(trace.calls)
+                    for ordinal, alias, reason in child_trace.judge_reasons:
+                        if len(trace.judge_reasons) < 8:
+                            trace.judge_reasons.append((offset + ordinal, alias, reason))
+                        else:
+                            trace.omitted_judge_reasons += 1
+                    trace.omitted_judge_reasons += child_trace.omitted_judge_reasons
                     trace.calls.extend(child_trace.calls)
                     trace.refusals.extend(child_trace.refusals)
                     for parameter in child_trace.parameters:
@@ -599,16 +609,34 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
 
     if operation == "score":
         messages, constitution, *optional = arguments
-        result = _finite(
-            await backend.model_score_messages(
-                alias,
-                constitution,
-                messages,
-                optional[0] if optional else None,
-                timeout=context.limits.rule_timeout,
-            )
+        # Legacy/custom backends keep their numeric contract. The built-in backend can
+        # retain the same request's explicitly enabled explanation for explain evidence.
+        from quarry.integrations.model_inference import ModelInferenceBackend
+
+        numeric = backend.model_score_messages
+        standard_score = (
+            getattr(numeric, "__func__", None) is ModelInferenceBackend.model_score_messages
         )
+        judge = (
+            getattr(backend, "model_judge_messages", None)
+            if trace is not None and standard_score
+            else None
+        )
+        call = judge if callable(judge) else backend.model_score_messages
+        outcome = await call(
+            alias,
+            constitution,
+            messages,
+            optional[0] if optional else None,
+            timeout=context.limits.rule_timeout,
+        )
+        result = _finite(outcome.score if callable(judge) else outcome)
         _record_call(trace, context, expression, alias, operation, arguments, result)
+        if trace is not None and callable(judge) and outcome.reason is not None:
+            if len(trace.judge_reasons) < 8:
+                trace.judge_reasons.append((len(trace.calls) - 1, alias, outcome.reason))
+            else:
+                trace.omitted_judge_reasons += 1
         return result
     if operation == "classify":
         messages, *optional = arguments
@@ -792,6 +820,8 @@ def build_model_result_evidence(
         source_path=getattr(event, "source_path", None),
         input_span=trace.input_span if trace.split_scores is None else None,
         refusals=trace.refusals,
+        judge_reasons=trace.judge_reasons,
+        omitted_judge_reasons=trace.omitted_judge_reasons,
     )
 
 

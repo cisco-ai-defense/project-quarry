@@ -396,7 +396,13 @@ def format_results(
                                                     f" {model_result.operator} "
                                                     f"{model_result.threshold}"
                                                 )
-                                            model_tree.add(label)
+                                            reason_tree = model_tree.add(label)
+                                            for _, model, reason in model_result.judge_reasons:
+                                                reason_tree.add(
+                                                    Text(
+                                                        f"judge reason (untrusted, {model}): {reason}"
+                                                    )
+                                                )
 
                                     console.print(Padding(tree, (0, 0, 0, 4)))
                         else:

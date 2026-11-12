@@ -32,7 +32,7 @@ import hmac
 import json
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from quarry.engine.atoms import AtomDomain, AtomSpec, ModelExpression
@@ -176,7 +176,7 @@ def model_identity(model: InferenceModelConfig) -> str:
     tokenizer is served."""
 
     canonical = json.dumps(
-        _without_location(asdict(model)), sort_keys=True, separators=(",", ":"), default=str
+        _without_location(model.identity_dict()), sort_keys=True, separators=(",", ":"), default=str
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -188,7 +188,9 @@ def _without_location(value: Any) -> Any:
 
 
 def _served_config(model: InferenceModelConfig) -> str:
-    canonical = json.dumps(asdict(model), sort_keys=True, separators=(",", ":"), default=str)
+    canonical = json.dumps(
+        model.identity_dict(), sort_keys=True, separators=(",", ":"), default=str
+    )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
