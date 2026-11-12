@@ -17,6 +17,7 @@
 """Rule related types."""
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,6 +31,47 @@ from quarry.types.results import CollectionResult
 ScanCompletionState = Literal["complete", "invalid", "incomplete"]
 # False disables evidence, "support" captures match support, and True explores every atom.
 ExplainLevel = bool | Literal["support"]
+
+
+class ScanFailureCategory(StrEnum):
+    """Stable public scan-failure categories; diagnostic text is not a classifier."""
+
+    INVALID_INPUT = "invalid_input"
+    RULE_SELECTION = "rule_selection"
+    INPUT_READ = "input_read"
+    PREPARATION = "preparation"
+    MODEL = "model"
+    RESOURCE = "resource"
+    EVALUATION = "evaluation"
+    TIMEOUT = "timeout"
+    SKIPPED = "skipped"
+    TRUNCATED_INPUT = "truncated_input"
+    EVALUATION_LIMIT = "evaluation_limit"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ScanFailure:
+    """One machine-readable failure, optionally attributed to a selected rule.
+
+    The record contains no exception text or provider details. Batch rule names use the
+    same ``conv_N:rule`` provenance as matches and evaluation errors.
+    """
+
+    category: ScanFailureCategory
+    rule_name: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "category", ScanFailureCategory(self.category))
+        if self.rule_name is not None and not isinstance(self.rule_name, str):
+            raise TypeError("failure rule_name must be a string or None")
+
+    def to_dict(self) -> dict[str, str]:
+        """Return stable JSON fields without copying arbitrary exception metadata."""
+        result = {"category": self.category.value}
+        if self.rule_name is not None:
+            result["rule_name"] = self.rule_name
+        return result
 
 
 @dataclass
@@ -99,6 +141,42 @@ class ScanResult:
     # Per decomposed rule, the decision-tree checks the scan grounded, even when the rule
     # timed out or raised. Concrete values are ``quarry.engine.contracts.ScanRecord``.
     decision_paths: dict[str, Any] | None = None
+
+    # Optional structured attribution for the existing error channels. These fields do
+    # not independently make a scan fail; only the corresponding failure signal does.
+    error_category: ScanFailureCategory | None = field(default=None, kw_only=True)
+    evaluation_error_categories: dict[str, ScanFailureCategory] | None = field(
+        default=None, kw_only=True
+    )
+
+    @property
+    def failures(self) -> tuple[ScanFailure, ...]:
+        """All active failure categories, in deterministic completion-signal order.
+
+        Derived on access so manually constructed and subsequently updated legacy results
+        retain the same fail-closed semantics. Unknown exceptions remain ``unknown``.
+        """
+        failures: list[ScanFailure] = []
+        if self.validation_error is not None:
+            failures.append(ScanFailure(ScanFailureCategory.INVALID_INPUT))
+        elif self.error is not None:
+            failures.append(ScanFailure(self.error_category or ScanFailureCategory.UNKNOWN))
+        for name in self.evaluation_errors or ():
+            category = (self.evaluation_error_categories or {}).get(
+                name, ScanFailureCategory.EVALUATION
+            )
+            failures.append(ScanFailure(category, name))
+        failures.extend(
+            ScanFailure(ScanFailureCategory.TIMEOUT, name) for name in self.timed_out_rules or ()
+        )
+        failures.extend(
+            ScanFailure(ScanFailureCategory.SKIPPED, name) for name in self.skipped_rules or ()
+        )
+        if self.was_truncated:
+            failures.append(ScanFailure(ScanFailureCategory.TRUNCATED_INPUT))
+        if self.evaluation_warnings:
+            failures.append(ScanFailure(ScanFailureCategory.EVALUATION_LIMIT))
+        return tuple(failures)
 
     @property
     def detailed_matches(self) -> list[Any] | None:

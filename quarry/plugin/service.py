@@ -743,6 +743,7 @@ class QuarryPlugin:
             result.raise_for_status()
         payload: dict[str, Any] = {
             "completion_state": result.completion_state,
+            "failures": [failure.to_dict() for failure in result.failures],
             "timings": {
                 "total_seconds": result.scan_time,
                 "rules": dict(result.rule_timings or {}),

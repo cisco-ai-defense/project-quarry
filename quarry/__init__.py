@@ -55,7 +55,7 @@ from quarry.types.messages import (
     UserMessage,
 )
 from quarry.types.results import CollectionResult, ProducerRef, ResultItem, Score, Span
-from quarry.types.rules import ScanResult
+from quarry.types.rules import ScanFailure, ScanFailureCategory, ScanResult
 
 __all__ = [
     "__version__",
@@ -95,6 +95,8 @@ __all__ = [
     "Score",
     "ResultItem",
     "SafetyLimits",
+    "ScanFailure",
+    "ScanFailureCategory",
     "ScanResult",
     "Span",
     "compile_policy",
