@@ -383,6 +383,10 @@ def test_malformed_category_mapping_preserves_fail_closed_batch(monkeypatch, met
 
 def test_failure_projection_never_coerces_arbitrary_metadata():
     class NoCoercion:
+        @property
+        def __class__(self):
+            pytest.fail("category metadata must not inspect a spoofable class attribute")
+
         def __str__(self):
             pytest.fail("category metadata must not be stringified")
 
@@ -536,3 +540,38 @@ def test_failure_projection_preserves_legacy_signal_order_and_repeated_rule_name
         ScanFailure(Category.EVALUATION, "second"),
         ScanFailure(Category.EVALUATION, "first"),
     )
+
+
+def test_spoofed_class_metadata_cannot_break_failure_serialization(payload_serializers):
+    class FakeCategory:
+        @property
+        def __class__(self):
+            return Category
+
+    class FakeDict:
+        @property
+        def __class__(self):
+            return dict
+
+    subject, plugin = payload_serializers
+    result = result_with(error="", evaluation_errors={"Check": ""})
+    result.error_category = FakeCategory()
+    result.evaluation_error_categories = FakeDict()
+    assert result.failures == (
+        ScanFailure(Category.UNKNOWN),
+        ScanFailure(Category.UNKNOWN, "Check"),
+    )
+    assert_failure_serializers_agree(result, subject, plugin)
+
+
+def test_spoofed_category_value_in_real_mapping_stays_unknown(payload_serializers):
+    class FakeCategory:
+        @property
+        def __class__(self):
+            return Category
+
+    subject, plugin = payload_serializers
+    result = result_with(evaluation_errors={"Check": ""})
+    result.evaluation_error_categories = {"Check": FakeCategory()}
+    assert result.failures == (ScanFailure(Category.UNKNOWN, "Check"),)
+    assert_failure_serializers_agree(result, subject, plugin)

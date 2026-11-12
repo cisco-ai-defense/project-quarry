@@ -140,7 +140,7 @@ class ScanResult:
         categories = self.evaluation_error_categories
         if categories is None:
             return ScanFailureCategory.EVALUATION
-        if not isinstance(categories, dict):
+        if not issubclass(type(categories), dict):
             return ScanFailureCategory.UNKNOWN
         # A supplied malformed value is unknown; an absent value preserves the legacy
         # evaluation category. Bypass overrides on caller-supplied dict subclasses.

@@ -40,7 +40,7 @@ class ScanFailureCategory(StrEnum):
 
 def _category_from_metadata(value: object) -> ScanFailureCategory:
     """Ignore invalid attribution without coercing arbitrary caller-owned objects."""
-    if isinstance(value, ScanFailureCategory):
+    if type(value) is ScanFailureCategory:
         return value
     if type(value) is str:
         try:
