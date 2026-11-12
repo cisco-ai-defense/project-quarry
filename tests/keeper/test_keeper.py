@@ -311,3 +311,21 @@ def test_cli_setup_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert cli.main(["rules"]) == 0
     assert cli.main(["subject", "add", str(folder), "art"]) == 2
     assert "art" in capsys.readouterr().out
+
+
+def test_next_step_line_must_be_last(tmp_path: Path) -> None:
+    keeper_root = init_root(tmp_path / "k")
+    add_subject(keeper_root, "talk", use=["next-step-last"])
+    body = "Here is the answer. " * 15 + "\n\nIn simple terms: it works."
+    missing = check(keeper_root, "talk", convo({"role": "assistant", "content": body}))
+    assert broken(missing) == {"Next step line at the end"}
+    early = body.replace("Here is", "Next step: soon. Here is", 1)
+    assert broken(check(keeper_root, "talk", convo({"role": "assistant", "content": early}))) == {
+        "Next step line at the end"
+    }
+    good = body + "\n\n**Next step:** I'll write the plan."
+    assert (
+        check(keeper_root, "talk", convo({"role": "assistant", "content": good})).verdict == "PASS"
+    )
+    short = check(keeper_root, "talk", convo({"role": "assistant", "content": "Done."}))
+    assert short.verdict == "PASS"

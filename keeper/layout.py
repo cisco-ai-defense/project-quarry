@@ -214,6 +214,7 @@ def _rules_md(name: str, use: list[str]) -> str:
         "timestamp-first": "Start every reply with a bold New York timestamp.",
         "simple-terms-last": 'End every long explanation with an "In simple terms" part.',
         "offline-only": "Never go online. No web, no downloads, no network tools.",
+        "next-step-last": 'End every reply with a one-line "Next step", after "In simple terms".',
     }
     for item in use:
         lines.append(f"- {descriptions.get(item, item)}")

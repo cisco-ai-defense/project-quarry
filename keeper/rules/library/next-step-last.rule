@@ -1,0 +1,9 @@
+rule "Next step line at the end"
+metadata:
+    severity = "low"
+    description = "Every reply to Al (over 200 characters) must end with a one-line \"Next step\" after the \"In simple terms\" part."
+    plain = "A reply didn't end with the next-step line."
+strings:
+    $last_line = "(?i)next step[^\n]*\s*$" regex
+condition:
+    any msg in assistant_messages where len(msg.content) > 200 and not ($last_line in msg.content)
