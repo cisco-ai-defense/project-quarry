@@ -403,6 +403,13 @@ def format_results(
                                                         f"judge reason (untrusted, {model}): {reason}"
                                                     )
                                                 )
+                                            if model_result.omitted_judge_reasons:
+                                                reason_tree.add(
+                                                    Text(
+                                                        f"… {model_result.omitted_judge_reasons} more judge reasons omitted",
+                                                        style="dim",
+                                                    )
+                                                )
 
                                     console.print(Padding(tree, (0, 0, 0, 4)))
                         else:

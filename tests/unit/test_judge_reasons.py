@@ -800,3 +800,72 @@ def test_ambiguous_quoted_label_probabilities_cannot_reverse_the_canonical_verdi
         ],
     )
     assert asyncio.run(LiteLLMAdapter().score(config, [])).score == 1
+
+
+@pytest.mark.parametrize(("retained", "omitted"), [(2, 3), (0, 3), (2, 0)])
+def test_human_explanation_reports_reason_omissions_even_without_retained_text(
+    tmp_path, capsys, retained, omitted
+):
+    from quarry.engine.witness import AtomEvidence
+
+    scanner = _scanner(tmp_path, JudgeAdapter())
+    result = scanner.scan_data(
+        {"messages": [{"role": "user", "content": "synthetic"}]}, enable_explain=True
+    )
+    (explanation,) = result.explanations
+    (measured,) = explanation.model_results
+    reasons = tuple(
+        (ordinal, "judge", f"[bold]synthetic reason {ordinal}[/bold]")
+        for ordinal in range(retained)
+    )
+    measured = replace(measured, judge_reasons=reasons, omitted_judge_reasons=omitted)
+    result.explanations = [replace(explanation, model_results=(measured,))]
+    format_results([result], explain_mode=True, scanner=scanner)
+    output = capsys.readouterr().out
+    omission_label = f"… {omitted} more judge reasons omitted"
+    assert (omission_label in output) is bool(omitted)
+    for ordinal in range(retained):
+        assert f"[bold]synthetic reason {ordinal}[/bold]" in output
+    atom = AtomEvidence("synthetic score", "satisfied", "llm", model_results=(measured,))
+    plain_output = "\n".join(atom.format_explain())
+    assert (omission_label in plain_output) is bool(omitted)
+
+
+def test_description_metadata_does_not_change_judge_requests_or_policy_identity(tmp_path):
+    from dataclasses import asdict
+
+    class RecordingJudge(JudgeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.configurations = []
+
+        async def score(self, config, messages, *, timeout=None):
+            self.configurations.append(config)
+            return await super().score(config, messages, timeout=timeout)
+
+    adapter = RecordingJudge()
+    source = 'rule "R"\ncondition: model("judge").score(messages, "criterion") > .5'
+    policies = []
+    configurations = []
+    for ordinal, description in enumerate([None, "Public alias description"]):
+        root = tmp_path / str(ordinal)
+        root.mkdir()
+        model = _model()
+        if description is not None:
+            model["description"] = description
+        scanner = _scanner(root, adapter, models={"judge": model})
+        configurations.append(scanner.config.models["judge"].identity_dict())
+        policies.append(
+            compile_policy(
+                source,
+                runtime_config=scanner.config,
+                model_inference_backend=scanner.resource_manager.inference_backend,
+            )
+        )
+    data = {"messages": [{"role": "user", "content": "synthetic"}]}
+    results = [policy.scan(data, explain=True) for policy in policies]
+    assert all(result.is_complete for result in results)
+    assert configurations[0] == configurations[1]
+    assert results[0].policy_digest == results[1].policy_digest
+    assert adapter.calls == 1
+    assert "description" not in asdict(adapter.configurations[0])

@@ -517,6 +517,8 @@ class AtomEvidence:
             lines.append(f"    {result.operation}: {result.expression_value}")
             for _, model, reason in result.judge_reasons:
                 lines.append(f"    judge reason (untrusted, {model}): {reason}")
+            if result.omitted_judge_reasons:
+                lines.append(f"    … {result.omitted_judge_reasons} more judge reasons omitted")
         if self.note:
             lines.append(f"    note: {self.note}")
         return lines
