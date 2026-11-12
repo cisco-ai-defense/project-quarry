@@ -50,6 +50,7 @@ class Score:
 
 
 MAX_JUDGE_REASON_CHARS = 1024
+_UNSAFE_REASON_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +71,7 @@ class JudgeResult:
                 raise TypeError("judge reason must be text or None")
             if len(self.reason) > MAX_JUDGE_REASON_CHARS:
                 raise ValueError("judge reason exceeds its character limit")
-            if any(
-                unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in self.reason
-            ):
+            if any(unicodedata.category(char) in _UNSAFE_REASON_CATEGORIES for char in self.reason):
                 raise ValueError("judge reason must be a single line without control characters")
             object.__setattr__(self, "reason", self.reason.strip() or None)
 

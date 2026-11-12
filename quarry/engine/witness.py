@@ -39,7 +39,7 @@ scanner, or DSL layer.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -114,6 +114,7 @@ _MODEL_RESULTS_LIMIT = 16
 _WITNESS_STEPS_LIMIT = 16
 _MODEL_ALIASES_LIMIT = 8
 _MODEL_ARGUMENTS_LIMIT = 8
+MAX_JUDGE_REASONS = 8
 # Explanation bounds: atoms reported per rule, positions and excerpts per atom,
 # and patterns rendered in one atom's description.
 _MAX_OBSERVED_ATOMS = 24
@@ -187,7 +188,7 @@ class ModelResultEvidence:
         score_summary: dict[str, Any] | None = None,
         input_span: dict[str, Any] | None = None,
         refusals=(),
-        judge_reasons=(),
+        judge_reasons: Sequence[tuple[int, str, str]] = (),
         omitted_judge_reasons: int = 0,
     ) -> ModelResultEvidence:
         """Redact and cap caller-controlled strings, aliases, and arguments."""
@@ -211,10 +212,10 @@ class ModelResultEvidence:
             input_span=input_span,
             judge_reasons=tuple(
                 (ordinal, _excerpt(str(model)) or "", _excerpt(reason) or "")
-                for ordinal, model, reason in judge_reasons[:_MODEL_ALIASES_LIMIT]
+                for ordinal, model, reason in judge_reasons[:MAX_JUDGE_REASONS]
             ),
             omitted_judge_reasons=omitted_judge_reasons
-            + max(0, len(judge_reasons) - _MODEL_ALIASES_LIMIT),
+            + max(0, len(judge_reasons) - MAX_JUDGE_REASONS),
             refusals=tuple(
                 (_excerpt(str(model)) or "", operation_name, reason)
                 for model, operation_name, reason in refusals

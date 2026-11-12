@@ -89,6 +89,27 @@ class InputTokensConfig:
     model: str | None = None
 
 
+_MIN_EXPLANATION_TOKENS = 16
+_MAX_EXPLANATION_TOKENS = 4096
+
+
+def _explanation_token_budget(value: object, reasoning: int | None, owner: str) -> int:
+    """Validate explanation settings at both the mapping and direct configuration boundaries."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not _MIN_EXPLANATION_TOKENS <= value <= _MAX_EXPLANATION_TOKENS
+    ):
+        raise ValueError(
+            f"{owner} explanation max_tokens must be an integer from "
+            f"{_MIN_EXPLANATION_TOKENS} to {_MAX_EXPLANATION_TOKENS}"
+        )
+    if reasoning is not None:
+        raise ValueError(f"{owner} explanation and reasoning are mutually exclusive")
+    return value
+
+
 @dataclass(frozen=True)
 class ScoreConfig:
     """Prompt construction plus optional adapter-specific score settings."""
@@ -106,12 +127,10 @@ class ScoreConfig:
     explanation_max_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        budget = self.explanation_max_tokens
-        if budget is not None:
-            if isinstance(budget, bool) or not isinstance(budget, int) or not 16 <= budget <= 4096:
-                raise ValueError("score explanation max_tokens must be an integer from 16 to 4096")
-            if self.reasoning_max_tokens is not None:
-                raise ValueError("score explanation and reasoning are mutually exclusive")
+        if self.explanation_max_tokens is not None:
+            _explanation_token_budget(
+                self.explanation_max_tokens, self.reasoning_max_tokens, "score"
+            )
 
 
 @dataclass(frozen=True)
@@ -771,15 +790,9 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
         if not isinstance(explanation, dict):
             raise ValueError(f"{owner} explanation must be a mapping")
         _reject_unknown_fields(explanation, {"max_tokens"}, f"{owner} explanation")
-        explanation_max_tokens = explanation.get("max_tokens")
-        if (
-            isinstance(explanation_max_tokens, bool)
-            or not isinstance(explanation_max_tokens, int)
-            or not 16 <= explanation_max_tokens <= 4096
-        ):
-            raise ValueError(f"{owner} explanation max_tokens must be an integer from 16 to 4096")
-        if reasoning_max_tokens is not None:
-            raise ValueError(f"{owner} explanation and reasoning are mutually exclusive")
+        explanation_max_tokens = _explanation_token_budget(
+            explanation.get("max_tokens"), reasoning_max_tokens, owner
+        )
 
     return ScoreConfig(
         message_builder=_optional_string(fields, "message_builder", owner) or "constitution",
