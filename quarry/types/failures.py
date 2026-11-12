@@ -63,8 +63,12 @@ class ScanFailure:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "category", ScanFailureCategory(self.category))
-        if self.rule_name is not None and not isinstance(self.rule_name, str):
-            raise TypeError("failure rule_name must be a string or None")
+        if self.rule_name is not None:
+            if not issubclass(type(self.rule_name), str):
+                raise TypeError("failure rule_name must be a string or None")
+            # Preserve genuine string subclasses as plain wire text without invoking
+            # their overrides or accepting objects that spoof a string __class__.
+            object.__setattr__(self, "rule_name", str.__str__(self.rule_name))
 
     def to_dict(self) -> dict[str, str]:
         """Return stable JSON fields without copying arbitrary exception metadata."""

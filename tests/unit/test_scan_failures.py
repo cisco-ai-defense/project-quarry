@@ -24,6 +24,7 @@ from dataclasses import FrozenInstanceError
 from io import StringIO
 from pathlib import Path
 
+import orjson
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -575,3 +576,107 @@ def test_spoofed_category_value_in_real_mapping_stays_unknown(payload_serializer
     result.evaluation_error_categories = {"Check": FakeCategory()}
     assert result.failures == (ScanFailure(Category.UNKNOWN, "Check"),)
     assert_failure_serializers_agree(result, subject, plugin)
+
+
+@pytest.mark.parametrize("spoof_class", [True, False])
+def test_rule_name_rejects_non_strings_without_reading_class_attribute(spoof_class):
+    class FakeName:
+        @property
+        def __class__(self):
+            if spoof_class:
+                return str
+            pytest.fail("rule name validation must use the concrete runtime type")
+
+    with pytest.raises(TypeError, match="failure rule_name must be a string or None"):
+        ScanFailure(Category.MODEL, FakeName())
+
+
+def test_genuine_string_subclass_rule_names_serialize_as_plain_strings(payload_serializers):
+    class RuleName(str):
+        @property
+        def __class__(self):
+            pytest.fail("rule name normalization must not inspect a spoofable class attribute")
+
+        def __str__(self):
+            pytest.fail("rule name normalization must not execute a string override")
+
+    name = RuleName("Check Ω")
+    failure = ScanFailure(Category.TIMEOUT, name)
+    assert type(failure.rule_name) is str
+    assert failure.rule_name == "Check Ω"
+    assert orjson.loads(orjson.dumps(failure.to_dict())) == {
+        "category": "timeout",
+        "rule_name": "Check Ω",
+    }
+    result = result_with(timed_out_rules=[name])
+    assert result.failures == (failure,)
+    assert_failure_serializers_agree(result, *payload_serializers)
+
+
+@pytest.mark.parametrize(
+    "pretend_class",
+    [
+        QuarryTimeoutError,
+        TimeoutError,
+        EvaluationTimeoutError,
+        ConversationValidationError,
+        LLMError,
+        ModelError,
+        ResourceError,
+        ResourcePreparationError,
+        EvaluationError,
+    ],
+)
+def test_exception_category_ignores_spoofed_class_attributes(monkeypatch, pretend_class):
+    class FakeError(Exception):
+        @property
+        def __class__(self):
+            return pretend_class
+
+    error = FakeError("synthetic failure")
+    assert _failure_category(error) is Category.UNKNOWN
+
+    async def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("quarry.scanner.evaluate_async", fail)
+    result = scanner().scan_data(CONVERSATION)
+    assert result.failures == (ScanFailure(Category.UNKNOWN, "Check"),)
+
+
+@pytest.mark.parametrize(
+    "base,args,expected",
+    [
+        (QuarryTimeoutError, ("synthetic timeout",), Category.TIMEOUT),
+        (EvaluationTimeoutError, ("Check", 1), Category.TIMEOUT),
+        (ConversationValidationError, ("synthetic invalid input",), Category.INVALID_INPUT),
+        (LLMError, ("synthetic model failure",), Category.MODEL),
+        (ModelError, ("synthetic model failure",), Category.MODEL),
+        (ResourceError, ("synthetic resource failure",), Category.RESOURCE),
+        (ResourcePreparationError, ("synthetic resource failure", {}), Category.RESOURCE),
+        (EvaluationError, ("synthetic evaluation failure",), Category.EVALUATION),
+    ],
+)
+def test_exception_category_preserves_concrete_subclasses_without_reading_class_attribute(
+    base, args, expected
+):
+    class Derived(base):
+        @property
+        def __class__(self):
+            pytest.fail("exception classification must use the concrete runtime type")
+
+    assert _failure_category(Derived(*args)) is expected
+
+
+def test_documented_string_category_metadata_matches_public_annotations(payload_serializers):
+    result = ScanResult(
+        file_path=None,
+        rule_matches=[],
+        scan_time=0.0,
+        error="synthetic scan error",
+        error_category="resource",
+        evaluation_errors={"Check": "synthetic rule error"},
+        evaluation_error_categories={"Check": "model"},
+    )
+    assert result.failures == (ScanFailure(Category.RESOURCE), ScanFailure(Category.MODEL, "Check"))
+    assert_failure_serializers_agree(result, *payload_serializers)

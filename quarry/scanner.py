@@ -108,15 +108,16 @@ logger = get_app_logger()
 
 def _failure_category(error: Exception) -> ScanFailureCategory:
     """Classify a caught exception by trusted Python type, never by its text or details."""
-    if isinstance(error, QuarryTimeoutError | TimeoutError | EvaluationTimeoutError):
+    error_type = type(error)
+    if issubclass(error_type, QuarryTimeoutError | TimeoutError | EvaluationTimeoutError):
         return ScanFailureCategory.TIMEOUT
-    if isinstance(error, ConversationValidationError):
+    if issubclass(error_type, ConversationValidationError):
         return ScanFailureCategory.INVALID_INPUT
-    if isinstance(error, LLMError | ModelError):
+    if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL
-    if isinstance(error, ResourceError | ResourcePreparationError):
+    if issubclass(error_type, ResourceError | ResourcePreparationError):
         return ScanFailureCategory.RESOURCE
-    if isinstance(error, EvaluationError):
+    if issubclass(error_type, EvaluationError):
         return ScanFailureCategory.EVALUATION
     return ScanFailureCategory.UNKNOWN
 
@@ -1263,7 +1264,7 @@ class DSLScanner:
         outputs = {}
         rule_timings = {}
         evaluation_errors: dict[str, str] = {}
-        evaluation_error_categories: dict[str, ScanFailureCategory] = {}
+        evaluation_error_categories: dict[str, ScanFailureCategory | str] = {}
         paths = {}
         verdicts = []
 
@@ -1426,7 +1427,7 @@ class DSLScanner:
         # the WORST child: an invalid, truncated, skipped, or erroring conversation must block a
         # "complete" batch, or the batch fails open. Signals are conv-prefixed for provenance.
         agg_evaluation_errors: dict[str, str] = {}
-        agg_error_categories: dict[str, ScanFailureCategory] = {}
+        agg_error_categories: dict[str, ScanFailureCategory | str] = {}
         agg_skipped_rules: list[str] = []
         agg_timed_out_rules: list[str] = []
         agg_evaluation_warnings: list[str] = []

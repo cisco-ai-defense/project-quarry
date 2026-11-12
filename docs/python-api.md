@@ -90,8 +90,11 @@ caller constructs or updates a `ScanResult` directly. Optional `error_category` 
 metadata without its corresponding active error does not create a failure. Known enum
 members and category strings are accepted as attribution. Malformed or unrecognized supplied
 metadata projects to `unknown`, so mutable caller metadata cannot interrupt failure reporting.
-A missing per-rule category preserves the legacy `evaluation` default. Explicit `ScanFailure`
-construction validates its category and rejects invalid values.
+A missing per-rule category preserves the legacy `evaluation` default. Construct explicit
+`ScanFailure` records with a `ScanFailureCategory` member; construction validates its category
+and rejects invalid values. `rule_name` accepts actual strings and genuine string subclasses,
+which are normalized to plain string values for serialization. Runtime exception categories use actual inheritance, including
+genuine exception subclasses, rather than a caller-controlled `__class__` attribute.
 
 Batch aggregation retains both a child's top-level error category under `conv_N` and its
 per-rule categories under `conv_N:rule`. File `input_read` failures describe the read/decode

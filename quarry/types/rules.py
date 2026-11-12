@@ -103,8 +103,8 @@ class ScanResult:
 
     # Optional structured attribution for the existing error channels. These fields do
     # not independently make a scan fail; only the corresponding failure signal does.
-    error_category: ScanFailureCategory | None = field(default=None, kw_only=True)
-    evaluation_error_categories: dict[str, ScanFailureCategory] | None = field(
+    error_category: ScanFailureCategory | str | None = field(default=None, kw_only=True)
+    evaluation_error_categories: dict[str, ScanFailureCategory | str] | None = field(
         default=None, kw_only=True
     )
 
