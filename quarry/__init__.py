@@ -39,6 +39,7 @@ from quarry.types.exceptions import (
     RuleParseError,
     RuleValidationError,
 )
+from quarry.types.failures import ScanFailure, ScanFailureCategory
 from quarry.types.messages import (
     AssistantMessage,
     AudioPart,
@@ -55,7 +56,7 @@ from quarry.types.messages import (
     UserMessage,
 )
 from quarry.types.results import CollectionResult, ProducerRef, ResultItem, Score, Span
-from quarry.types.rules import ScanFailure, ScanFailureCategory, ScanResult
+from quarry.types.rules import ScanResult
 
 __all__ = [
     "__version__",

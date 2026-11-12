@@ -17,12 +17,12 @@
 """Rule related types."""
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from quarry.types.dsl import ConditionNode
 from quarry.types.exceptions import ConversationValidationError, IncompleteScanError
+from quarry.types.failures import ScanFailure, ScanFailureCategory
 from quarry.types.parameters import ParameterSpec
 from quarry.types.results import CollectionResult
 
@@ -31,47 +31,6 @@ from quarry.types.results import CollectionResult
 ScanCompletionState = Literal["complete", "invalid", "incomplete"]
 # False disables evidence, "support" captures match support, and True explores every atom.
 ExplainLevel = bool | Literal["support"]
-
-
-class ScanFailureCategory(StrEnum):
-    """Stable public scan-failure categories; diagnostic text is not a classifier."""
-
-    INVALID_INPUT = "invalid_input"
-    RULE_SELECTION = "rule_selection"
-    INPUT_READ = "input_read"
-    PREPARATION = "preparation"
-    MODEL = "model"
-    RESOURCE = "resource"
-    EVALUATION = "evaluation"
-    TIMEOUT = "timeout"
-    SKIPPED = "skipped"
-    TRUNCATED_INPUT = "truncated_input"
-    EVALUATION_LIMIT = "evaluation_limit"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class ScanFailure:
-    """One machine-readable failure, optionally attributed to a selected rule.
-
-    The record contains no exception text or provider details. Batch rule names use the
-    same ``conv_N:rule`` provenance as matches and evaluation errors.
-    """
-
-    category: ScanFailureCategory
-    rule_name: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "category", ScanFailureCategory(self.category))
-        if self.rule_name is not None and not isinstance(self.rule_name, str):
-            raise TypeError("failure rule_name must be a string or None")
-
-    def to_dict(self) -> dict[str, str]:
-        """Return stable JSON fields without copying arbitrary exception metadata."""
-        result = {"category": self.category.value}
-        if self.rule_name is not None:
-            result["rule_name"] = self.rule_name
-        return result
 
 
 @dataclass
