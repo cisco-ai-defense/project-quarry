@@ -39,6 +39,7 @@ from quarry.types.exceptions import (
     RuleParseError,
     RuleValidationError,
 )
+from quarry.types.failures import ScanFailure, ScanFailureCategory
 from quarry.types.messages import (
     AssistantMessage,
     AudioPart,
@@ -95,6 +96,8 @@ __all__ = [
     "Score",
     "ResultItem",
     "SafetyLimits",
+    "ScanFailure",
+    "ScanFailureCategory",
     "ScanResult",
     "Span",
     "compile_policy",
