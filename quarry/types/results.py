@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Generic, Protocol, TypeVar
 
@@ -46,6 +47,45 @@ class Score:
 
     def to_dict(self) -> dict[str, float]:
         return {"value": self.value}
+
+
+MAX_JUDGE_REASON_CHARS = 1024
+_UNSAFE_REASON_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+@dataclass(frozen=True, slots=True)
+class JudgeResult:
+    """A calibrated score and an optional, untrusted user-facing explanation.
+
+    A reason is generated answer text, never a verified justification or provider reasoning.
+    It may repeat sensitive input; callers decide whether it is appropriate to display.
+    """
+
+    score: float
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            score = Score(self.score).value
+        except OverflowError as exc:
+            raise ValueError("judge score must be finite and between 0 and 1") from exc
+        object.__setattr__(self, "score", score)
+        if self.reason is not None:
+            if not isinstance(self.reason, str):
+                raise TypeError("judge reason must be text or None")
+            # Normalize string subclasses before calling overridable operations such as
+            # len/iteration/strip. Their underlying text must satisfy the same contract.
+            reason = str.__str__(self.reason)
+            if len(reason) > MAX_JUDGE_REASON_CHARS:
+                raise ValueError("judge reason exceeds its character limit")
+            if any(unicodedata.category(char) in _UNSAFE_REASON_CATEGORIES for char in reason):
+                raise ValueError("judge reason must be a single line without control characters")
+            object.__setattr__(self, "reason", reason.strip() or None)
+
+    def to_dict(self) -> dict[str, float | str | None]:
+        """Return the JSON-ready result, with no provider metadata."""
+
+        return {"score": self.score, "reason": self.reason}
 
 
 @dataclass(frozen=True, slots=True)

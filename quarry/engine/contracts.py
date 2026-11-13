@@ -126,7 +126,9 @@ class ScanRecord:
 
     The caller owns it, so a check that fails or times out leaves the values computed
     before it. The verdict's decision path and the scan's other outputs are views of it.
-    It holds no conversation text, so a host can store it. Every scan records, so an entry
+    Engine records may carry explicitly requested generated explanations while explain
+    evidence is assembled. The scanner exports separate decision-path snapshots without
+    generated explanations, suitable for hosts to store. Every scan records, so an entry
     is kept as a plain tuple of the ``Observation`` fields, in field order, and becomes an
     ``Observation`` only when an output reads it.
     """

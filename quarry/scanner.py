@@ -51,7 +51,7 @@ from quarry.engine.executor import evaluate_async
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
-from quarry.engine.witness import build_evidence
+from quarry.engine.witness import ModelResultEvidence, build_evidence
 from quarry.integrations.collection import evaluate_collect_plan
 from quarry.integrations.model_expression import (
     ModelExpressionTrace,
@@ -1371,6 +1371,24 @@ class DSLScanner:
                 "rule_traces": rule_traces or None,
             }
 
+        def decision_path_records() -> dict[str, ScanRecord] | None:
+            # Explain evidence may include generated text. Public decision records are
+            # independently storable and retain only numeric/provenance evidence, including
+            # when an explanation and a decision path are requested together.
+            records: dict[str, ScanRecord] = {}
+            for name, record in paths.items():
+                entries = []
+                for *fields, observed_evidence in record.entries:
+                    if isinstance(observed_evidence, ModelResultEvidence) and (
+                        observed_evidence.judge_reasons or observed_evidence.omitted_judge_reasons
+                    ):
+                        observed_evidence = replace(
+                            observed_evidence, judge_reasons=(), omitted_judge_reasons=0
+                        )
+                    entries.append((*fields, observed_evidence))
+                records[name] = replace(record, entries=entries)
+            return records or None
+
         def scan_result(scan_time: float) -> ScanResult:
             return ScanResult(
                 file_path=file_path,
@@ -1388,7 +1406,7 @@ class DSLScanner:
                 if context.evaluation_warnings
                 else None,
                 outputs=outputs,
-                decision_paths=paths if paths else None,
+                decision_paths=decision_path_records(),
                 **evidence(),
             )
 
@@ -1400,7 +1418,7 @@ class DSLScanner:
             async def finish(result: ScanResult) -> ScanResult:
                 with scan_scope(scan):
                     await gather_evidence()
-                return replace(result, **evidence())
+                return replace(result, decision_paths=decision_path_records(), **evidence())
 
             deferred_evidence.append(finish)
             return scan_result((datetime.now() - start_time).total_seconds())

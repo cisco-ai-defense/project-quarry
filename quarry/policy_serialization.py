@@ -24,7 +24,7 @@ recompile source or attempt to prove that arbitrary input could have been compil
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, fields, is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
@@ -945,7 +945,7 @@ def _runtime_models(
     missing = sorted(required - set(configured))
     if missing:
         raise _fail("runtime configuration is missing models: " + ", ".join(missing))
-    return {name: _canonical_sha256(asdict(configured[name])) for name in sorted(required)}
+    return {name: _canonical_sha256(configured[name].identity_dict()) for name in sorted(required)}
 
 
 def load_compiled_policy(

@@ -55,7 +55,7 @@ from quarry.types.messages import (
     ToolMessage,
     UserMessage,
 )
-from quarry.types.results import CollectionResult, ProducerRef, ResultItem, Score, Span
+from quarry.types.results import CollectionResult, JudgeResult, ProducerRef, ResultItem, Score, Span
 from quarry.types.rules import ScanResult
 
 __all__ = [
@@ -85,6 +85,7 @@ __all__ = [
     "EvaluationTimeoutError",
     "IncompleteScanError",
     "LLMError",
+    "JudgeResult",
     "ModelError",
     "ModelInferenceBackend",
     "ProducerRef",
