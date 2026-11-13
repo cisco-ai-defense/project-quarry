@@ -167,6 +167,39 @@ _VERDICTS = [
         id="fullword-inside-a-word",
     ),
     pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "--force" fullword'),
+        _conv(_user("git push --force origin main")),
+        True,
+        id="fullword-starting-and-ending-with-punctuation",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "--force" fullword'),
+        _conv(_user("git push x--forcey")),
+        False,
+        id="fullword-punctuation-literal-inside-a-word",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "rm -rf /" fullword'),
+        _conv(_user("rm -rf /")),
+        True,
+        id="fullword-ending-in-punctuation-at-end-of-text",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "rm -rf /" fullword'),
+        _conv(_user("rm -rf /tmp/cache")),
+        False,
+        id="fullword-ending-in-punctuation-followed-by-a-word",
+    ),
+    pytest.param(
+        _rule(
+            "count([m for m in user_messages if m.content contains $w]) == 2",
+            '$w = "$HOME" fullword',
+        ),
+        _conv(_user("echo $HOME"), _user("cd $HOME/bin"), _user("echo x$HOME")),
+        True,
+        id="fullword-starting-with-punctuation",
+    ),
+    pytest.param(
         _rule("any m in user_messages where m.content contains $s", '$s = "secret" base64'),
         _conv(_user(f"payload {base64.b64encode(b'secret').decode()} end")),
         True,
