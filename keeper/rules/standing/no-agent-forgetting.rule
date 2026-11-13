@@ -1,0 +1,10 @@
+rule "Agent deleting the memory"
+metadata:
+    severity = "high"
+    description = "A tool call tried to delete rejections, bases or job records. Only Al clears the Keeper's memory."
+    plain = "The AI tried to erase the Keeper's notes. Only you can do that."
+strings:
+    $forget = ["keeper rejections forget", "forget_rejections"] nocase
+    $erase = "(?i)(rm|del|unlink|rmdir|remove|trash|shred)[^;&|]*(rejections|bases/|path[.]log|SUCCESS[.]md)" regex
+condition:
+    any call in tool_calls where $forget in call.arguments.* or $erase in call.arguments.*

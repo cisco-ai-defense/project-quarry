@@ -1,5 +1,7 @@
 # Project Quarry
 
+> **This fork adds the Keeper**, a guard and organizing system for AI agents built on Quarry. See [docs/KEEPER.md](docs/KEEPER.md).
+
 Project Quarry is a Python framework for detecting threats and behavior patterns in agent conversations. Write rules over messages, tool calls, tool results, and event order. You can also call a configured model adapter from a rule when local checks are not enough.
 
 Quarry parses and validates rules when you load them, then compiles each rule to a symbolic finite-state automaton. A scan runs that compiled program over the conversation. Rules that cannot compile fail during loading.

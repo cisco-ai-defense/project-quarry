@@ -1,0 +1,9 @@
+rule "In simple terms at the end"
+metadata:
+    severity = "low"
+    description = "A long reply (over 600 characters) must include an \"In simple terms\" part."
+    plain = "A long explanation was missing the plain-words summary."
+strings:
+    $simple = "in simple terms" nocase
+condition:
+    any msg in assistant_messages where len(msg.content) > 600 and not ($simple in msg.content)
