@@ -166,6 +166,7 @@ def format_results(
                 "matches": matches,
                 "scan_time": result.scan_time,
                 "completion_state": result.completion_state,
+                "failures": [failure.to_dict() for failure in result.failures],
                 "complete": result.is_complete,
                 "error": result.error,
                 "validation_error": result.validation_error,
@@ -205,6 +206,7 @@ def format_results(
                 "timed_out_rules",
                 "skipped_rules",
                 "evaluation_warnings",
+                "failures",
             ]
         )
 
@@ -220,6 +222,7 @@ def format_results(
                 orjson.dumps(result.evaluation_warnings).decode()
                 if result.evaluation_warnings
                 else "",
+                orjson.dumps([failure.to_dict() for failure in result.failures]).decode(),
             ]
             if result.rule_matches:
                 evidence_by_rule = {}
