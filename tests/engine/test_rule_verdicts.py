@@ -1311,6 +1311,34 @@ _VERDICTS = [
         True,
         id="position-arithmetic-bounds-the-distance",
     ),
+    # "İ".lower() is two code points, so nocase literal positions and captures must be
+    # mapped back to the original text, not read off the lower-cased copy.
+    pytest.param(
+        _rule(
+            "any m in user_messages where (@end - @start) < 20",
+            '$start = "start" nocase',
+            '$end = "end" nocase',
+        ),
+        _conv(_user("start İİİİİİİİİİ end")),
+        True,
+        id="position-arithmetic-nocase-across-expanding-lowercase",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where @kw == 2", '$kw = "secret" nocase'),
+        _conv(_user("İ SECRET")),
+        True,
+        id="position-absolute-nocase-after-expanding-lowercase",
+    ),
+    pytest.param(
+        _rule(
+            "any m in user_messages where ($k in m.content as tok) "
+            "and any r in tool_responses where r.content contains tok",
+            '$k = "api_key=" nocase',
+        ),
+        _conv(_user("İ API_KEY=abc"), _call("x"), _response("c1", "API_KEY=")),
+        True,
+        id="capture-nocase-after-expanding-lowercase",
+    ),
     pytest.param(
         _rule("any m in user_messages where #cmds >= 3", '$cmds = ["sudo", "rm"]'),
         _conv(_user("Run sudo and then sudo rm")),
