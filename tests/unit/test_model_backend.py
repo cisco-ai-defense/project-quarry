@@ -261,6 +261,7 @@ def test_a_completion_outside_the_limits_or_the_contract_is_refused(
         asyncio.run(backend.model_complete_message("gemma4", _INPUT, limits=SafetyLimits(**limits)))
 
     assert error.value.details == {"code": "invalid_output", "model": "gemma4"}
+    assert "Inference model 'gemma4'" in str(error.value)
 
 
 def _text_backend(tmp_path: Path, config_version: int, adapter) -> ModelInferenceBackend:
@@ -606,7 +607,7 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
 
     class FailingAdapter(ModelAdapter):
         async def classify_messages(self, config, messages, tools, *, timeout=None):
-            raise LLMError("physical-model rejected the request", {"code": "invalid_output"})
+            raise LLMError("adapter rejected the request", {"code": "invalid_output"})
 
     failing = _v2_backend(tmp_path, models, FailingAdapter())
     failures = await asyncio.gather(
@@ -615,11 +616,75 @@ async def test_one_aliases_exhausted_budget_or_failure_does_not_leak_into_anothe
         return_exceptions=True,
     )
 
-    # Each failure names its own alias, never the shared physical model.
-    assert [(failure.details, "physical-model" in str(failure)) for failure in failures] == [
-        ({"code": "invalid_output", "model": "exhausted"}, False),
-        ({"code": "invalid_output", "model": "available"}, False),
+    # Each reader names its own alias even though both aliases share one failed request.
+    assert [(failure.details, str(failure)) for failure in failures] == [
+        (
+            {"code": "invalid_output", "model": "exhausted"},
+            "Inference model 'exhausted' failed: adapter rejected the request",
+        ),
+        (
+            {"code": "invalid_output", "model": "available"},
+            "Inference model 'available' failed: adapter rejected the request",
+        ),
     ]
+
+    class NamedFailingAdapter(ModelAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            raise LLMError(
+                "physical-model rejected the request",
+                {"code": "invalid_output", "model": "physical-model"},
+            )
+
+    named_failing = _v2_backend(tmp_path, models, NamedFailingAdapter())
+    named_failures = await asyncio.gather(
+        named_failing.model_classify_messages("exhausted", shared),
+        named_failing.model_classify_messages("available", shared),
+        return_exceptions=True,
+    )
+
+    assert [(failure.details, str(failure)) for failure in named_failures] == [
+        (
+            {"code": "invalid_output", "model": "exhausted"},
+            "Inference model 'exhausted' failed: provider request failed",
+        ),
+        (
+            {"code": "invalid_output", "model": "available"},
+            "Inference model 'available' failed: provider request failed",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Inference model 'physical-private' failed: physical-private unavailable",
+        "Inference model 'safety' failed: physical-private unavailable",
+    ],
+    ids=["private-prefix", "public-prefix"],
+)
+async def test_alias_attribution_removes_private_model_names_from_the_whole_message(
+    tmp_path, message
+) -> None:
+    class LeakingAdapter(ModelAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            raise LLMError(
+                message,
+                {"code": "invalid_output", "model": "physical-private"},
+            )
+
+    backend = _v2_backend(
+        tmp_path,
+        {"safety": model_entry(classify=0, physical_model="physical-private")},
+        LeakingAdapter(),
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("safety", _INPUT, timeout=1.0)
+
+    assert raised.value.details == {"code": "invalid_output", "model": "safety"}
+    assert str(raised.value) == "Inference model 'safety' failed: provider request failed"
+    assert "physical-private" not in str(raised.value)
 
 
 def test_the_model_call_limit_is_per_configured_model_and_resets_every_scan(tmp_path) -> None:
@@ -871,7 +936,7 @@ async def test_a_slow_classification_times_out_under_its_alias_name(tmp_path) ->
         await backend.model_classify_messages("head", _INPUT, timeout=0.01)
 
     assert error.value.details == {"code": "timeout", "model": "head"}
-    assert "physical-model" not in str(error.value)
+    assert str(error.value) == "Inference model 'head' timed out"
 
 
 class _EventLimiter:
@@ -901,6 +966,39 @@ class _FailsOnceAdapter(ModelAdapter):
         if len(self.timeouts) == 1:
             raise LLMError("try again", {"code": "connection"})
         return await super().classify_messages(config, messages, tools, timeout=timeout)
+
+
+class _FailsThenHangsAdapter(ModelAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    async def classify_messages(self, config, messages, tools, *, timeout=None):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise LLMError("provider-controlled detail", {"code": "connection"})
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_backend_timeout_keeps_the_last_completed_retry_failure(tmp_path) -> None:
+    adapter = _FailsThenHangsAdapter()
+    backend = _v2_backend(tmp_path, {"guard": model_entry(classify=0)}, adapter)
+
+    with pytest.raises(LLMError) as raised:
+        await backend.model_classify_messages("guard", _INPUT, timeout=0.35)
+
+    assert adapter.attempts == 2
+    assert raised.value.details == {
+        "code": "timeout",
+        "model": "guard",
+        "last_failure": "connection",
+    }
+    assert str(raised.value) == (
+        "Inference model 'guard' ran out of time after 1 failed attempt; "
+        "last recorded failure: connection error"
+    )
+    assert "provider-controlled detail" not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -1781,3 +1879,30 @@ def test_a_schema_integer_keeps_its_exact_value(tmp_path) -> None:
     result = scanner.scan_data({"messages": [{"role": "user", "content": "check"}]})
 
     assert (result.rule_matches, result.is_complete) == (["Exact"], True)
+
+
+def test_an_external_media_url_fails_each_model_call_under_its_alias(tmp_path) -> None:
+    adapter = ModelAdapter()
+    image = {"type": "image_url", "image_url": {"url": "https://example.invalid/cat.png"}}
+    scanner = v2_scanner(
+        tmp_path,
+        {
+            "Score": 'model("scorer").score(messages, "Policy.") > 0.5',
+            "Complete": 'model("writer").complete(messages).content == "ok"',
+        },
+        {
+            "scorer": model_entry(score=True),
+            "writer": model_entry(physical_model="text-model"),
+        },
+        adapter,
+    )
+
+    result = scanner.scan_data({"messages": [{"role": "user", "content": [image]}]})
+
+    assert result.evaluation_errors == {
+        "Complete": "Inference model 'writer' failed: the conversation has a media URL that is "
+        "not inline",
+        "Score": "Inference model 'scorer' failed: the conversation has a media URL that is not "
+        "inline",
+    }
+    assert (adapter.score_calls, adapter.completions) == (0, 0)
