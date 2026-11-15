@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import base64 as _base64
 import re
-from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -166,7 +165,15 @@ def match_contains(
     Empty text or an empty pattern is a non-match, a fullword/regex/base64 pattern
     goes through the regex path, else a substring search (case-folded if ``nocase``).
     """
-    return find_position(text, pattern, mods, regex=regex) is not None
+    if not text or not pattern:
+        return False
+    effective, use_regex = apply_modifiers(pattern, mods)
+    if use_regex:
+        return regex.search_match(effective, text, _regex_flags(mods)) is not None
+    # A boolean check needs no offsets, so skip mapping them back to ``text``.
+    if mods.nocase:
+        return effective.lower() in text.lower()
+    return effective in text
 
 
 def match_contains_any(
@@ -210,13 +217,19 @@ def _literal_span(text: str, literal: str, nocase: bool) -> tuple[int, int] | No
     end = pos + len(needle)
     if len(lowered) == len(text):
         return pos, end
-    # starts[i] is where the lowered form of text[i] begins in ``lowered``.
-    starts: list[int] = []
+    # Walk ``text`` while tracking where each character's lowered form starts in
+    # ``lowered``, and stop as soon as the match end is mapped, so nothing past
+    # the match is visited or stored.
+    start = 0
     offset = 0
-    for char in text:
-        starts.append(offset)
-        offset += len(char.lower())
-    return bisect_right(starts, pos) - 1, bisect_left(starts, end)
+    for index, char in enumerate(text):
+        if offset >= end:
+            return start, index
+        width = len(char.lower())
+        if offset <= pos < offset + width:
+            start = index
+        offset += width
+    return start, len(text)
 
 
 def find_position(
