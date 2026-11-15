@@ -256,8 +256,10 @@ def test_a_capture_over_a_long_field_of_one_repeated_value_matches():
 
 
 async def _loop_turns_during(rule: str, messages: list[dict]) -> int:
-    """How many times a peer task runs while one scan evaluates ``rule`` over ``messages``."""
-    scanner = DSLScanner(QuarryConfig(quarry_rule_texts=(rule,)))
+    """Count peer turns during a complete scan, independently of rule deadlines."""
+    scanner = DSLScanner(
+        QuarryConfig(quarry_rule_texts=(rule,), safety_limits=SafetyLimits(rule_timeout=None))
+    )
     done = False
     turns = 0
 
@@ -270,7 +272,8 @@ async def _loop_turns_during(rule: str, messages: list[dict]) -> int:
     async def scan():
         nonlocal done
         try:
-            await scanner.scan_data_async({"messages": messages})
+            result = await scanner.scan_data_async({"messages": messages})
+            assert result.is_complete, result.completion_issues
         finally:
             done = True
 
