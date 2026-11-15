@@ -200,6 +200,20 @@ _VERDICTS = [
         id="fullword-starting-with-punctuation",
     ),
     pytest.param(
+        # Word characters are ASCII, as in RE2's \b and \B, so an adjacent
+        # non-ASCII letter does not count as touching the literal.
+        _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),
+        _conv(_user("caféñ")),
+        True,
+        id="fullword-non-ascii-letter-is-not-a-word-character",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),
+        _conv(_user("cafés")),
+        False,
+        id="fullword-ascii-letter-after-non-ascii-literal-end",
+    ),
+    pytest.param(
         _rule("any m in user_messages where m.content contains $s", '$s = "secret" base64'),
         _conv(_user(f"payload {base64.b64encode(b'secret').decode()} end")),
         True,
