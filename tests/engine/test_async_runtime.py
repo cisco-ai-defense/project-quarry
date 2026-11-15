@@ -32,7 +32,7 @@ import pytest
 
 from quarry import SafetyLimits
 from quarry.config import QuarryConfig
-from quarry.engine import pacing
+from quarry.engine import captures, pacing
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.scanner import DSLScanner
@@ -292,11 +292,6 @@ _CAPTURE_A = (
     [
         pytest.param(_CAPTURE_A, [_user("a" * 1_000_000)], id="one-value-repeated-a-million-times"),
         pytest.param(
-            _CAPTURE_A,
-            [_user("a"), *[_assistant("z" * 100)] * 9_000],
-            id="one-value-against-many-reference-sites",
-        ),
-        pytest.param(
             'any m in user_messages where m.content contains "q"',
             [_user("b")] * 10_000,
             id="a-long-conversation",
@@ -315,6 +310,22 @@ async def test_a_long_evaluation_shares_the_event_loop(condition, messages, monk
     # The same scan over one short message is the baseline: whatever the scanner itself awaits.
     rule = _rule(condition, '$a = "a" regex')
     baseline = await _loop_turns_during(rule, [_user("b")])
+    assert await _loop_turns_during(rule, messages) > baseline + 10
+
+
+async def test_a_capture_reference_check_shares_the_event_loop(monkeypatch):
+    monkeypatch.setattr(pacing, "INTERVAL", 0.0)
+    original = captures.iter_capture_values
+
+    def without_capture_pauses(*args, **kwargs):
+        kwargs["pause"] = None
+        return original(*args, **kwargs)
+
+    # Capture-enumeration pauses must not hide missing pauses in the reference check.
+    monkeypatch.setattr(captures, "iter_capture_values", without_capture_pauses)
+    rule = _rule(_CAPTURE_A, '$a = "a" regex')
+    baseline = await _loop_turns_during(rule, [_user("b")])
+    messages = [_user("a"), *[_assistant("z" * 100)] * 9_000]
     assert await _loop_turns_during(rule, messages) > baseline + 10
 
 
