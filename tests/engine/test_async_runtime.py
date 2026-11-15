@@ -32,6 +32,7 @@ import pytest
 
 from quarry import SafetyLimits
 from quarry.config import QuarryConfig
+from quarry.engine import pacing
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.scanner import DSLScanner
@@ -304,7 +305,10 @@ _CAPTURE_A = (
         ),
     ],
 )
-async def test_a_long_evaluation_shares_the_event_loop(condition, messages):
+async def test_a_long_evaluation_shares_the_event_loop(condition, messages, monkeypatch):
+    # Request a pause at each pacing check so peer progress depends on cooperative
+    # evaluation, rather than how much work this machine can finish in a millisecond.
+    monkeypatch.setattr(pacing, "INTERVAL", 0.0)
     # The same scan over one short message is the baseline: whatever the scanner itself awaits.
     rule = _rule(condition, '$a = "a" regex')
     baseline = await _loop_turns_during(rule, [_user("b")])
