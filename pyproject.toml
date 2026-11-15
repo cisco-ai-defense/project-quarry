@@ -55,7 +55,7 @@ inference = [
     "boto3==1.43.123",
     "httpx==0.28.1",
     "jsonschema==4.26.0",
-    "litellm==1.109.1",
+    "litellm>=1.109.1,<2.0.0",
     "anyio>=4.14.2",
     "certifi>=2026.10.19",
     "filelock>=4.2.1",
