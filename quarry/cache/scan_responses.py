@@ -49,6 +49,8 @@ class ScanResponses:
         self._leases = 0
         self._generation = 0
         self._replies: dict[tuple[int, bytes], _Reply] = {}
+        # Revisions invalidate outstanding offers without retaining rejected raw replies.
+        self._revisions: dict[tuple[int, bytes], int] = {}
 
     def retain(self) -> bool:
         if self.pid != os.getpid():
@@ -62,15 +64,18 @@ class ScanResponses:
     def release(self) -> None:
         if self.pid != os.getpid():
             return
-        removed = None
+        removed = revisions = None
         with self._lock:
             self._leases -= 1
             assert self._leases >= 0
             if not self._leases:
                 removed, self._replies = self._replies, {}
+                revisions, self._revisions = self._revisions, {}
         # Dropping a user reply can run its destructor. Never do so under our lock.
         if removed is not None:
             removed.clear()
+        if revisions is not None:
+            revisions.clear()
 
     def generation(self) -> int | None:
         if self.pid != os.getpid():
@@ -78,24 +83,33 @@ class ScanResponses:
         with self._lock:
             return self._generation if self._leases else None
 
-    def acquire(self, namespace: Any, key: bytes, generation: int) -> _Reply | None:
+    def acquire(
+        self, namespace: Any, key: bytes, generation: int
+    ) -> tuple[_Reply | None, int | None]:
         if self.pid != os.getpid():
-            return None
+            return None, None
         with self._lock:
             if not self._leases or self._generation != generation:
-                return None
-            entry = self._replies.get((id(namespace), key))
+                return None, None
+            identity = (id(namespace), key)
+            entry = self._replies.get(identity)
             if entry is not None:
                 entry.readers += 1
-            return entry
+            return entry, self._revisions.get(identity, 0)
 
-    def offer(self, namespace: Any, key: bytes, response: Any, generation: int) -> _Reply | None:
+    def offer(
+        self, namespace: Any, key: bytes, response: Any, generation: int, revision: int | None
+    ) -> _Reply | None:
         if self.pid != os.getpid():
             return None
         with self._lock:
             if not self._leases or self._generation != generation:
                 return None
             identity = (id(namespace), key)
+            if revision is None or self._revisions.get(identity, 0) != revision:
+                # A shared provider waiter may resume after another reader rejected its
+                # physical reply. It can validate its result, but cannot pin it again.
+                return None
             entry = self._replies.get(identity)
             if entry is None:
                 # Keeping the namespace prevents its id being reused during this scan.
@@ -114,6 +128,7 @@ class ScanResponses:
                 identity = (id(entry.namespace), entry.key)
                 if self._replies.get(identity) is entry:
                     del self._replies[identity]
+                    self._revisions[identity] = self._revisions.get(identity, 0) + 1
 
     def finish(self, entry: _Reply, generation: int, accepted: bool) -> None:
         if self.pid != os.getpid():
@@ -175,15 +190,15 @@ class ResponseReader:
             scope, generation = self._scope, self._generation
             cache = self._cache
             assert cache is not None
-            entry = (
+            entry, revision = (
                 scope.acquire(cache, self._key, generation)
                 if scope is not None and generation is not None
-                else None
+                else (None, None)
             )
             if entry is None:
                 response = await cache.call(self._key, func, *args, **kwargs)
                 if scope is not None and generation is not None:
-                    entry = scope.offer(cache, self._key, response, generation)
+                    entry = scope.offer(cache, self._key, response, generation, revision)
             else:
                 response = entry.response
             if entry is not None:

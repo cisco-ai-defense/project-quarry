@@ -698,3 +698,57 @@ async def test_classifier_aliases_read_their_own_heads_from_one_accepted_physica
         assert await backend.model_classify_messages("right", messages) == 0.8
         assert budget.calls_by_alias == {"left": 2}
     assert adapter.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_accepted", [False, True])
+async def test_late_shared_waiter_cannot_offer_a_rejected_physical_reply_again(
+    monkeypatch, newer_accepted, no_collection
+):
+    cache = AsyncFunctionCache.expiring(max_entries=2, ttl_seconds=60, max_bytes=1)
+    started, release_provider, release_late = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls, references = [], []
+    late_task = None
+    original = cache.call
+
+    async def request():
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            await release_provider.wait()
+        reply = Reply(len(calls))
+        references.append(weakref.ref(reply))
+        return reply
+
+    async def pause_late_waiter(*args, **kwargs):
+        reply = await original(*args, **kwargs)
+        if asyncio.current_task() is late_task:
+            await release_late.wait()
+        return reply
+
+    def reject(_reply):
+        raise ValueError("first head rejected")
+
+    monkeypatch.setattr(cache, "call", pause_late_waiter)
+    with scan_scope() as token:
+        first = asyncio.create_task(read(cache, b"k", request, reject))
+        await started.wait()
+        late_task = asyncio.create_task(read(cache, b"k", request, lambda reply: reply.value))
+        while cache.store[b"k"].waiters != 2:
+            await asyncio.sleep(0)
+        release_provider.set()
+        with pytest.raises(ValueError, match="first head rejected"):
+            await first
+        del first
+        assert not cache.store
+        if newer_accepted:
+            assert await read(cache, b"k", request, lambda reply: reply.value) == 2
+        release_late.set()
+        assert await late_task == 1
+        late_task = None
+        await drain()
+        # Rejection bookkeeping must not keep the rejected object alive.
+        assert references[0]() is None
+        assert await read(cache, b"k", request, lambda reply: reply.value) == 2
+        assert await read(cache, b"k", request, lambda reply: reply.value) == 2
+    assert calls == [1, 1] and token.generation() is None
