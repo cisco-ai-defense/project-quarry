@@ -819,6 +819,31 @@ def _view_source_texts(transcript: Messages, view: Messages) -> list[SourceText]
 async def _span_source_texts(
     text_source, context, event, environment, trace, regex_backend
 ) -> list[SourceText]:
+    if text_source.kind == "call_texts":
+        calls = await evaluate_model_expression(
+            text_source.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if calls is MISSING or calls is None:
+            return []
+        if isinstance(calls, ToolCall):
+            calls = (calls,)
+        elif not isinstance(calls, list | tuple):
+            raise TypeError("a string's call spans require a tool call or tool-call list")
+        positions = _conversation_positions(context.conversation.messages)
+        texts = []
+        for call in calls:
+            if not isinstance(call, ToolCall) or id(call) not in positions:
+                raise ValueError("a string's call spans require calls of the scanned input")
+            texts.extend(
+                SourceText(text, Place(positions[id(call)], name, 0, call), call.message_index)
+                for name, text in call.texts()
+            )
+        return texts
     if text_source.kind == "span_text":
         owner = await evaluate_model_expression(
             text_source.children[0],
