@@ -32,6 +32,7 @@ import pytest
 
 from quarry import SafetyLimits
 from quarry.config import QuarryConfig
+from quarry.engine import captures, pacing
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.scanner import DSLScanner
@@ -255,8 +256,10 @@ def test_a_capture_over_a_long_field_of_one_repeated_value_matches():
 
 
 async def _loop_turns_during(rule: str, messages: list[dict]) -> int:
-    """How many times a peer task runs while one scan evaluates ``rule`` over ``messages``."""
-    scanner = DSLScanner(QuarryConfig(quarry_rule_texts=(rule,)))
+    """Count peer turns during a complete scan, independently of rule deadlines."""
+    scanner = DSLScanner(
+        QuarryConfig(quarry_rule_texts=(rule,), safety_limits=SafetyLimits(rule_timeout=None))
+    )
     done = False
     turns = 0
 
@@ -269,7 +272,8 @@ async def _loop_turns_during(rule: str, messages: list[dict]) -> int:
     async def scan():
         nonlocal done
         try:
-            await scanner.scan_data_async({"messages": messages})
+            result = await scanner.scan_data_async({"messages": messages})
+            assert result.is_complete, result.completion_issues
         finally:
             done = True
 
@@ -288,11 +292,6 @@ _CAPTURE_A = (
     [
         pytest.param(_CAPTURE_A, [_user("a" * 1_000_000)], id="one-value-repeated-a-million-times"),
         pytest.param(
-            _CAPTURE_A,
-            [_user("a"), *[_assistant("z" * 100)] * 9_000],
-            id="one-value-against-many-reference-sites",
-        ),
-        pytest.param(
             'any m in user_messages where m.content contains "q"',
             [_user("b")] * 10_000,
             id="a-long-conversation",
@@ -304,10 +303,29 @@ _CAPTURE_A = (
         ),
     ],
 )
-async def test_a_long_evaluation_shares_the_event_loop(condition, messages):
+async def test_a_long_evaluation_shares_the_event_loop(condition, messages, monkeypatch):
+    # Request a pause at each pacing check so peer progress depends on cooperative
+    # evaluation, rather than how much work this machine can finish in a millisecond.
+    monkeypatch.setattr(pacing, "INTERVAL", 0.0)
     # The same scan over one short message is the baseline: whatever the scanner itself awaits.
     rule = _rule(condition, '$a = "a" regex')
     baseline = await _loop_turns_during(rule, [_user("b")])
+    assert await _loop_turns_during(rule, messages) > baseline + 10
+
+
+async def test_a_capture_reference_check_shares_the_event_loop(monkeypatch):
+    monkeypatch.setattr(pacing, "INTERVAL", 0.0)
+    original = captures.iter_capture_values
+
+    def without_capture_pauses(*args, **kwargs):
+        kwargs["pause"] = None
+        return original(*args, **kwargs)
+
+    # Capture-enumeration pauses must not hide missing pauses in the reference check.
+    monkeypatch.setattr(captures, "iter_capture_values", without_capture_pauses)
+    rule = _rule(_CAPTURE_A, '$a = "a" regex')
+    baseline = await _loop_turns_during(rule, [_user("b")])
+    messages = [_user("a"), *[_assistant("z" * 100)] * 9_000]
     assert await _loop_turns_during(rule, messages) > baseline + 10
 
 

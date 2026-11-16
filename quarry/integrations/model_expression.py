@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, field
+from types import MethodType
 from typing import Any, cast
 
 from quarry.engine.atoms import ModelExpression
@@ -38,7 +39,7 @@ from quarry.engine.matchers import (
     truth,
 )
 from quarry.engine.pacing import Pacer
-from quarry.engine.witness import ModelResultEvidence
+from quarry.engine.witness import MAX_JUDGE_REASONS, ModelResultEvidence
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
 from quarry.types.messages import Messages
@@ -82,6 +83,17 @@ class ModelExpressionTrace:
     # Per split chunk, whether its score call was refused, so a fallback value is not
     # presented as a measured score.
     split_refused: list[bool] | None = None
+    # Explicit user-facing explanations only; never provider private reasoning.
+    judge_reasons: list[tuple[int, str, str]] = field(default_factory=list)
+    omitted_judge_reasons: int = 0
+
+    def add_judge_reason(self, ordinal: int, alias: str, reason: str) -> None:
+        """Retain reasons in evaluation order with one shared bound for calls and chunks."""
+
+        if len(self.judge_reasons) < MAX_JUDGE_REASONS:
+            self.judge_reasons.append((ordinal, alias, reason))
+        else:
+            self.omitted_judge_reasons += 1
 
 
 def _finite(value: Any) -> Any:
@@ -329,6 +341,10 @@ async def evaluate_model_expression(
             result = any(truth(value) for value in values)
             if trace is not None:
                 for child_trace in child_traces:
+                    offset = len(trace.calls)
+                    for ordinal, alias, reason in child_trace.judge_reasons:
+                        trace.add_judge_reason(offset + ordinal, alias, reason)
+                    trace.omitted_judge_reasons += child_trace.omitted_judge_reasons
                     trace.calls.extend(child_trace.calls)
                     trace.refusals.extend(child_trace.refusals)
                     for parameter in child_trace.parameters:
@@ -599,16 +615,33 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
 
     if operation == "score":
         messages, constitution, *optional = arguments
-        result = _finite(
-            await backend.model_score_messages(
-                alias,
-                constitution,
-                messages,
-                optional[0] if optional else None,
-                timeout=context.limits.rule_timeout,
+        # Legacy/custom backends keep their numeric contract. The built-in backend can
+        # retain the same request's explicitly enabled explanation for explain evidence.
+        from quarry.integrations.model_inference import ModelInferenceBackend
+
+        numeric = backend.model_score_messages
+        tools = optional[0] if optional else None
+        reason = None
+        if (
+            trace is not None
+            and isinstance(backend, ModelInferenceBackend)
+            and isinstance(numeric, MethodType)
+            and numeric.__func__ is ModelInferenceBackend.model_score_messages
+            and isinstance(backend.model_judge_messages, MethodType)
+            and backend.model_judge_messages.__func__ is ModelInferenceBackend.model_judge_messages
+        ):
+            judged = await backend.model_judge_messages(
+                alias, constitution, messages, tools, timeout=context.limits.rule_timeout
             )
-        )
+            result, reason = judged.score, judged.reason
+        else:
+            result = await numeric(
+                alias, constitution, messages, tools, timeout=context.limits.rule_timeout
+            )
+        result = _finite(result)
         _record_call(trace, context, expression, alias, operation, arguments, result)
+        if trace is not None and reason is not None:
+            trace.add_judge_reason(len(trace.calls) - 1, alias, reason)
         return result
     if operation == "classify":
         messages, *optional = arguments
@@ -792,6 +825,8 @@ def build_model_result_evidence(
         source_path=getattr(event, "source_path", None),
         input_span=trace.input_span if trace.split_scores is None else None,
         refusals=trace.refusals,
+        judge_reasons=trace.judge_reasons,
+        omitted_judge_reasons=trace.omitted_judge_reasons,
     )
 
 

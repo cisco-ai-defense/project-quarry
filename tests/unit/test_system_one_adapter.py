@@ -346,9 +346,19 @@ def _alias(tmp_path, models):
         (_Httpx(status=503), "provider_unavailable"),
         (_Httpx(error="TimeoutException"), "timeout"),
         (_Httpx(error="TransportError"), "connection"),
-        (_Httpx(status=401), "provider_error"),
+        (_Httpx(status=401), "authentication"),
+        (_Httpx(status=404), "model_not_found"),
+        (_Httpx(status=400), "bad_request"),
     ],
-    ids=["status-429", "status-503", "timeout", "transport", "status-401"],
+    ids=[
+        "status-429",
+        "status-503",
+        "timeout",
+        "transport",
+        "status-401",
+        "status-404",
+        "status-400",
+    ],
 )
 def test_provider_failures_become_coded_errors(tmp_path, httpx, fake, code) -> None:
     httpx(fake)
@@ -511,5 +521,5 @@ def test_a_rejected_request_leaves_the_scan_incomplete_without_its_body(
     ).scan_data(_CONVERSATION)
 
     assert (result.rule_matches, result.is_complete) == ([], False)
-    assert "status 400" in result.evaluation_errors["R"]
+    assert result.evaluation_errors["R"] == "System One rejected the request as invalid"
     assert "echoed request content" not in str(vars(result))
