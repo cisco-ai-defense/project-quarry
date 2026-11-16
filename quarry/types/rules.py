@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from quarry.types.dsl import ConditionNode
 from quarry.types.exceptions import ConversationValidationError, IncompleteScanError
+from quarry.types.failures import ScanFailure, ScanFailureCategory, _category_from_metadata
 from quarry.types.parameters import ParameterSpec
 from quarry.types.results import CollectionResult
 
@@ -99,6 +100,53 @@ class ScanResult:
     # Per decomposed rule, the decision-tree checks the scan grounded, even when the rule
     # timed out or raised. Concrete values are ``quarry.engine.contracts.ScanRecord``.
     decision_paths: dict[str, Any] | None = None
+
+    # Optional structured attribution for the existing error channels. These fields do
+    # not independently make a scan fail; only the corresponding failure signal does.
+    error_category: ScanFailureCategory | str | None = field(default=None, kw_only=True)
+    evaluation_error_categories: dict[str, ScanFailureCategory | str] | None = field(
+        default=None, kw_only=True
+    )
+
+    @property
+    def failures(self) -> tuple[ScanFailure, ...]:
+        """All active failure categories, in deterministic completion-signal order.
+
+        Derived on access so manually constructed and subsequently updated legacy results
+        retain the same fail-closed semantics. Unknown exceptions remain ``unknown``.
+        """
+        failures: list[ScanFailure] = []
+        if self.validation_error is not None:
+            failures.append(ScanFailure(ScanFailureCategory.INVALID_INPUT))
+        elif self.error is not None:
+            failures.append(ScanFailure(_category_from_metadata(self.error_category)))
+        for name in self.evaluation_errors or ():
+            category = self._evaluation_failure_category(name)
+            failures.append(ScanFailure(category, name))
+        failures.extend(
+            ScanFailure(ScanFailureCategory.TIMEOUT, name) for name in self.timed_out_rules or ()
+        )
+        failures.extend(
+            ScanFailure(ScanFailureCategory.SKIPPED, name) for name in self.skipped_rules or ()
+        )
+        if self.was_truncated:
+            failures.append(ScanFailure(ScanFailureCategory.TRUNCATED_INPUT))
+        if self.evaluation_warnings:
+            failures.append(ScanFailure(ScanFailureCategory.EVALUATION_LIMIT))
+        return tuple(failures)
+
+    def _evaluation_failure_category(self, rule_name: str) -> ScanFailureCategory:
+        """Resolve optional mutable attribution without changing the failure signal."""
+        categories = self.evaluation_error_categories
+        if categories is None:
+            return ScanFailureCategory.EVALUATION
+        if not issubclass(type(categories), dict):
+            return ScanFailureCategory.UNKNOWN
+        # A supplied malformed value is unknown; an absent value preserves the legacy
+        # evaluation category. Bypass overrides on caller-supplied dict subclasses.
+        return _category_from_metadata(
+            dict.get(categories, rule_name, ScanFailureCategory.EVALUATION)
+        )
 
     @property
     def detailed_matches(self) -> list[Any] | None:

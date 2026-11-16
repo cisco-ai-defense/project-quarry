@@ -19,7 +19,7 @@
 import os
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
@@ -41,6 +41,9 @@ DEFAULT_INFERENCE_ADAPTER = "litellm"
 
 # A System One choice question accepts at most 255 options.
 MAX_CLASSIFY_LABELS = 255
+
+# Model descriptions are returned by the plugin reference tool, so bound each configured value.
+MAX_MODEL_DESCRIPTION_LENGTH = 500
 
 # Configuration blocks holding named text resources, each mapping a name to the text or {file: path}.
 # 'texts' is the general name; 'judge_prompts' is what the same block was called first. Both load
@@ -89,6 +92,27 @@ class InputTokensConfig:
     model: str | None = None
 
 
+_MIN_EXPLANATION_TOKENS = 16
+_MAX_EXPLANATION_TOKENS = 4096
+
+
+def _explanation_token_budget(value: object, reasoning: int | None, owner: str) -> int:
+    """Validate explanation settings at both the mapping and direct configuration boundaries."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not _MIN_EXPLANATION_TOKENS <= value <= _MAX_EXPLANATION_TOKENS
+    ):
+        raise ValueError(
+            f"{owner} explanation max_tokens must be an integer from "
+            f"{_MIN_EXPLANATION_TOKENS} to {_MAX_EXPLANATION_TOKENS}"
+        )
+    if reasoning is not None:
+        raise ValueError(f"{owner} explanation and reasoning are mutually exclusive")
+    return value
+
+
 @dataclass(frozen=True)
 class ScoreConfig:
     """Prompt construction plus optional adapter-specific score settings."""
@@ -102,6 +126,14 @@ class ScoreConfig:
     # With a budget, the model reasons before it answers, ending on ``ANSWER: <token>``,
     # instead of answering with the token alone.
     reasoning_max_tokens: int | None = None
+    # A short user-facing explanation, separately opted into from private reasoning.
+    explanation_max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.explanation_max_tokens is not None:
+            _explanation_token_budget(
+                self.explanation_max_tokens, self.reasoning_max_tokens, "score"
+            )
 
 
 @dataclass(frozen=True)
@@ -147,6 +179,18 @@ class InferenceModelConfig:
     classify: ClassifyConfig | None = None
     spans: SpanConfig | None = None
     complete: CompleteConfig | None = None
+
+    def identity_dict(self) -> dict[str, object]:
+        """Canonical model configuration, retaining pre-explanation policy identity.
+
+        Disabled optional explanation generation has exactly the old configuration shape.
+        An enabled budget remains part of policy and served-model fingerprints.
+        """
+
+        document = asdict(self)
+        if self.score is not None and self.score.explanation_max_tokens is None:
+            document["score"].pop("explanation_max_tokens")
+        return document
 
 
 def _default_llm_rate_limits() -> dict[str, RateLimitConfig]:
@@ -253,11 +297,11 @@ class QuarryConfig:
     """Configuration for rules and integrations.
 
     Deeply immutable after construction: rule paths and texts are tuples, and models,
-    prompts, and rate-limit definitions are read-only mappings of frozen values. One
-    configuration graph is built once and safely shared by reference across parallel work.
-    Per-scan variants come from ``dataclasses.replace`` changing only the rule source,
-    which shares the immutable models/prompts/limits by identity. Mutable runtime services
-    (the shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
+    descriptions, prompts, and rate-limit definitions are read-only mappings of frozen values.
+    One configuration graph is built once and safely shared by reference across parallel work.
+    Per-scan variants come from ``dataclasses.replace`` changing only the rule source, which
+    shares the immutable models/descriptions/prompts/limits by identity. Mutable runtime
+    services (the shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
     """
 
     quarry_rules_paths: tuple[Path, ...] = ()
@@ -272,6 +316,9 @@ class QuarryConfig:
 
     safety_limits: SafetyLimits | None = None
     models: Mapping[str, InferenceModelConfig] = field(default_factory=dict)
+    # Human-facing purpose of each alias. Kept outside ``models`` so rewording does not change
+    # provider requests, cache keys, or a compiled policy's model digest.
+    model_descriptions: Mapping[str, str] = field(default_factory=dict)
     model_cache: ModelCacheConfig = field(default_factory=ModelCacheConfig)
 
     quarry_rule_texts: tuple[str, ...] = ()
@@ -296,6 +343,19 @@ class QuarryConfig:
         object.__setattr__(self, "quarry_rules_paths", _frozen_tuple(self.quarry_rules_paths))
         object.__setattr__(self, "quarry_rule_texts", _frozen_tuple(self.quarry_rule_texts))
         object.__setattr__(self, "models", _frozen_mapping(self.models))
+        object.__setattr__(self, "model_descriptions", _frozen_mapping(self.model_descriptions))
+        # Validate here, not only while parsing a mapping: hosts may construct or replace the
+        # config directly, and descriptions are included in plugin reference responses.
+        for model_name, description in self.model_descriptions.items():
+            if not isinstance(description, str) or not description:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' description must be a non-empty string"
+                )
+            if len(description) > MAX_MODEL_DESCRIPTION_LENGTH:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' description must be at most "
+                    f"{MAX_MODEL_DESCRIPTION_LENGTH} characters"
+                )
         object.__setattr__(self, "judge_prompts", _frozen_mapping(self.judge_prompts))
         object.__setattr__(self, "llm_rate_limits", _frozen_mapping(self.llm_rate_limits))
 
@@ -387,11 +447,15 @@ class QuarryConfig:
             raise ValueError("Config must specify at least one Quarry rule path in 'rules' field")
 
         models: dict[str, InferenceModelConfig] = {}
+        model_descriptions: dict[str, str] = {}
         if "models" in document and document["models"]:
             for model_name, model_data in document["models"].items():
                 if not isinstance(model_data, dict):
                     raise ValueError(f"Model '{model_name}' config must be a mapping")
                 models[model_name] = _parse_inference_model(model_name, model_data)
+                description = model_data.get("description")
+                if description is not None:
+                    model_descriptions[model_name] = description
                 if config_version == 1 and models[model_name].complete is not None:
                     raise ValueError(
                         f"Inference model '{model_name}' complete is only supported by "
@@ -474,6 +538,7 @@ class QuarryConfig:
             config_version=config_version,
             quarry_rules_paths=rules_paths,
             models=models,
+            model_descriptions=model_descriptions,
             judge_prompts=judge_prompts,
             llm_rate_limits=llm_rate_limits,
             safety_limits=safety_limits,
@@ -542,6 +607,7 @@ def _parse_inference_model(
     _reject_unknown_fields(
         data,
         {
+            "description",
             "adapter",
             "model",
             "endpoint",
@@ -691,7 +757,15 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
     fields: dict[object, object] = dict(value)
     _reject_unknown_fields(
         fields,
-        {"message_builder", "boundary_seed", "tokens", "extraction", "calibration", "reasoning"},
+        {
+            "message_builder",
+            "boundary_seed",
+            "tokens",
+            "extraction",
+            "calibration",
+            "reasoning",
+            "explanation",
+        },
         owner,
     )
 
@@ -735,6 +809,16 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
         ):
             raise ValueError(f"{owner} reasoning max_tokens must be an integer of at least 16")
 
+    explanation_max_tokens = None
+    if "explanation" in fields:
+        explanation = fields["explanation"]
+        if not isinstance(explanation, dict):
+            raise ValueError(f"{owner} explanation must be a mapping")
+        _reject_unknown_fields(explanation, {"max_tokens"}, f"{owner} explanation")
+        explanation_max_tokens = _explanation_token_budget(
+            explanation.get("max_tokens"), reasoning_max_tokens, owner
+        )
+
     return ScoreConfig(
         message_builder=_optional_string(fields, "message_builder", owner) or "constitution",
         boundary_seed=boundary_seed,
@@ -745,6 +829,7 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
             _optional_string(fields, "calibration", owner), owner
         ),
         reasoning_max_tokens=reasoning_max_tokens,
+        explanation_max_tokens=explanation_max_tokens,
     )
 
 

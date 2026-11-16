@@ -51,7 +51,7 @@ from quarry.engine.executor import evaluate_async
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.matchers import truth
 from quarry.engine.oracle import Grounded
-from quarry.engine.witness import build_evidence
+from quarry.engine.witness import ModelResultEvidence, build_evidence
 from quarry.integrations.collection import evaluate_collect_plan
 from quarry.integrations.model_expression import (
     ModelExpressionTrace,
@@ -60,7 +60,7 @@ from quarry.integrations.model_expression import (
 )
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.rate_limiter import LLMRateLimiter
-from quarry.integrations.resources import ResourceManager
+from quarry.integrations.resources import ResourceManager, ResourcePreparationError
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
@@ -88,17 +88,38 @@ from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
     ConversationValidationError,
+    EvaluationError,
+    EvaluationTimeoutError,
+    LLMError,
     ModelError,
+    ResourceError,
     RuleCompatibilityError,
     RuleLoadError,
     RuleValidationError,
 )
+from quarry.types.failures import ScanFailureCategory, _category_from_metadata
 from quarry.types.messages import Messages, ToolCallTypeRegistry
 from quarry.types.parameters import ParameterValue
 from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+def _failure_category(error: Exception) -> ScanFailureCategory:
+    """Classify a caught exception by trusted Python type, never by its text or details."""
+    error_type = type(error)
+    if issubclass(error_type, QuarryTimeoutError | TimeoutError | EvaluationTimeoutError):
+        return ScanFailureCategory.TIMEOUT
+    if issubclass(error_type, ConversationValidationError):
+        return ScanFailureCategory.INVALID_INPUT
+    if issubclass(error_type, LLMError | ModelError):
+        return ScanFailureCategory.MODEL
+    if issubclass(error_type, ResourceError | ResourcePreparationError):
+        return ScanFailureCategory.RESOURCE
+    if issubclass(error_type, EvaluationError):
+        return ScanFailureCategory.EVALUATION
+    return ScanFailureCategory.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -1026,6 +1047,7 @@ class DSLScanner:
                     rule_matches=[],
                     scan_time=(datetime.now() - start_time).total_seconds(),
                     error=f"Rule selection error: {reason}",
+                    error_category=ScanFailureCategory.RULE_SELECTION,
                 )
 
         messages = data.get("messages", [])
@@ -1056,6 +1078,8 @@ class DSLScanner:
                 rule_matches=[],
                 scan_time=(datetime.now() - start_time).total_seconds(),
                 error=f"Conversation preparation failed: {diagnostic}",
+                error_category=ScanFailureCategory.PREPARATION,
+                evaluation_error_categories={"conversation_preparation": _failure_category(e)},
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
@@ -1072,6 +1096,7 @@ class DSLScanner:
                 rule_matches=[],
                 scan_time=(datetime.now() - start_time).total_seconds(),
                 error=f"Tool argument validation timed out: {e}",
+                error_category=ScanFailureCategory.TIMEOUT,
             )
         except ConversationValidationError as e:
             message = str(e)
@@ -1239,6 +1264,7 @@ class DSLScanner:
         outputs = {}
         rule_timings = {}
         evaluation_errors: dict[str, str] = {}
+        evaluation_error_categories: dict[str, ScanFailureCategory | str] = {}
         paths = {}
         verdicts = []
 
@@ -1256,6 +1282,7 @@ class DSLScanner:
                 # that raised produced no trustworthy verdict, so the scan is incomplete and
                 # a guard must be able to fail closed on it.
                 evaluation_errors[rule_name] = str(res["error"])
+                evaluation_error_categories[rule_name] = _failure_category(res["error"])
                 continue
 
             verdicts.append(res)
@@ -1344,6 +1371,24 @@ class DSLScanner:
                 "rule_traces": rule_traces or None,
             }
 
+        def decision_path_records() -> dict[str, ScanRecord] | None:
+            # Explain evidence may include generated text. Public decision records are
+            # independently storable and retain only numeric/provenance evidence, including
+            # when an explanation and a decision path are requested together.
+            records: dict[str, ScanRecord] = {}
+            for name, record in paths.items():
+                entries = []
+                for *fields, observed_evidence in record.entries:
+                    if isinstance(observed_evidence, ModelResultEvidence) and (
+                        observed_evidence.judge_reasons or observed_evidence.omitted_judge_reasons
+                    ):
+                        observed_evidence = replace(
+                            observed_evidence, judge_reasons=(), omitted_judge_reasons=0
+                        )
+                    entries.append((*fields, observed_evidence))
+                records[name] = replace(record, entries=entries)
+            return records or None
+
         def scan_result(scan_time: float) -> ScanResult:
             return ScanResult(
                 file_path=file_path,
@@ -1355,12 +1400,13 @@ class DSLScanner:
                 timed_out_rules=timed_out_rules if timed_out_rules else None,
                 skipped_rules=None,
                 evaluation_errors=evaluation_errors if evaluation_errors else None,
+                evaluation_error_categories=evaluation_error_categories or None,
                 rule_timings=rule_timings if rule_timings else None,
                 evaluation_warnings=context.evaluation_warnings
                 if context.evaluation_warnings
                 else None,
                 outputs=outputs,
-                decision_paths=paths if paths else None,
+                decision_paths=decision_path_records(),
                 **evidence(),
             )
 
@@ -1372,7 +1418,7 @@ class DSLScanner:
             async def finish(result: ScanResult) -> ScanResult:
                 with scan_scope(scan):
                     await gather_evidence()
-                return replace(result, **evidence())
+                return replace(result, decision_paths=decision_path_records(), **evidence())
 
             deferred_evidence.append(finish)
             return scan_result((datetime.now() - start_time).total_seconds())
@@ -1399,6 +1445,7 @@ class DSLScanner:
         # the WORST child: an invalid, truncated, skipped, or erroring conversation must block a
         # "complete" batch, or the batch fails open. Signals are conv-prefixed for provenance.
         agg_evaluation_errors: dict[str, str] = {}
+        agg_error_categories: dict[str, ScanFailureCategory | str] = {}
         agg_skipped_rules: list[str] = []
         agg_timed_out_rules: list[str] = []
         agg_evaluation_warnings: list[str] = []
@@ -1451,13 +1498,17 @@ class DSLScanner:
                 # A child that failed whole-conversation validation never ran: record it so the
                 # batch cannot report complete. (The batch itself ran, so it is INCOMPLETE, not
                 # INVALID — that state is reserved for a batch that could not run at all.)
-                if result.validation_error:
+                if result.validation_error is not None:
                     agg_evaluation_errors[label] = (
                         f"invalid conversation: {result.validation_error}"
                     )
+                    agg_error_categories[label] = ScanFailureCategory.INVALID_INPUT
                 if result.evaluation_errors:
                     for rule_name, message in result.evaluation_errors.items():
                         agg_evaluation_errors[f"{label}:{rule_name}"] = message
+                        agg_error_categories[f"{label}:{rule_name}"] = (
+                            result._evaluation_failure_category(rule_name)
+                        )
                 if result.was_truncated:
                     batch_was_truncated = True
                     if result.truncation_info:
@@ -1470,8 +1521,11 @@ class DSLScanner:
                         f"{label}: {warning}" for warning in result.evaluation_warnings
                     )
 
-                if result.error:
+                if result.error is not None:
                     errors.append(f"Conversation {i + 1}: {result.error}")
+                    if result.validation_error is None:
+                        agg_evaluation_errors[label] = result.error
+                        agg_error_categories[label] = _category_from_metadata(result.error_category)
 
                 if result.timed_out_rules:
                     agg_timed_out_rules.extend(f"{label}:{rule}" for rule in result.timed_out_rules)
@@ -1482,6 +1536,7 @@ class DSLScanner:
                 # An unexpected per-conversation failure is a non-authoritative result; make sure
                 # it also blocks a complete batch even if nothing else set a completion signal.
                 agg_evaluation_errors[label] = str(e)
+                agg_error_categories[label] = _failure_category(e)
 
         avg_timings = {}
         for rule_name, timings in aggregated_timings.items():
@@ -1501,6 +1556,7 @@ class DSLScanner:
             timed_out_rules=agg_timed_out_rules or None,
             skipped_rules=agg_skipped_rules or None,
             evaluation_errors=agg_evaluation_errors or None,
+            evaluation_error_categories=agg_error_categories or None,
             rule_timings=avg_timings if avg_timings else None,
             evaluation_warnings=agg_evaluation_warnings or None,
             explanations=all_evidence or None,
@@ -1516,16 +1572,26 @@ class DSLScanner:
             with open(json_path, "rb") as f:
                 data = orjson.loads(f.read())
 
-            if self.batch_mode and isinstance(data, list):
-                return self.scan_batch_data(data, json_path, enable_explain)
-            else:
-                return self.scan_data(data, json_path, enable_explain)
         except Exception as e:
             return ScanResult(
                 file_path=json_path,
                 rule_matches=[],
                 scan_time=(datetime.now() - start_time).total_seconds(),
                 error=str(e),
+                error_category=ScanFailureCategory.INPUT_READ,
+            )
+
+        try:
+            if self.batch_mode and isinstance(data, list):
+                return self.scan_batch_data(data, json_path, enable_explain)
+            return self.scan_data(data, json_path, enable_explain)
+        except Exception as e:
+            return ScanResult(
+                file_path=json_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=str(e),
+                error_category=_failure_category(e),
             )
 
     def scan_directory(

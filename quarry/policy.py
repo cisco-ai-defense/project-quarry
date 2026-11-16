@@ -24,7 +24,7 @@ import hmac
 import json
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -65,7 +65,7 @@ def _referenced_model_configuration(scanner: DSLScanner, required: set[str]) -> 
 
     backend = scanner.resource_manager.model_inference_backend
     models = backend.models if backend is not None else scanner.config.models
-    return {name: asdict(models[name]) for name in sorted(required)}
+    return {name: models[name].identity_dict() for name in sorted(required)}
 
 
 def _hmac_sha256(key: bytes, value: str) -> str:
