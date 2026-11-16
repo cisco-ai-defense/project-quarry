@@ -53,7 +53,7 @@ import re
 from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import groupby
+from itertools import groupby, repeat
 
 
 @dataclass(frozen=True)
@@ -243,7 +243,7 @@ def matching_patterns(
     """Yield distinct spans with the pattern indexes that matched each range."""
 
     streams = [
-        ((span, index) for span in match_spans(text, pattern, mods, regex=regex))
+        zip(match_spans(text, pattern, mods, regex=regex), repeat(index))
         for index, (pattern, mods) in enumerate(patterns)
     ]
     for span, matched in groupby(heapq.merge(*streams), key=lambda pair: pair[0]):

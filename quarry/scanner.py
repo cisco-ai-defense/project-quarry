@@ -52,7 +52,11 @@ from quarry.engine.contracts import CompiledRuleArtifact, ScanRecord
 from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
 from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
-from quarry.engine.flow_requirements import clock_feeds_settled, cross_source_flow_has_candidates
+from quarry.engine.flow_requirements import (
+    clock_feeds_settled,
+    cross_source_flow_has_candidates,
+    flows_settled,
+)
 from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.oracle import Grounded
@@ -1679,7 +1683,16 @@ class DSLScanner:
                         raise ConversationValidationError(
                             "The conversation does not carry " + ", ".join(sorted(missing))
                         )
-                    if timeline_fault is not None and artifact.orders_input_items:
+                    if (
+                        timeline_fault is not None
+                        and artifact.orders_input_items
+                        and not flows_settled(
+                            artifact,
+                            scan_input(True, False),
+                            RE2_REGEX,
+                            raise_if_evaluation_expired,
+                        )
+                    ):
                         raise ConversationValidationError(timeline_fault)
                     if (
                         timeline_entries is None
