@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from quarry.engine.atoms import AtomDomain, is_per_tool_static
@@ -172,6 +172,9 @@ class ModelResultEvidence:
     refusals: tuple[tuple[str, str, str], ...] = ()
     judge_reasons: tuple[tuple[int, str, str], ...] = ()
     omitted_judge_reasons: int = 0
+    # Logical calls include calls without a reason, so composed evidence can rebase
+    # retained ordinals without guessing from the bounded reason list. Omitted by to_dict.
+    _call_count: int = field(default=0, repr=False, compare=False)
 
     @classmethod
     def bounded(
@@ -190,6 +193,7 @@ class ModelResultEvidence:
         refusals=(),
         judge_reasons: Sequence[tuple[int, str, str]] = (),
         omitted_judge_reasons: int = 0,
+        call_count: int = 0,
     ) -> ModelResultEvidence:
         """Redact and cap caller-controlled strings, aliases, and arguments."""
 
@@ -216,6 +220,7 @@ class ModelResultEvidence:
             ),
             omitted_judge_reasons=omitted_judge_reasons
             + max(0, len(judge_reasons) - MAX_JUDGE_REASONS),
+            _call_count=call_count,
             refusals=tuple(
                 (_excerpt(str(model)) or "", operation_name, reason)
                 for model, operation_name, reason in refusals

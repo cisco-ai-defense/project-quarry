@@ -84,6 +84,9 @@ def requirements_from_artifact(artifact) -> dict[str, set[Any]]:
         collect(artifact.collect_plan.local_predicate)
         if artifact.collect_plan.model_predicate is not None:
             collect(artifact.collect_plan.model_predicate)
+    for check in artifact.split_checks.values():
+        for name, needed in requirements_from_artifact(check).items():
+            requirements[name].update(needed)
     return requirements
 
 

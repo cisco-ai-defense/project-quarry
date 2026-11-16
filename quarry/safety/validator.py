@@ -266,8 +266,10 @@ def _is_model_expression_root(node: ConditionNode) -> bool:
     expression reads ``join()`` and a map comprehension, so the compiler also types their
     fields, and it rejects every other use of them with a dedicated message."""
 
-    return isinstance(node, ModelCall | MapComprehension) or (
-        isinstance(node, FunctionCall) and node.name == "join"
+    return (
+        (isinstance(node, AnyComprehension) and node.variable.startswith("\x00composed"))
+        or isinstance(node, ModelCall | MapComprehension)
+        or (isinstance(node, FunctionCall) and node.name == "join")
     )
 
 
