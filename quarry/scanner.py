@@ -819,7 +819,7 @@ class DSLScanner:
                     nested_ctx.extension_event_sequence = tuple(
                         item for _, item in rule_ctx.ordered_timeline if id(item) in extension_ids
                     )
-                    if check.flow_requirements and selected.shares_root_with(
+                    if check.orders_input_items and selected.shares_root_with(
                         rule_ctx.conversation.messages
                     ):
                         positions = {
@@ -855,6 +855,9 @@ class DSLScanner:
                     raise ConversationValidationError(
                         "The input timeline cannot order a derived messages check"
                     )
+                # A called rule has the same model-input preflight as a top-level
+                # rule, against the actual selected conversation.
+                self._reject_out_of_range_dynamic_indexes(check, nested_ctx.conversation)
                 nested_detector = self._make_async_detector(
                     nested_ctx,
                     artifact=check,

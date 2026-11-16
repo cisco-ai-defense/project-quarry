@@ -373,8 +373,26 @@ async def evaluate_model_expression(
     if kind == "as_messages":
         # A conversation message where messages are expected: the view of the conversation that
         # holds only that message, or none when the message does not exist.
+        selected = expression.children[0]
+        if selected.kind == "index":
+            # Keep the owning view: its offsets can differ from root ordinals,
+            # and a constructed transcript has its own root entirely.
+            source = await evaluate_model_expression(
+                selected.children[0],
+                context,
+                event=event,
+                bindings=environment,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+            if not isinstance(source, Messages):
+                raise TypeError("a message promotion requires a Messages source")
+            index = int(cast(int, selected.value))
+            if index < 0:
+                index += len(source)
+            return source[index : index + 1] if 0 <= index < len(source) else source[0:0]
         message = await evaluate_model_expression(
-            expression.children[0],
+            selected,
             context,
             event=event,
             bindings=environment,
@@ -384,7 +402,15 @@ async def evaluate_model_expression(
         transcript = context.conversation.messages
         if message is MISSING:
             return transcript[0:0]
-        return transcript[message.message_index : message.message_index + 1]
+        if not isinstance(message, Message):
+            raise TypeError("a message promotion requires a message")
+        ordinal = message.message_index
+        if (
+            not transcript._contains_root_ordinal(ordinal)
+            or transcript._message_at(ordinal) is not message
+        ):
+            raise ValueError("a promoted message is not present in the current transcript")
+        return transcript._select_ordinals((ordinal,))
     if kind == "slice":
         base = await evaluate_model_expression(
             expression.children[0],
