@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 # Compiler-8 records per-flow clocks so extension events cannot change a
 # conversation-only bounded flow. Saved compiler-7 artifacts must be recompiled
 # from rule source; the loader cannot migrate their serialized automata.
-COMPILER_VERSION = "compiler-8"
+# Compiler-9 keeps scalar aliases forward-scoped and prevents later aliases
+# from capturing earlier alias values. Compiler-8 policies require recompilation.
+COMPILER_VERSION = "compiler-9"
 
 
 @dataclass(frozen=True, slots=True)

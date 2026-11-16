@@ -244,7 +244,7 @@ class Desugarer:
         return C.Pred(node, binding.var, binding.surface)
 
     def _unaliased(self, node) -> list:
-        """Inline values named with ``as`` throughout one ``and`` chain."""
+        """Inline ``as`` values in subsequent clauses of one ``and`` chain."""
 
         parts: list = []
         pending = [node]
@@ -254,11 +254,13 @@ class Desugarer:
                 pending.extend((current.right, current.left))
             else:
                 parts.append(current)
-        index = 0
-        while index < len(parts):
+        # Expand from the right so a later declaration cannot capture names in
+        # an earlier alias's value when that value is inserted at a later use.
+        index = len(parts) - 1
+        while index >= 0:
             alias = self._t.scalar_alias(parts[index])
             if alias is None:
-                index += 1
+                index -= 1
                 continue
             var, expr = alias
             del parts[index]
@@ -270,7 +272,10 @@ class Desugarer:
                 raise UnsupportedConstruct(
                     f"`as {var}` names two values in one `and`; give each its own name"
                 )
-            parts = [self._t.substitute_identifier(part, var, expr) for part in parts]
+            parts[index:] = [
+                self._t.substitute_identifier(part, var, expr) for part in parts[index:]
+            ]
+            index -= 1
         return parts
 
     def join(self, node, scope) -> C.Formula | None:

@@ -34,6 +34,8 @@ Use `any` and `all` comprehensions to inspect collections. String declarations s
 
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
+A value alias such as `(user_messages as messages)` applies to subsequent clauses in its `and` chain. Earlier clauses keep their original meaning, and a later alias cannot change the value named by an earlier alias. Called rules keep their own alias scope. Compiler 9 enforces these rules; saved compiler-8 policies require recompilation from rule source.
+
 ```text
 rule "Repeated shell requests"
 condition:
