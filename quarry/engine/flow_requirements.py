@@ -87,6 +87,19 @@ def _settled(requirement, static_value) -> bool:
     ) or any(static_value(formula) is True for formula in requirement.static_sustained)
 
 
+def flows_settled(
+    artifact: CompiledRuleArtifact,
+    evaluation_input: EvaluationInput,
+    regex_backend: RegexBackend,
+    check_deadline: Callable[[], None],
+) -> bool:
+    """Whether every flow is decided without reading the timeline."""
+
+    check_deadline()
+    _, static_value = _static_values(artifact, evaluation_input, regex_backend, check_deadline)
+    return all(_settled(requirement, static_value) for requirement in artifact.flow_requirements)
+
+
 def clock_feeds_settled(
     artifact: CompiledRuleArtifact,
     missing: frozenset[str],
