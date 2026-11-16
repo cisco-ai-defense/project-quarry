@@ -51,6 +51,7 @@ from quarry.config import QuarryConfig
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import Complexity, Severity, ValidationWarning, validate_rules
 from quarry.scanner import DSLScanner
+from quarry.telemetry import models_called
 from quarry.types.results import CollectionResult, Span
 from quarry.types.rules import ScanResult
 
@@ -165,6 +166,12 @@ def format_results(
                 "file": str(result.file_path),
                 "matches": matches,
                 "scan_time": result.scan_time,
+                "timings": {
+                    "total_seconds": result.scan_time,
+                    "rules": dict(sorted((result.rule_timings or {}).items())),
+                },
+                "model_usage": result.model_usage,
+                "models_called": models_called(result.model_usage),
                 "completion_state": result.completion_state,
                 "failures": [failure.to_dict() for failure in result.failures],
                 "complete": result.is_complete,
@@ -207,10 +214,17 @@ def format_results(
                 "skipped_rules",
                 "evaluation_warnings",
                 "failures",
+                "timings",
+                "model_usage",
+                "models_called",
             ]
         )
 
         for result in results:
+            timing_summary = {
+                "total_seconds": result.scan_time,
+                "rules": dict(sorted((result.rule_timings or {}).items())),
+            }
             completion_cells = [
                 result.completion_state,
                 result.validation_error or "",
@@ -223,6 +237,9 @@ def format_results(
                 if result.evaluation_warnings
                 else "",
                 orjson.dumps([failure.to_dict() for failure in result.failures]).decode(),
+                orjson.dumps(timing_summary).decode(),
+                orjson.dumps(result.model_usage).decode(),
+                orjson.dumps(models_called(result.model_usage)).decode(),
             ]
             if result.rule_matches:
                 evidence_by_rule = {}

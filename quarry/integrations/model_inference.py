@@ -49,6 +49,7 @@ from quarry.integrations.model_usage import ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError, clamp_to_evaluation_deadline
+from quarry.telemetry import ModelOperation, public_model_operation
 from quarry.types.exceptions import (
     MODEL_REFUSED,
     ConfigurationError,
@@ -2049,6 +2050,7 @@ class ModelInferenceBackend:
                     model_id,
                     rate_limit_model,
                     lambda attempt_timeout: send(model, *arguments, timeout=attempt_timeout),
+                    operation_name=public_model_operation(method),
                     timeout=timeout,
                 )
             except LLMError as exc:
@@ -2144,6 +2146,7 @@ class ModelInferenceBackend:
         rate_limit_model: str,
         operation: Callable[[float | None], Awaitable[Any]],
         *,
+        operation_name: ModelOperation,
         timeout: float | None,
     ) -> Any:
         """Run one logical model call and normalize its final provider failure."""
@@ -2153,6 +2156,7 @@ class ModelInferenceBackend:
                 rate_limit_model,
                 operation,
                 budget_alias=model_id,
+                operation_name=operation_name,
                 timeout=timeout,
             )
         except LLMError as exc:

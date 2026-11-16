@@ -31,6 +31,7 @@ from unittest.mock import ANY
 
 import pytest
 
+from quarry.cache.async_cache import result_cache
 from quarry.config import QuarryConfig
 from quarry.integrations import model_inference
 from quarry.language.compatibility import MAX_COMPATIBILITY_RECORDS
@@ -186,6 +187,21 @@ class _PendingScoreAdapter:
         except asyncio.CancelledError:
             self.cancelled.set()
             raise
+
+
+class _SharedScoreAdapter:
+    """Hold one successful score call so a second scan can share it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def score(self, _config, _messages, *, timeout=None):
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return 0.8
 
 
 def _plugin(
@@ -404,6 +420,132 @@ async def test_scan_returns_no_visualization_unless_requested():
     assert "visualization" not in batch
     assert "visualization" not in batch["compilation"]
     assert "visualization" not in batch["results"][0]
+
+
+async def test_local_scan_telemetry_is_present_in_single_and_batch_modes():
+    plugin = QuarryPlugin()
+
+    single = await plugin.scan(rule_text=FLOW_RULE, conversation=MATCHING_CONVERSATION)
+    batch = await plugin.scan(
+        rule_text=FLOW_RULE,
+        conversations=[MATCHING_CONVERSATION, CLEAN_CONVERSATION],
+    )
+
+    assert single["timings"]["total_seconds"] >= 0.0
+    assert list(single["timings"]["rules"]) == ["File data sent"]
+    assert single["model_usage"] == {"calls": 0, "records": [], "truncated": False}
+    assert single["models_called"] == []
+    assert batch["timings"]["total_seconds"] >= 0.0
+    assert batch["model_usage"] == {"calls": 0, "records": [], "truncated": False}
+    assert batch["models_called"] == []
+    assert all(
+        item["model_usage"] == {"calls": 0, "records": [], "truncated": False}
+        and item["models_called"] == []
+        for item in batch["results"]
+    )
+
+
+async def test_model_usage_counts_aliases_operations_and_cached_calls_once(tmp_path, monkeypatch):
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _AliasScoreAdapter(),
+        {alias: {**SCORE_MODEL, "model": f"{alias}-v1"} for alias in ("fail", "pass")},
+    )
+    rule = _rule(
+        'model("fail").score(messages, "first check") > 0.5 '
+        'or model("pass").score(messages, "second check") > 0.5'
+    )
+    conversation = _users("telemetry cache sample")
+
+    batch = await plugin.scan(
+        rule_text=rule,
+        conversations=[conversation, conversation],
+    )
+
+    assert batch["model_usage"] == {
+        "calls": 2,
+        "records": [
+            {"model": "fail", "operation": "score", "calls": 1},
+            {"model": "pass", "operation": "score", "calls": 1},
+        ],
+        "truncated": False,
+    }
+    assert batch["models_called"] == ["fail", "pass"]
+    assert [item["model_usage"]["calls"] for item in batch["results"]] == [2, 0]
+    assert batch["results"][1]["models_called"] == []
+
+
+async def test_only_the_scan_that_starts_a_shared_call_counts_it(tmp_path, monkeypatch):
+    adapter = _SharedScoreAdapter()
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        {"judge": {**SCORE_MODEL, "model": "judge-v1"}},
+    )
+    arguments = {
+        "rule_text": _rule('model("judge").score(messages, "shared check") > 0.5'),
+        "conversation": _users("shared telemetry sample"),
+        "explain": False,
+    }
+    joined = asyncio.Event()
+    waits = 0
+    original_wait = result_cache._wait
+
+    async def observed_wait(pending):
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            joined.set()
+        return await original_wait(pending)
+
+    monkeypatch.setattr(result_cache, "_wait", observed_wait)
+
+    first = asyncio.create_task(plugin.scan(**arguments))
+    await adapter.started.wait()
+    second = asyncio.create_task(plugin.scan(**arguments))
+    await asyncio.wait_for(joined.wait(), timeout=5)
+    adapter.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert adapter.calls == 1
+    assert first_result["model_usage"] == {
+        "calls": 1,
+        "records": [{"model": "judge", "operation": "score", "calls": 1}],
+        "truncated": False,
+    }
+    assert second_result["model_usage"] == {
+        "calls": 0,
+        "records": [],
+        "truncated": False,
+    }
+
+
+async def test_deferred_evidence_model_call_is_included_in_usage(tmp_path, monkeypatch):
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _ScoreAdapter(),
+        {"judge": {**SCORE_MODEL, "model": "judge-v1"}},
+    )
+    rule = _rule(
+        '(any m in user_messages where m.content contains "LOCAL") '
+        'or model("judge").score(messages, "off path check") > 0.5'
+    )
+
+    result = await plugin.scan(
+        rule_text=rule,
+        conversation=_users("LOCAL result"),
+        explore_rate=1.0,
+    )
+
+    assert result["model_usage"] == {
+        "calls": 1,
+        "records": [{"model": "judge", "operation": "score", "calls": 1}],
+        "truncated": False,
+    }
+    assert result["models_called"] == ["judge"]
 
 
 async def test_compact_batch_keeps_verdicts_and_full_restores_details():
@@ -1357,6 +1499,7 @@ async def test_a_scan_retries_a_shared_call_another_scan_started(tmp_path, monke
 
     assert [result["completion_state"] for result in results] == ["incomplete", "complete"]
     assert adapter.calls == 2
+    assert [result["model_usage"]["calls"] for result in results] == [1, 1]
 
 
 async def test_compatibility_model_calls_share_the_servers_results(tmp_path, monkeypatch):
@@ -1649,6 +1792,12 @@ async def test_a_failing_check_leaves_the_checks_before_it_on_the_path(tmp_path,
     assert result["completion_state"] == "incomplete"
     assert [step["outcome"] for step in result["decision_path"]["path"]] == [True]
     assert result["decision_path"]["leaf"] is None
+    assert result["model_usage"] == {
+        "calls": 1,
+        "records": [{"model": "guard", "operation": "score", "calls": 1}],
+        "truncated": False,
+    }
+    assert result["timings"]["rules"]["r"] >= 0.0
 
 
 async def test_cancelling_a_scan_cancels_the_pending_model_call(tmp_path, monkeypatch):

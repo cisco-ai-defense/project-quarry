@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
@@ -41,7 +42,7 @@ class _SlowAdapter:
         return classification(0.02, 0.98)
 
 
-def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits):
+def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits, limiter=None):
     config = QuarryConfig.from_mapping(
         {
             "config_version": 2,
@@ -57,7 +58,7 @@ def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits):
         require_rules=False,
     )
     config = replace(config, quarry_rule_texts=tuple(rules))
-    backend = ModelInferenceBackend(config, adapters={"fake": adapter})
+    backend = ModelInferenceBackend(config, adapters={"fake": adapter}, rate_limiter=limiter)
     return DSLScanner(config, model_inference_backend=backend, limits=limits)
 
 
@@ -120,16 +121,108 @@ def test_concurrent_scans_have_isolated_timeouts(tmp_path) -> None:
     assert (fast.rule_matches, fast.timed_out_rules) == (["m"], None)
 
 
-def test_fail_on_timeout_raises_instead_of_reporting(tmp_path) -> None:
+@pytest.mark.parametrize("api", ["sync", "async"])
+def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api) -> None:
+    adapter = _SlowAdapter(0.5)
     scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
-        adapter=_SlowAdapter(0.5),
+        adapter=adapter,
         limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
     )
 
-    with pytest.raises(QuarryTimeoutError):
+    with pytest.raises(QuarryTimeoutError, match="Rule m timeout") as exc_info:
+        if api == "sync":
+            scanner.scan_data(_ATTACK)
+        else:
+            asyncio.run(scanner.scan_data_async(_ATTACK))
+
+    partial = exc_info.value.scan_result
+    assert str(exc_info.value) == "Rule m timeout"
+    assert adapter.calls == partial.model_usage["calls"] == 1
+    assert partial.model_usage["records"] == [{"model": "pi", "operation": "classify", "calls": 1}]
+    assert partial.rule_timings["m"] >= 0.0
+
+
+def test_expired_scan_deadline_raises_with_zero_predispatch_usage(tmp_path) -> None:
+    adapter = _SlowAdapter(0.5)
+    scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=adapter,
+        limits=SafetyLimits(rule_timeout=5.0, fail_on_timeout=True),
+    )
+
+    with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded") as exc_info:
+        asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=0))
+
+    assert adapter.calls == 0
+    assert exc_info.value.scan_result.model_usage == {
+        "calls": 0,
+        "records": [],
+        "truncated": False,
+    }
+
+
+class _BlockingLimiter:
+    def __init__(self) -> None:
+        self.waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def limit(self, _model):
+        self.waiting.set()
+        await asyncio.Future()
+        yield 0.0
+
+
+def test_timeout_while_waiting_for_limiter_records_no_adapter_attempt(tmp_path) -> None:
+    adapter = _SlowAdapter(0.0)
+    limiter = _BlockingLimiter()
+    scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=adapter,
+        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+        limiter=limiter,
+    )
+
+    with pytest.raises(QuarryTimeoutError, match="Rule m timeout") as exc_info:
         asyncio.run(scanner.scan_data_async(_ATTACK))
+
+    assert limiter.waiting.is_set()
+    assert adapter.calls == 0
+    assert exc_info.value.scan_result.model_usage["calls"] == 0
+
+
+def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path) -> None:
+    conversation = tmp_path / "conversation.json"
+    conversation.write_text('{"messages":[{"role":"user","content":"attack"}]}')
+
+    file_adapter = _SlowAdapter(0.5)
+    file_scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=file_adapter,
+        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+    )
+    file_result = file_scanner.scan_file(conversation)
+
+    assert file_adapter.calls == file_result.model_usage["calls"] == 1
+    assert file_result.rule_timings["m"] >= 0.0
+    assert file_result.error == "Rule m timeout"
+
+    batch_adapter = _SlowAdapter(0.5)
+    batch_scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=batch_adapter,
+        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+    )
+    batch_result = batch_scanner.scan_batch_data([_ATTACK], tmp_path / "batch.json")
+
+    assert batch_adapter.calls == batch_result.model_usage["calls"] == 1
+    assert batch_result.rule_timings["m"] >= 0.0
+    assert batch_result.evaluation_errors == {"conv_1": "Rule m timeout"}
 
 
 @pytest.mark.parametrize(
@@ -145,3 +238,15 @@ def test_fail_on_timeout_raises_instead_of_reporting(tmp_path) -> None:
 def test_a_rule_timeout_must_be_positive_and_finite(timeout, reason) -> None:
     with pytest.raises(ValueError, match=reason):
         SafetyLimits(rule_timeout=timeout)
+
+
+def test_fail_on_timeout_raises_instead_of_reporting(tmp_path) -> None:
+    scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=_SlowAdapter(0.5),
+        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+    )
+
+    with pytest.raises(QuarryTimeoutError):
+        asyncio.run(scanner.scan_data_async(_ATTACK))
