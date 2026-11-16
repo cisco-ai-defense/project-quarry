@@ -1503,6 +1503,12 @@ condition:
     assert batch_graph["aggregate"]["execution_count"] == 2
     assert batch_graph["aggregate"]["matched_count"] == 2
     assert result["parameter_evidence"]["threshold"]["value"] == 0.7
+    expected_evidence = {
+        "instructions": {"type": "text", "binding": "policy", "redacted": True},
+        "threshold": {"type": "number", "binding": "scan", "value": 0.7},
+    }
+    assert compact["parameter_evidence"] == result["parameter_evidence"] == expected_evidence
+    assert parameters["instructions"] not in json.dumps(result["parameter_evidence"])
     # A scan-bound threshold still makes a score node: the path keeps the score and the
     # span of the whole conversation it read.
     last = MATCHING_CONVERSATION["messages"][-1]["content"]

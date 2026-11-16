@@ -92,6 +92,6 @@ Treat scan status as part of the result:
 - Treat `parameters:` as the rule signature. Supply every declared value and no undeclared values.
   Unmarked declarations are supplied per scan; add `policy` only for a value fixed on the compiled
   policy. `number` accepts finite JSON numbers but not booleans or strings; `text` accepts strings.
-  Text is represented by SHA-256 in evidence, never by its raw value.
+  Text is represented only by `redacted: true` in parameter evidence, never by its raw value.
 - For a batch, the rule compiles once, the shared parameter map applies to every conversation, and
   `results` preserves input order. Read each item's `completion_state` independently.
