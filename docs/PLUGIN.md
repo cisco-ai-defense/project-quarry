@@ -729,6 +729,15 @@ Model aliases, backend endpoints, named `text_ref` resources, safety limits, and
 server settings. Declared text parameters are tool inputs by design; they are bound into the ad hoc
 policy for that scan and represented only by SHA-256 in results.
 Configured model rate limits are shared across every compile and scan handled by that server.
+Startup, reference requests, and local-only compilation do not construct unused model backends
+or inspect their credentials. A rule that uses a model alias still requires that alias's backend
+and credentials before it can compile; an unavailable used alias fails with a configuration
+diagnostic. Unused aliases do not prevent local tools from working.
+
+Model rate-limit waits respect the active evaluation deadline. If a throughput window cannot
+open before that deadline, the request fails without taking a ticket. Waiting for a concurrency
+slot stops at the deadline; a slot released in time remains usable. These waits do not dispatch
+a provider request or consume a model-call attempt.
 
 ## Request limits
 

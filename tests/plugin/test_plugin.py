@@ -2408,57 +2408,115 @@ def test_reference_requires_compilation_to_verify_a_configured_model(tmp_path):
     ]
 
 
-async def test_the_server_warns_at_startup_about_each_model_without_credentials(tmp_path):
-    """A host learns at startup, before any scan, which configured models cannot be called.
+async def test_plugin_checks_credentials_only_when_a_model_alias_is_used(tmp_path):
+    """Startup, reference, and local compile do not inspect unused model credentials."""
 
-    The server names each alias and its missing variable on stderr and still starts, so tools
-    that do not use the model keep working. It writes nothing to stdout, where the host
-    expects JSON-RPC, and it exits normally when its input ends.
-    """
-
-    pytest.importorskip("mcp")
     config = tmp_path / "plugin.yaml"
     config.write_text(
         json.dumps(
             {
                 "config_version": 2,
                 "models": {
-                    "judge": {"model": "openai/gpt-4o-mini"},
-                    "reviewer": {"model": "anthropic/claude-haiku-4-5"},
+                    alias: {
+                        "adapter": "system_one",
+                        "model": "synthetic-model",
+                        "score": {"message_builder": "system_one", "boundary_seed": 1},
+                    }
+                    for alias in ("judge", "reviewer")
                 },
             }
         ),
         encoding="utf-8",
     )
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith(("OPENAI_", "ANTHROPIC_"))
-    }
-    env.update(QUARRY_PLUGIN_CONFIG=str(config), LITELLM_LOCAL_MODEL_COST_MAP="True")
-    server = await asyncio.create_subprocess_exec(
+    probe = """
+import json
+import os
+
+from quarry.plugin.service import QuarryPlugin, load_runtime_config
+
+plugin = QuarryPlugin(load_runtime_config(os.environ["QUARRY_PLUGIN_CONFIG"]))
+print(json.dumps(plugin.reference(action="index", limit=1)))
+print(json.dumps(plugin.compile(rule_text='rule "Local"\\ncondition: true\\n')))
+print(
+    json.dumps(
+        plugin.compile(
+            rule_text=(
+                'rule "Model"\\ncondition: '
+                'model("judge").score(messages, "synthetic policy") > 0.5\\n'
+            )
+        )
+    )
+)
+"""
+    env = {name: value for name, value in os.environ.items() if name != "TYPESAFE_API_KEY"}
+    env["QUARRY_PLUGIN_CONFIG"] = str(config)
+    process = await asyncio.create_subprocess_exec(
         sys.executable,
-        "-m",
-        "quarry.plugin.server",
+        "-c",
+        probe,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(server.communicate(), 60)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 60)
     finally:
-        if server.returncode is None:
-            server.kill()
-            await server.wait()
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
-    assert server.returncode == 0
-    assert "Inference model 'judge' needs OPENAI_API_KEY in the environment" in stderr.decode()
-    assert (
-        "Inference model 'reviewer' needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
-        in stderr.decode()
+    assert process.returncode == 0
+    reference, local, model = (json.loads(line) for line in stdout.splitlines())
+    assert set(reference["model_aliases"]) == {"judge", "reviewer"}
+    assert local["valid"] is True
+    assert model["valid"] is False
+    assert model["diagnostics"] == [
+        {
+            "code": "ConfigurationError",
+            "severity": "error",
+            "stage": "configure",
+            "message": "Inference model 'judge' needs TYPESAFE_API_KEY in the environment",
+        }
+    ]
+    assert "reviewer" not in json.dumps(model)
+    assert len(json.dumps(model)) < 2_000
+    assert "Inference model" not in stderr.decode()
+
+
+def test_unused_model_backends_are_not_constructed(tmp_path, monkeypatch):
+    constructed = []
+
+    def backend(_config, *, models_to_load, **_kwargs):
+        constructed.append(set(models_to_load))
+        raise ConfigurationError("Synthetic missing model credentials")
+
+    monkeypatch.setattr("quarry.integrations.resources.ModelInferenceBackend", backend)
+    config = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "models": {
+                alias: {
+                    "model": "synthetic-model",
+                    "score": {"message_builder": "constitution", "boundary_seed": 7},
+                }
+                for alias in ("judge", "unused")
+            },
+        },
+        tmp_path,
+        require_rules=False,
     )
-    assert stdout == b""
+    plugin = QuarryPlugin(config)
+    assert set(plugin.reference(action="index", limit=1)["model_aliases"]) == {"judge", "unused"}
+    assert plugin.compile(rule_text='rule "Local" condition: true')["valid"]
+    assert constructed == []
+    used = plugin.compile(
+        rule_text='rule "Model" condition: model("judge").score(messages, "criterion") > 0.5'
+    )
+    assert not used["valid"]
+    assert constructed == [{"judge"}]
+    assert used["diagnostics"][0]["message"] == "Synthetic missing model credentials"
+    assert "unused" not in json.dumps(used)
 
 
 # ── MCP transport, configuration, and packaging ────────────────────────
@@ -2636,7 +2694,8 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
                 },
             },
         )
-        scan = await asyncio.wait_for(response(2), 30)
+        # The first model rule may import its optional provider stack; startup and reference do not.
+        scan = await asyncio.wait_for(response(2), 60)
         stdin.close()
         after_exit = await asyncio.wait_for(stdout.read(), 30)
         await server.wait()
@@ -2809,3 +2868,47 @@ async def test_a_caller_changing_a_scan_result_does_not_change_the_next_scan():
 
     assert second["compilation"]["rule_names"] == ["r"]
     assert first["matched"] is second["matched"] is True
+
+
+async def test_stdio_startup_does_not_inspect_unused_model_credentials(tmp_path):
+    """The stdio server starts and exits cleanly without inspecting unused credentials."""
+
+    pytest.importorskip("mcp")
+    config = tmp_path / "plugin.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "config_version": 2,
+                "models": {
+                    "judge": {"model": "openai/gpt-4o-mini"},
+                    "reviewer": {"model": "anthropic/claude-haiku-4-5"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("OPENAI_", "ANTHROPIC_"))
+    }
+    env.update(QUARRY_PLUGIN_CONFIG=str(config), LITELLM_LOCAL_MODEL_COST_MAP="True")
+    server = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "quarry.plugin.server",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(server.communicate(), 60)
+    finally:
+        if server.returncode is None:
+            server.kill()
+            await server.wait()
+
+    assert server.returncode == 0
+    assert "Inference model" not in stderr.decode()
+    assert stdout == b""
