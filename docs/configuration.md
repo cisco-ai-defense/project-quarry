@@ -61,6 +61,36 @@ not change provider requests, model-result cache keys, or compiled-policy model 
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
 
+## Process result cache
+
+Long-lived plugin servers can bound the process-wide cache of completed model, regex, and prober
+results by age, result count, and retained-result bytes:
+
+```yaml
+model_cache:
+  ttl_seconds: 43200
+  max_entries: 100000
+  max_bytes: 268435456
+```
+
+The defaults shown above retain a result for 12 hours after its last use, up to 100,000 completed
+results and 256 MiB of estimated result data. When either aggregate bound is exceeded, Quarry
+drops completed results from least to most recently used. A result larger than `max_bytes` is
+returned to its caller but is not cached. Calls still in flight remain shared, do not count
+toward either aggregate bound, and begin their TTL and byte accounting only when they complete.
+
+`max_bytes` is a deterministic estimate made when a result is inserted, not process RSS or a
+guarantee about allocator overhead. It sums runtime-reported shallow sizes across exact built-in
+containers and their contents; strings, bytes, bytearrays, numeric `array.array` values, and known
+memoryview backing buffers include their payload. Dataclass and `SimpleNamespace` fields are also
+followed. Shared references and cycles count once within one result. Cache keys, cache bookkeeping,
+external allocations, and arbitrary objects' hidden state are not included. A result graph that
+exceeds the byte bound or the fixed accounting-work bound is treated as oversized instead of
+being traversed without limit. If retained-size inspection fails, the result is returned but not
+cached. This does not detect every concurrent mutation: a change that does not make inspection
+fail can go unnoticed. Cached results should not be mutated; growth after insertion is not
+remeasured.
+
 ## Model templates and inheritance
 
 Use `model_templates` to share reviewed provider and operation settings without creating a runtime

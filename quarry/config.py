@@ -27,7 +27,11 @@ from typing import cast
 
 import yaml
 
-from quarry.cache.constants import RESULT_CACHE_MAX_ENTRIES, RESULT_CACHE_TTL_SECONDS
+from quarry.cache.constants import (
+    RESULT_CACHE_MAX_BYTES,
+    RESULT_CACHE_MAX_ENTRIES,
+    RESULT_CACHE_TTL_SECONDS,
+)
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.rate_limit import RateLimitConfig
@@ -321,6 +325,7 @@ class ModelCacheConfig:
 
     ttl_seconds: float = RESULT_CACHE_TTL_SECONDS
     max_entries: int = RESULT_CACHE_MAX_ENTRIES
+    max_bytes: int = RESULT_CACHE_MAX_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -336,6 +341,12 @@ class ModelCacheConfig:
             or self.max_entries < 1
         ):
             raise ConfigurationError("model_cache.max_entries must be a positive integer")
+        if (
+            isinstance(self.max_bytes, bool)
+            or not isinstance(self.max_bytes, int)
+            or self.max_bytes < 1
+        ):
+            raise ConfigurationError("model_cache.max_bytes must be a positive integer")
 
 
 def _parse_model_cache(document: dict) -> ModelCacheConfig:
@@ -344,11 +355,12 @@ def _parse_model_cache(document: dict) -> ModelCacheConfig:
         return ModelCacheConfig()
     if not isinstance(data, dict):
         raise ConfigurationError("model_cache must be a mapping")
-    _reject_unknown_fields(data, {"ttl_seconds", "max_entries"}, "model_cache")
+    _reject_unknown_fields(data, {"ttl_seconds", "max_entries", "max_bytes"}, "model_cache")
     defaults = ModelCacheConfig()
     return ModelCacheConfig(
         ttl_seconds=data.get("ttl_seconds", defaults.ttl_seconds),
         max_entries=data.get("max_entries", defaults.max_entries),
+        max_bytes=data.get("max_bytes", defaults.max_bytes),
     )
 
 

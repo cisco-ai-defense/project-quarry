@@ -16,10 +16,12 @@
 
 """Async cache for expensive function calls."""
 
+import array
 import asyncio
 import concurrent.futures
 import inspect
 import math
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -27,9 +29,14 @@ from collections.abc import Callable, Generator, Iterator, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from types import GetSetDescriptorType, MemberDescriptorType, SimpleNamespace
 from typing import Any
 
-from quarry.cache.constants import RESULT_CACHE_MAX_ENTRIES, RESULT_CACHE_TTL_SECONDS
+from quarry.cache.constants import (
+    RESULT_CACHE_MAX_BYTES,
+    RESULT_CACHE_MAX_ENTRIES,
+    RESULT_CACHE_TTL_SECONDS,
+)
 from quarry.safety.timer import (
     QuarryTimeoutError,
     current_evaluation_deadline,
@@ -39,6 +46,10 @@ from quarry.safety.timer import (
 )
 
 _MISSING = object()
+
+# Stop inspecting a hostile result graph after this many references. Reaching the bound makes
+# the value too large to cache instead of leaving the event-loop callback to walk indefinitely.
+_RESULT_GRAPH_MAX_REFERENCES = 100_000
 
 # The scan a call runs for, so a caller can tell another scan's failed call from its own.
 _scan = ContextVar[object]("quarry_scan", default=None)
@@ -64,27 +75,39 @@ def current_scan() -> object:
 
 
 class SlidingTTLCache(MutableMapping):
-    """Results that expire ``ttl`` seconds after their last use; past ``maxsize`` results the
-    least recently used is dropped.
+    """Results that expire ``ttl`` seconds after their last use; past ``maxsize`` results or
+    ``max_bytes`` retained-result bytes the least recently used is dropped.
 
     Every read and write sets an entry's expiry again, ``ttl`` from now, and makes it the most
     recent, so with one time-to-live the least recently used result is also the next to
     expire: one ordered dict keeps both orders, and each operation is O(1). A result whose type
     sets ``cache_lifetime`` instead expires that many seconds (at most ``ttl``) after it is
     stored, however often it is read; until it is read again or reaches the front, an expired
-    one can wait behind newer results. A call still running is neither expired nor dropped;
-    its time-to-live starts with its result. It is not thread-safe: every caller holds the
-    cache's lock.
+    one can wait behind newer results. The byte total counts the result graph described by
+    :func:`_result_bytes`, not keys or cache metadata. A call still running has no result bytes
+    and is neither expired nor dropped; its time-to-live starts with its result. It is not
+    thread-safe: every caller holds the cache's lock.
     """
 
-    def __init__(self, maxsize: int, ttl: float, timer: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        maxsize: int,
+        ttl: float,
+        timer: Callable[[], float] = time.monotonic,
+        *,
+        max_bytes: int = RESULT_CACHE_MAX_BYTES,
+    ):
         self.maxsize = maxsize
         self.ttl = ttl
+        self.max_bytes = max_bytes
         self.timer = timer
         # Each key's value and when it expires, least recently used first.
         self._entries: OrderedDict[Any, tuple[Any, float]] = OrderedDict()
         # How many entries are running calls, which ``maxsize`` does not count.
         self._running = 0
+        # Every completed result's retained bytes, in the same LRU order, and their total.
+        self._sizes: OrderedDict[Any, int] = OrderedDict()
+        self._byte_total = 0
 
     def _expiry(self, value: Any, now: float) -> float:
         if isinstance(value, _Pending):
@@ -95,28 +118,41 @@ class SlidingTTLCache(MutableMapping):
         value, expires = self._entries[key]
         now = self.timer()
         if now >= expires:
-            del self._entries[key]
+            del self[key]
             raise KeyError(key)
         if not hasattr(type(value), "cache_lifetime"):
             expires = self._expiry(value, now)
         self._entries[key] = (value, expires)
         self._entries.move_to_end(key)
+        if key in self._sizes:
+            self._sizes.move_to_end(key)
         return value
 
     def __setitem__(self, key: Any, value: Any) -> None:
+        if not isinstance(value, _Pending):
+            try:
+                size = _result_bytes(value, self.max_bytes)
+            except Exception:
+                # Accounting is best-effort admission control. If it cannot safely classify
+                # a result, reject that result without disturbing anything already cached.
+                size = self.max_bytes + 1
+            if size > self.max_bytes:
+                return
+
         now = self.timer()
-        previous = self._entries.get(key)
-        if previous is not None and isinstance(previous[0], _Pending):
-            self._running -= 1
+        if key in self._entries:
+            del self[key]
         if isinstance(value, _Pending):
             self._running += 1
         self._entries[key] = (value, self._expiry(value, now))
         self._entries.move_to_end(key)
+        if not isinstance(value, _Pending):
+            self._sizes[key] = size
+            self._byte_total += size
         self._trim(now)
 
     def _trim(self, now: float) -> None:
-        """Drop expired results, and the least recently used past ``maxsize``, oldest first;
-        a running call is moved past them instead."""
+        """Drop expired or over-limit results, oldest first; move running calls past them."""
 
         entries = self._entries
         skipped = 0
@@ -126,14 +162,18 @@ class SlidingTTLCache(MutableMapping):
                 entries.move_to_end(key)
                 skipped += 1
             elif now >= expires or len(entries) - self._running > self.maxsize:
-                del entries[key]
+                del self[key]
             else:
-                return
+                break
+        while self._byte_total > self.max_bytes:
+            del self[next(iter(self._sizes))]
 
     def __delitem__(self, key: Any) -> None:
         value, _ = self._entries.pop(key)
         if isinstance(value, _Pending):
             self._running -= 1
+        else:
+            self._byte_total -= self._sizes.pop(key)
 
     def __iter__(self) -> Iterator[Any]:
         return iter(self._entries)
@@ -144,6 +184,170 @@ class SlidingTTLCache(MutableMapping):
     def clear(self) -> None:
         self._entries.clear()
         self._running = 0
+        self._sizes.clear()
+        self._byte_total = 0
+
+    def clear_results(self) -> None:
+        """Drop completed results while retaining calls that are still running."""
+
+        for key in tuple(self._sizes):
+            del self[key]
+
+
+_SAFE_SHALLOW_TYPES = frozenset(
+    {
+        type(None),
+        bool,
+        int,
+        float,
+        complex,
+        str,
+        bytes,
+        bytearray,
+        list,
+        tuple,
+        dict,
+        set,
+        frozenset,
+        array.array,
+        memoryview,
+        SimpleNamespace,
+    }
+)
+_BUFFER_OWNERS_WITH_OWN_SIZE = frozenset({bytes, bytearray, array.array})
+
+
+def _shallow_bytes(value: Any) -> int:
+    """Return a shallow runtime size without invoking a user-defined ``__sizeof__``."""
+
+    if type(value) in _SAFE_SHALLOW_TYPES:
+        return sys.getsizeof(value)
+    return object.__sizeof__(value)
+
+
+def _result_bytes(value: Any, limit: int) -> int:
+    """Estimate bytes retained by one cached result, stopping safely past ``limit``.
+
+    The estimate adds the runtime-reported shallow size of each distinct reachable object.
+    It traverses exact built-in dict/list/tuple/set/frozenset containers, exact
+    ``SimpleNamespace`` state, and dataclass instance dictionaries or C-level slot members.
+    Exact bytes, strings, bytearrays, ``array.array`` objects, and known memoryview buffers
+    include their payload. Other objects count only their base shallow size, so sizing never
+    calls user-defined iteration, properties, or ``__sizeof__``.
+
+    Shared references and cycles are counted once within one result. If the graph exceeds the
+    configured byte limit or the fixed reference-work limit, ``limit + 1`` is returned so the
+    caller treats the result as oversized and does not retain it.
+    """
+
+    overflow = limit + 1
+    try:
+        return _result_bytes_bounded(value, limit, overflow)
+    except Exception:
+        # Supported built-ins can still become unreadable or change from another thread while
+        # they are inspected. Admission fails closed instead of escaping into call completion.
+        return overflow
+
+
+def _result_bytes_bounded(value: Any, limit: int, overflow: int) -> int:
+    """Walk one retained result graph; callers convert traversal failures to ``overflow``."""
+
+    seen: set[int] = set()
+    # Unknown buffer exporters reached through exact memoryviews are charged by the largest
+    # visible view once per exporter; known owners include their payload in their own size.
+    buffer_bytes: dict[int, int] = {}
+    pending = [value]
+    references = 0
+    total = 0
+
+    def spend_reference() -> bool:
+        nonlocal references
+        references += 1
+        return references <= _RESULT_GRAPH_MAX_REFERENCES
+
+    def add(child: Any) -> bool:
+        if not spend_reference():
+            return False
+        pending.append(child)
+        return True
+
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            total += _shallow_bytes(item)
+        except (TypeError, ValueError, OverflowError):
+            return overflow
+        if total > limit:
+            return overflow
+
+        kind = type(item)
+        if kind is dict:
+            for key, child in dict.items(item):
+                if not add(key) or not add(child):
+                    return overflow
+        elif kind in (list, tuple, set, frozenset):
+            for child in item:
+                if not add(child):
+                    return overflow
+        elif kind is memoryview:
+            owner = item.obj
+            if not add(owner):
+                return overflow
+            if type(owner) not in _BUFFER_OWNERS_WITH_OWN_SIZE:
+                previous = buffer_bytes.get(id(owner), 0)
+                visible = item.nbytes
+                if visible > previous:
+                    total += visible - previous
+                    buffer_bytes[id(owner)] = visible
+                    if total > limit:
+                        return overflow
+        elif kind in _SAFE_SHALLOW_TYPES and kind is not SimpleNamespace:
+            continue
+        else:
+            namespace = None
+            if kind is SimpleNamespace:
+                namespace = object.__getattribute__(item, "__dict__")
+            else:
+                # Inspect the class dictionaries through ``type`` itself, bypassing a custom
+                # metaclass. Only dataclass-marked instances expose their stored fields.
+                owners = type.__getattribute__(kind, "__mro__")
+                owner_namespaces = []
+                dataclass_instance = False
+                for owner in owners:
+                    if not spend_reference():
+                        return overflow
+                    owner_namespace = type.__getattribute__(owner, "__dict__")
+                    owner_namespaces.append(owner_namespace)
+                    dataclass_instance |= "__dataclass_fields__" in owner_namespace
+                if dataclass_instance:
+                    # Read instance state only through the interpreter's C descriptor. A class
+                    # may define a property named ``__dict__``; sizing must not execute it.
+                    for owner_namespace in owner_namespaces:
+                        state_descriptor = owner_namespace.get("__dict__")
+                        if type(state_descriptor) is GetSetDescriptorType:
+                            candidate = state_descriptor.__get__(item, kind)
+                            if type(candidate) is dict:
+                                namespace = candidate
+                            break
+                    for owner_namespace in owner_namespaces:
+                        for descriptor in owner_namespace.values():
+                            if not spend_reference():
+                                return overflow
+                            if type(descriptor) is not MemberDescriptorType:
+                                continue
+                            try:
+                                child = descriptor.__get__(item, kind)
+                            except AttributeError:
+                                continue
+                            if not add(child):
+                                return overflow
+            if namespace is not None and not add(namespace):
+                return overflow
+    return total
 
 
 @dataclass
@@ -190,11 +394,20 @@ class AsyncFunctionCache:
         self._lock = threading.Lock()
 
     @classmethod
-    def expiring(cls, *, max_entries: int, ttl_seconds: float) -> "AsyncFunctionCache":
-        """Return a cache that keeps at most ``max_entries`` results, each until
-        ``ttl_seconds`` after its last use."""
+    def expiring(
+        cls,
+        *,
+        max_entries: int,
+        ttl_seconds: float,
+        max_bytes: int = RESULT_CACHE_MAX_BYTES,
+    ) -> "AsyncFunctionCache":
+        """Return a cache bounded by result count and retained bytes, with sliding TTL."""
 
-        store: SlidingTTLCache = SlidingTTLCache(maxsize=max_entries, ttl=ttl_seconds)
+        store: SlidingTTLCache = SlidingTTLCache(
+            maxsize=max_entries,
+            ttl=ttl_seconds,
+            max_bytes=max_bytes,
+        )
         return cls(store=store)
 
     @property
@@ -209,24 +422,58 @@ class AsyncFunctionCache:
 
         return self._lock
 
-    def configure(self, *, max_entries: int, ttl_seconds: float) -> None:
+    def configure(
+        self,
+        *,
+        max_entries: int,
+        ttl_seconds: float,
+        max_bytes: int = RESULT_CACHE_MAX_BYTES,
+    ) -> None:
         """Bound the cache; new bounds drop what it holds. A long-lived host calls it at
-        startup."""
+        startup. Calls already running remain shared and complete into the new store."""
 
         with self._lock:
             store = self._store
-            if isinstance(store, SlidingTTLCache) and (store.maxsize, store.ttl) == (
+            if isinstance(store, SlidingTTLCache) and (
+                store.maxsize,
+                store.ttl,
+                store.max_bytes,
+            ) == (
                 max_entries,
                 ttl_seconds,
+                max_bytes,
             ):
                 return
-            self._store = SlidingTTLCache(maxsize=max_entries, ttl=ttl_seconds)
+            pending = [
+                (key, value)
+                for key in tuple(store)
+                if isinstance((value := store.get(key, _MISSING)), _Pending)
+            ]
+            replacement = SlidingTTLCache(
+                maxsize=max_entries,
+                ttl=ttl_seconds,
+                max_bytes=max_bytes,
+            )
+            for key, value in pending:
+                replacement[key] = value
+            self._store = replacement
 
     def clear(self) -> None:
-        """Drop every result."""
+        """Drop every completed result while calls already running remain shared."""
 
         with self._lock:
-            self._store.clear()
+            store = self._store
+            if isinstance(store, SlidingTTLCache):
+                store.clear_results()
+                return
+            pending = [
+                (key, value)
+                for key in tuple(store)
+                if isinstance((value := store.get(key, _MISSING)), _Pending)
+            ]
+            store.clear()
+            for key, value in pending:
+                store[key] = value
 
     async def call(
         self,
@@ -322,18 +569,32 @@ class AsyncFunctionCache:
         self._store[pending_key] = pending
 
         def finish(task: asyncio.Task[Any]) -> None:
-            failure = (
-                _Abandoned("the shared call was cancelled before it finished")
-                if task.cancelled()
-                else task.exception()
-            )
-            with self._lock:
-                if self._store.get(pending_key) is pending:
-                    del self._store[pending_key]
-                if failure is None:
-                    self._store[key] = task.result()
+            if task.cancelled():
+                result = None
+                failure: BaseException | None = _Abandoned(
+                    "the shared call was cancelled before it finished"
+                )
+            else:
+                try:
+                    result = task.result()
+                except BaseException as exc:
+                    result = None
+                    failure = exc
+                else:
+                    failure = None
+
+            try:
+                with self._lock:
+                    if self._store.get(pending_key) is pending:
+                        del self._store[pending_key]
+                    if failure is None:
+                        self._store[key] = result
+            except Exception:
+                # A cache admission or custom-store failure must not change the successful
+                # function result observed by callers or strand callers sharing this future.
+                pass
             if failure is None:
-                pending.future.set_result(task.result())
+                pending.future.set_result(result)
             else:
                 pending.future.set_exception(failure)
 
@@ -384,5 +645,7 @@ async def call_async_or_sync(func: Callable, *args, **kwargs) -> Any:
 
 
 result_cache = AsyncFunctionCache.expiring(
-    max_entries=RESULT_CACHE_MAX_ENTRIES, ttl_seconds=RESULT_CACHE_TTL_SECONDS
+    max_entries=RESULT_CACHE_MAX_ENTRIES,
+    ttl_seconds=RESULT_CACHE_TTL_SECONDS,
+    max_bytes=RESULT_CACHE_MAX_BYTES,
 )

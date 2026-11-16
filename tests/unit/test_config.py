@@ -26,6 +26,8 @@ from quarry.config import QuarryConfig
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
 
+REPO_ROOT = Path(__file__).parents[2]
+
 
 class TestQuarryConfig:
     def test_config_default_values(self):
@@ -231,6 +233,24 @@ def test_from_mapping_resolves_relative_files_against_the_given_dir(tmp_path):
         {"rules": ["/r"], "texts": {"p": {"file": "policy.md"}}}, policy_dir
     )
     assert config.judge_prompts["p"] == "policy text"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["docs/configuration.md", "docs/PLUGIN.md"],
+)
+def test_public_docs_show_the_result_cache_byte_setting(relative_path: str) -> None:
+    text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+
+    assert "model_cache:" in text
+    assert "max_bytes: 268435456" in text
+
+
+def test_public_docs_describe_result_cache_accounting_fail_closed() -> None:
+    text = " ".join((REPO_ROOT / "docs/configuration.md").read_text(encoding="utf-8").split())
+
+    assert "If retained-size inspection fails, the result is returned but not cached." in text
+    assert "This does not detect every concurrent mutation" in text
 
 
 def test_an_invalid_utf8_text_file_is_named_in_the_error(tmp_path: Path) -> None:

@@ -16,16 +16,27 @@
 
 """The result cache keeps results, and shares each call still running among its callers."""
 
+import array
 import asyncio
 import contextvars
 import functools
+import sys
 import threading
 import time
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from cachetools import TTLCache
 
-from quarry.cache.async_cache import AsyncFunctionCache, SlidingTTLCache, _Pending, scan_scope
+import quarry.cache.async_cache as async_cache_module
+from quarry.cache.async_cache import (
+    AsyncFunctionCache,
+    SlidingTTLCache,
+    _Pending,
+    _result_bytes,
+    scan_scope,
+)
 from quarry.cache.keys import object_identity
 from quarry.safety.timer import QuarryTimeoutError, evaluation_deadline
 
@@ -160,6 +171,434 @@ def test_the_store_keeps_running_calls_and_drops_results_by_age_and_bound() -> N
     assert sorted(store) == ["d", "q"]
     store.clear()
     assert len(store) == 0
+
+
+def test_the_store_preserves_the_positional_timer_and_keyword_byte_bound() -> None:
+    now = [0.0]
+    timer = lambda: now[0]  # noqa: E731
+
+    compatible = SlidingTTLCache(2, 10, timer)
+    bounded = SlidingTTLCache(2, 10, timer, max_bytes=1_000)
+
+    compatible["value"] = b"value"
+    bounded["value"] = b"value"
+    now[0] = 11
+    with pytest.raises(KeyError):
+        compatible["value"]
+    with pytest.raises(KeyError):
+        bounded["value"]
+    assert bounded.max_bytes == 1_000
+
+
+def test_result_bytes_counts_supported_graph_shapes_once_without_recursion() -> None:
+    shared = [bytearray(b"payload")]
+    cycle: dict[str, object] = {"shared": shared}
+    cycle["cycle"] = cycle
+    graph = [cycle, shared]
+    expected = sum(
+        sys.getsizeof(item)
+        for item in (
+            graph,
+            cycle,
+            "shared",
+            "cycle",
+            shared,
+            shared[0],
+        )
+    )
+
+    assert _result_bytes(graph, 1_000_000) == expected
+
+    numbers = array.array("d", [0.25, 0.5, 0.75])
+    assert _result_bytes(numbers, 1_000_000) == sys.getsizeof(numbers)
+
+    backing = bytearray(b"buffer")
+    view = memoryview(backing)
+    views = [backing, view, view]
+    assert _result_bytes(views, 1_000_000) == sum(
+        sys.getsizeof(item) for item in (views, backing, view)
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "text",
+        b"bytes",
+        42,
+        0.25,
+        [b"item"],
+        (b"item",),
+        {b"item"},
+        frozenset({b"item"}),
+    ],
+)
+def test_result_bytes_accounts_for_scalar_and_builtin_collection_shapes(value) -> None:
+    expected = sys.getsizeof(value)
+    if type(value) in (list, tuple, set, frozenset):
+        expected += sys.getsizeof(b"item")
+
+    assert _result_bytes(value, 1_000_000) == expected
+
+
+def test_result_bytes_counts_namespace_and_dataclass_state() -> None:
+    @dataclass(slots=True)
+    class Box:
+        payload: object
+
+    payload = b"synthetic"
+    boxed = Box(payload)
+    namespace = SimpleNamespace(boxed=boxed)
+
+    expected = sum(
+        (
+            sys.getsizeof(namespace),
+            sys.getsizeof(vars(namespace)),
+            sys.getsizeof("boxed"),
+            object.__sizeof__(boxed),
+            sys.getsizeof(payload),
+        )
+    )
+    assert _result_bytes(namespace, 1_000_000) == expected
+
+
+def test_result_bytes_never_calls_user_sizing_iteration_or_properties() -> None:
+    class AdversarialValue:
+        def __sizeof__(self) -> int:
+            raise AssertionError("custom sizing must not run")
+
+        def __iter__(self):
+            raise AssertionError("custom iteration must not run")
+
+        @property
+        def payload(self):
+            raise AssertionError("custom properties must not run")
+
+    value = AdversarialValue()
+
+    assert _result_bytes(value, 1_000_000) == object.__sizeof__(value)
+
+    class SpoofedDataclass:
+        __dataclass_fields__ = {}
+
+        @property
+        def __dict__(self):
+            raise AssertionError("a spoofed dataclass property must not run")
+
+    spoofed = SpoofedDataclass()
+    assert _result_bytes(spoofed, 1_000_000) == object.__sizeof__(spoofed)
+
+
+def test_result_byte_accounting_fails_safe_when_graph_work_is_excessive(monkeypatch) -> None:
+    monkeypatch.setattr(async_cache_module, "_RESULT_GRAPH_MAX_REFERENCES", 3)
+
+    assert _result_bytes([object(), object(), object(), object()], 10_000) == 10_001
+
+
+def test_result_byte_accounting_fails_closed_for_released_memoryviews() -> None:
+    released = memoryview(bytearray(b"synthetic"))
+    released.release()
+
+    assert _result_bytes(released, 10_000) == 10_001
+
+    store = SlidingTTLCache(maxsize=10, ttl=60, max_bytes=10_000)
+    store["retained"] = b"retained"
+    before = (list(store), store._byte_total, dict(store._sizes))
+    store["released"] = released
+    assert (list(store), store._byte_total, dict(store._sizes)) == before
+
+
+def test_result_byte_accounting_fails_closed_if_a_builtin_mapping_changes() -> None:
+    value = {"first": b"a", "second": b"b"}
+    changed = False
+    traversal = async_cache_module._result_bytes_bounded.__code__
+    previous_trace = sys.gettrace()
+
+    def change_during_iteration(frame, event, _argument):
+        nonlocal changed
+        if (
+            not changed
+            and event == "line"
+            and frame.f_code is traversal
+            and frame.f_locals.get("item") is value
+            and "key" in frame.f_locals
+        ):
+            value["third"] = b"c"
+            changed = True
+        return change_during_iteration
+
+    try:
+        sys.settrace(change_during_iteration)
+        measured = _result_bytes(value, 10_000)
+    finally:
+        sys.settrace(previous_trace)
+
+    assert changed
+    assert measured == 10_001
+
+
+def test_the_store_enforces_exact_and_near_byte_boundaries_in_lru_order() -> None:
+    first = b"a" * 32
+    second = b"b" * 32
+    third = b"c" * 32
+    item_bytes = _result_bytes(first, 1_000_000)
+    store = SlidingTTLCache(maxsize=10, ttl=60, max_bytes=item_bytes * 2)
+
+    store["first"] = first
+    store["second"] = second
+    assert store._byte_total == item_bytes * 2
+    assert store["first"] is first  # make second least recently used
+
+    store["third"] = third
+    assert list(store) == ["first", "third"]
+    assert store._byte_total == item_bytes * 2
+
+    near = SlidingTTLCache(maxsize=10, ttl=60, max_bytes=item_bytes * 2 - 1)
+    near["first"] = first
+    near["second"] = second
+    assert list(near) == ["second"]
+    assert near._byte_total == item_bytes
+
+
+def test_replacement_expiration_deletion_clear_and_oversize_update_byte_totals() -> None:
+    now = [0.0]
+    small = b"small"
+    large = b"large" * 20
+    store = SlidingTTLCache(
+        maxsize=10,
+        ttl=5,
+        max_bytes=1_000_000,
+        timer=lambda: now[0],
+    )
+
+    store["key"] = small
+    assert store._byte_total == _result_bytes(small, store.max_bytes)
+    store["key"] = large
+    assert store._byte_total == _result_bytes(large, store.max_bytes)
+    del store["key"]
+    assert store._byte_total == 0
+
+    store["expired"] = small
+    now[0] = 6
+    with pytest.raises(KeyError):
+        store["expired"]
+    assert store._byte_total == 0
+
+    store["clear"] = large
+    store.clear()
+    assert (len(store), store._byte_total, store._sizes) == (0, 0, {})
+
+    size = _result_bytes(large, 1_000_000)
+    oversized = SlidingTTLCache(maxsize=10, ttl=60, max_bytes=size - 1)
+    oversized["too-large"] = large
+    assert (len(oversized), oversized._byte_total) == (0, 0)
+
+
+def test_oversized_insert_and_replacement_preserve_the_populated_lru() -> None:
+    values = {key: key.encode() * 16 for key in ("first", "second", "third")}
+    max_bytes = sum(_result_bytes(value, 1_000_000) for value in values.values())
+    store = SlidingTTLCache(maxsize=10, ttl=60, max_bytes=max_bytes)
+    for key, value in values.items():
+        store[key] = value
+    assert store["first"] is values["first"]
+    before = (list(store), store._byte_total, dict(store._sizes))
+    oversized = b"x" * max_bytes
+
+    store["new"] = oversized
+    assert (list(store), store._byte_total, dict(store._sizes)) == before
+
+    store["second"] = oversized
+    assert (list(store), store._byte_total, dict(store._sizes)) == before
+    assert store._entries["second"][0] is values["second"]
+
+
+def test_a_result_specific_lifetime_remains_fixed_instead_of_sliding() -> None:
+    class ShortLived(str):
+        cache_lifetime = 2
+
+    now = [0.0]
+    store = SlidingTTLCache(
+        maxsize=10,
+        ttl=60,
+        max_bytes=1_000,
+        timer=lambda: now[0],
+    )
+    store["key"] = ShortLived("refusal")
+    now[0] = 1
+    assert store["key"] == "refusal"
+    now[0] = 2
+    with pytest.raises(KeyError):
+        store["key"]
+    assert store._byte_total == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_and_reconfigure_keep_one_pending_call_and_recount_its_result() -> None:
+    cache = AsyncFunctionCache.expiring(max_entries=4, ttl_seconds=60, max_bytes=1_000)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def provider() -> bytes:
+        calls.append(1)
+        started.set()
+        await release.wait()
+        return b"completed"
+
+    first = asyncio.create_task(cache.call(b"key", provider))
+    await started.wait()
+    cache.configure(max_entries=2, ttl_seconds=30, max_bytes=500)
+    cache.clear()
+    second = asyncio.create_task(cache.call(b"key", provider))
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await asyncio.gather(first, second) == [b"completed", b"completed"]
+    assert calls == [1]
+    assert isinstance(cache.store, SlidingTTLCache)
+    assert cache.store._byte_total == _result_bytes(b"completed", 500)
+    assert cache.store[b"key"] == b"completed"
+
+
+@pytest.mark.asyncio
+async def test_accounting_failure_settles_waiters_without_changing_cached_bytes(
+    monkeypatch,
+) -> None:
+    cache = AsyncFunctionCache.expiring(max_entries=10, ttl_seconds=60, max_bytes=10_000)
+    await cache.call(b"first", lambda: b"first")
+    await cache.call(b"second", lambda: b"second")
+    assert isinstance(cache.store, SlidingTTLCache)
+    before = (list(cache.store), cache.store._byte_total, dict(cache.store._sizes))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    result = bytearray(b"successful")
+
+    async def provider() -> bytearray:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return result
+
+    first = asyncio.create_task(cache.call(b"uncacheable", provider))
+    await started.wait()
+    second = asyncio.create_task(cache.call(b"uncacheable", provider))
+    await asyncio.sleep(0)
+    pending = cache.store[b"uncacheable"]
+    assert isinstance(pending, _Pending)
+    assert pending.waiters == 2
+
+    def fail_accounting(*_args) -> int:
+        raise RuntimeError("synthetic accounting failure")
+
+    monkeypatch.setattr(async_cache_module, "_result_bytes", fail_accounting)
+    release.set()
+    completed = await asyncio.gather(first, second)
+
+    assert completed[0] is result and completed[1] is result
+    assert calls == 1
+    assert b"uncacheable" not in cache.store
+    assert (list(cache.store), cache.store._byte_total, dict(cache.store._sizes)) == before
+    assert cache.store._byte_total == sum(cache.store._sizes.values())
+
+    assert await cache.call(b"uncacheable", provider) is result
+    assert calls == 2
+    assert (list(cache.store), cache.store._byte_total, dict(cache.store._sizes)) == before
+
+
+@pytest.mark.asyncio
+async def test_oversized_completion_keeps_prior_results_and_clears_pending_state() -> None:
+    small = b"s" * 16
+    small_bytes = _result_bytes(small, 1_000_000)
+    cache = AsyncFunctionCache.expiring(
+        max_entries=10,
+        ttl_seconds=60,
+        max_bytes=small_bytes * 2,
+    )
+    await cache.call(b"first", lambda: small)
+    await cache.call(b"second", lambda: small)
+    assert isinstance(cache.store, SlidingTTLCache)
+    before = (list(cache.store), cache.store._byte_total, dict(cache.store._sizes))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    oversized = b"x" * cache.store.max_bytes
+
+    async def provider() -> bytes:
+        started.set()
+        await release.wait()
+        return oversized
+
+    call = asyncio.create_task(cache.call(b"oversized", provider))
+    await started.wait()
+    assert isinstance(cache.store[b"oversized"], _Pending)
+    assert cache.store._byte_total == before[1]
+    release.set()
+
+    assert await call is oversized
+    assert b"oversized" not in cache.store
+    assert (list(cache.store), cache.store._byte_total, dict(cache.store._sizes)) == before
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pending_call_leaves_no_result_bytes() -> None:
+    cache = AsyncFunctionCache.expiring(max_entries=2, ttl_seconds=60, max_bytes=500)
+    started = asyncio.Event()
+
+    async def provider() -> bytes:
+        started.set()
+        await asyncio.Event().wait()
+        return b"unreachable"
+
+    call = asyncio.create_task(cache.call(b"key", provider))
+    await started.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    await asyncio.sleep(0)
+
+    assert isinstance(cache.store, SlidingTTLCache)
+    assert (len(cache.store), cache.store._byte_total) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_completions_keep_aggregate_byte_accounting_consistent() -> None:
+    result_size = _result_bytes(b"x" * 64, 1_000_000)
+    cache = AsyncFunctionCache.expiring(
+        max_entries=20,
+        ttl_seconds=60,
+        max_bytes=result_size * 3,
+    )
+    release = asyncio.Event()
+
+    async def provider(index: int) -> bytes:
+        await release.wait()
+        return bytes([index]) * 64
+
+    calls = [
+        asyncio.create_task(cache.call(f"key-{index}".encode(), provider, index))
+        for index in range(10)
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    assert len(await asyncio.gather(*calls)) == 10
+
+    assert isinstance(cache.store, SlidingTTLCache)
+    assert cache.store._byte_total == sum(cache.store._sizes.values())
+    assert cache.store._byte_total <= cache.store.max_bytes
+    assert len(cache.store) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_custom_store_still_receives_the_successful_result_itself() -> None:
+    store = {}
+    cache = AsyncFunctionCache(store=store)
+    result = [b"synthetic"]
+
+    assert await cache.call(b"key", lambda: result) is result
+    assert store[b"key"] is result
 
 
 @pytest.mark.asyncio

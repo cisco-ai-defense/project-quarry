@@ -276,7 +276,8 @@ async def quarry_scan(
 
     Scans reuse the model results this server already has for the same model and input,
     so a rescan, or one that moves only a threshold, makes no new model call. A result
-    expires ``model_cache.ttl_seconds`` (default 12 hours) after its last use.
+    expires ``model_cache.ttl_seconds`` (default 12 hours) after its last use; completed
+    results are also bounded by ``model_cache.max_entries`` and ``model_cache.max_bytes``.
     """
 
     return await _service.scan(
