@@ -934,7 +934,7 @@ def _merge_model_definition(parent: dict, child: dict, depth: int = 1) -> dict:
         )
     merged = dict(parent)
     for key, value in child.items():
-        if key == "extends":
+        if depth == 1 and key == "extends":
             continue
         if value is None:
             if key in merged:
