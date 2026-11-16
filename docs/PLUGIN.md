@@ -63,13 +63,13 @@ The launch configuration uses `uv` and the repository lock file. The host must t
 
 The reference `index` includes `model_aliases` and `runtime_config_version`. Pass
 `include_models: true` to read them with another action, or `false` to omit them from `index`;
-search and get responses do not repeat every description by default. Each configured alias lists
-its optional `description` and the callable `operations` for the active version: version 2 uses
-`complete`, `score`, `input_tokens`, `split`, `classify`, and `spans` after
+search and get responses do not repeat display metadata by default. Each configured alias lists
+its optional `display_name` and `description`, plus the callable `operations` for the active
+version: version 2 uses `complete`, `score`, `input_tokens`, `split`, `classify`, and `spans` after
 `model("alias").`, while version 1 names its compatibility functions. Select an alias whose
-description fits the rule, then compile: compilation verifies that the selected adapter actually
-serves the requested operation. An installation without runtime model configuration returns an
-empty mapping.
+display metadata fits the rule, then compile: compilation verifies that the selected adapter
+actually serves the requested operation. An installation without runtime model configuration
+returns an empty mapping.
 
 ```json
 {
