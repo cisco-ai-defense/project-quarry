@@ -819,7 +819,7 @@ class DSLScanner:
                     nested_ctx.extension_event_sequence = tuple(
                         item for _, item in rule_ctx.ordered_timeline if id(item) in extension_ids
                     )
-                    if check.flow_requirements and selected.shares_root_with(
+                    if check.orders_input_items and selected.shares_root_with(
                         rule_ctx.conversation.messages
                     ):
                         positions = {
@@ -855,6 +855,9 @@ class DSLScanner:
                     raise ConversationValidationError(
                         "The input timeline cannot order a derived messages check"
                     )
+                # A called rule has the same model-input preflight as a top-level
+                # rule, against the actual selected conversation.
+                self._reject_out_of_range_dynamic_indexes(check, nested_ctx.conversation)
                 nested_detector = self._make_async_detector(
                     nested_ctx,
                     artifact=check,
@@ -1515,7 +1518,7 @@ class DSLScanner:
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
-        if legacy_chat:
+        if legacy_chat or chat_read:
             try:
                 validate_conversation_arguments(context.conversation.messages)
             except QuarryTimeoutError as exc:
@@ -1529,13 +1532,24 @@ class DSLScanner:
                     error_category=ScanFailureCategory.TIMEOUT,
                 )
             except ConversationValidationError as exc:
-                message = str(exc)
-                return ScanResult(
-                    file_path=file_path,
-                    rule_matches=[],
-                    scan_time=(datetime.now() - start_time).total_seconds(),
-                    error=f"Conversation validation error: {message}",
-                    validation_error=message,
+                conversation_surfaces = chat_surfaces - {"tools"}
+                if legacy_chat or every_rule_reads(conversation_surfaces):
+                    message = str(exc)
+                    return ScanResult(
+                        file_path=file_path,
+                        rule_matches=[],
+                        scan_time=(datetime.now() - start_time).total_seconds(),
+                        error=f"Conversation validation error: {message}",
+                        validation_error=message,
+                    )
+                # Malformed chat cannot become a match, including for a name-only
+                # reader. Independent inputs and static tools keep their own state.
+                part_faults.update(dict.fromkeys(conversation_surfaces, exc))
+                context.conversation = Conversation(
+                    [],
+                    chat.get("tools"),
+                    tool_call_types=self.tool_call_types,
+                    max_nesting_depth=self.limits.max_nesting_depth,
                 )
 
         try:
@@ -1563,8 +1577,14 @@ class DSLScanner:
             )
             context.ordered_timeline = None
             if timeline_entries is not None:
+                # A failed section already invalidates its readers. Its unusable
+                # clock references must not invalidate independent unbounded flows.
+                clock_sections = frozenset(wanted) - prepared.faults.keys() - part_faults.keys()
                 timeline_entries = self.input_registry.timeline_read(
-                    timeline_entries, frozenset(wanted), data, chat_read
+                    timeline_entries,
+                    frozenset(clock_sections),
+                    data,
+                    chat_read and not bool(part_faults.keys() & (chat_surfaces - {"tools"})),
                 )
                 try:
                     context.ordered_timeline = self.input_registry.order_timeline(
