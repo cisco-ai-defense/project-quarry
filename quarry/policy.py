@@ -335,7 +335,11 @@ class CompiledPolicy:
                     record_traces=record_traces,
                     rules_subset={self._rule_name},
                     decision_paths=decision_paths,
-                    explore=explores(conversation_sha256(conversation), explore_rate),
+                    explore_selector=(
+                        (lambda value: explores(conversation_sha256(value), explore_rate))
+                        if explore_rate > 0
+                        else None
+                    ),
                     deferred_evidence=deferred,
                 )
                 remaining = remaining_evaluation_time()

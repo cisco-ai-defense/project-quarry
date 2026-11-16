@@ -49,10 +49,12 @@ class SafetyLimits:
     max_message_size: int = 10_000_000
     max_tool_argument_size: int = 1_000_000
     max_tool_calls: int = 1_000
-    # Maximum JSON nesting depth for a tool-call argument object. Bounds both the
-    # scanner's post-size-preflight validation and the lazy rule-local decoder
-    # (``ToolCall.arguments``).
+    # Maximum JSON nesting depth for message content, offered tool definitions, and tool-call
+    # argument objects. Tool definitions are checked after total-size preflight; arguments are
+    # checked both after preflight and by the lazy rule-local decoder (``ToolCall.arguments``).
     max_nesting_depth: int = 100
+    # Aggregate object/materialization budget. Reused containers are charged per occurrence
+    # because validation and canonicalization materialize every occurrence independently.
     max_total_size: int = 50_000_000  # 50MB
     max_timeline_items: int = 10_000
     max_comprehension_size: int = 10_000

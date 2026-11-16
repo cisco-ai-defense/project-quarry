@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
@@ -72,6 +73,20 @@ OPENAI_IMAGE_PART_KEYS = frozenset({"type", "image_url"})
 OPENAI_IMAGE_URL_KEYS = frozenset({"url", "detail"})
 OPENAI_AUDIO_PART_KEYS = frozenset({"type", "input_audio"})
 OPENAI_AUDIO_KEYS = frozenset({"data", "format"})
+# Direct validator callers have no configured total-size budget. Keep their JSON walk finite
+# without constraining scanner inputs that fit the default 50MB object-footprint budget.
+_MAX_JSON_TREE_VISITS = 10_000_000
+_MAX_RAW_JSON_VISITS = 10_000_000
+_EXACT_CONTAINER_ERROR = (
+    "conversation contains an overridable dict/list subclass; "
+    "use exact built-in dict and list containers"
+)
+_EXACT_KEY_ERROR = (
+    "contains a non-string object key; JSON object keys must use exact built-in strings"
+)
+_SCALAR_SUBCLASS_ERROR = (
+    "conversation JSON scalar subclasses are unsupported outside tool-call arguments"
+)
 
 
 class Severity(Enum):
@@ -338,23 +353,110 @@ def _validate_json_arguments(
     )
 
 
-def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> None:
-    """Validate a JSON tree and bound container depth from its value root."""
+def _iter_json_object_values(value: dict, path: str) -> Iterator[object]:
+    """Yield object values while validating keys without materializing a second collection."""
 
-    stack: list[tuple[object, int, bool]] = [(value, 1, False)]
+    for key, child in dict.items(value):
+        if type(key) is not str:
+            raise ConversationValidationError(f"{path} {_EXACT_KEY_ERROR}")
+        yield child
+
+
+@dataclass
+class _JsonTreeBudget:
+    """Aggregate JSON-tree work shared across related validation calls."""
+
+    visits: int = 0
+
+    def charge(self, path: str) -> None:
+        self.visits += 1
+        if self.visits > _MAX_JSON_TREE_VISITS:
+            raise ConversationValidationError(
+                f"{path} exceeds JSON validation work limit {_MAX_JSON_TREE_VISITS}"
+            )
+
+
+def _validate_raw_json_container_types(value: object) -> None:
+    """Reject overridable raw JSON containers without invoking their methods."""
+
+    visits = 0
+    frames: list[tuple[int, Iterator[object]]] = []
     active_containers: set[int] = set()
-    while stack:
-        current, depth, exiting = stack.pop()
-        if exiting:
-            active_containers.remove(id(current))
-            continue
-        if current is None or isinstance(current, str | bool | int):
-            continue
-        if isinstance(current, float):
-            if isfinite(current):
+    current = value
+    while True:
+        visits += 1
+        if visits > _MAX_RAW_JSON_VISITS:
+            raise ConversationValidationError(
+                f"conversation exceeds raw JSON validation work limit {_MAX_RAW_JSON_VISITS}"
+            )
+        current_type = type(current)
+        current_id: int | None = None
+        children: Iterator[object] | None = None
+        if current_type is dict:
+            current_dict = cast(dict[Any, Any], current)
+            current_id = id(current)
+            if current_id in active_containers:
+                children = None
+            else:
+                active_containers.add(current_id)
+                children = _iter_json_object_values(current_dict, "conversation")
+        elif current_type is list:
+            current_list = cast(list[Any], current)
+            current_id = id(current)
+            if current_id in active_containers:
+                children = None
+            else:
+                active_containers.add(current_id)
+                children = list.__iter__(current_list)
+        elif issubclass(current_type, (dict, list)):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+
+        if children is not None and current_id is not None:
+            frames.append((current_id, children))
+
+        while frames:
+            container_id, children = frames[-1]
+            try:
+                current = next(children)
+            except StopIteration:
+                active_containers.remove(container_id)
+                frames.pop()
                 continue
-            raise ConversationValidationError(f"{path} contains a non-finite number")
-        if isinstance(current, list):
+            break
+        else:
+            return
+
+
+def _validate_json_tree(
+    value: object,
+    path: str,
+    max_nesting_depth: int,
+    *,
+    budget: _JsonTreeBudget | None = None,
+) -> None:
+    """Validate a JSON tree with depth-sized iterator frames and bounded work."""
+
+    if budget is None:
+        budget = _JsonTreeBudget()
+    frames: list[tuple[int, int, Iterator[object]]] = []
+    active_containers: set[int] = set()
+    current = value
+    depth = 1
+    while True:
+        budget.charge(path)
+
+        current_type = type(current)
+        children: Iterator[object] | None = None
+        current_id: int | None = None
+        if current is None or current_type in {str, bool, int}:
+            pass
+        elif current_type is float:
+            if isfinite(cast(float, current)):
+                pass
+            else:
+                raise ConversationValidationError(f"{path} contains a non-finite number")
+        elif current_type is list:
+            current_list = cast(list[Any], current)
             current_id = id(current)
             if current_id in active_containers:
                 raise ConversationValidationError(f"{path} contains a cyclic reference")
@@ -363,12 +465,9 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
                     f"{path} exceeds max_nesting_depth {max_nesting_depth}"
                 )
             active_containers.add(current_id)
-            stack.append((current, depth, True))
-            stack.extend((child, depth + 1, False) for child in current)
-            continue
-        if isinstance(current, dict):
-            if not all(isinstance(key, str) for key in current):
-                raise ConversationValidationError(f"{path} contains a non-string object key")
+            children = list.__iter__(current_list)
+        elif current_type is dict:
+            current_dict = cast(dict[Any, Any], current)
             current_id = id(current)
             if current_id in active_containers:
                 raise ConversationValidationError(f"{path} contains a cyclic reference")
@@ -377,26 +476,49 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
                     f"{path} exceeds max_nesting_depth {max_nesting_depth}"
                 )
             active_containers.add(current_id)
-            stack.append((current, depth, True))
-            stack.extend((child, depth + 1, False) for child in current.values())
-            continue
-        raise ConversationValidationError(
-            f"{path} contains unsupported JSON value {type(current).__name__}"
-        )
+            children = _iter_json_object_values(current_dict, path)
+        elif issubclass(current_type, (dict, list)):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+        elif issubclass(current_type, (str, int, float)):
+            raise ConversationValidationError(_SCALAR_SUBCLASS_ERROR)
+        else:
+            raise ConversationValidationError(
+                f"{path} contains unsupported JSON value {type(current).__name__}"
+            )
+
+        if children is not None and current_id is not None:
+            frames.append((current_id, depth, children))
+
+        while frames:
+            container_id, parent_depth, children = frames[-1]
+            try:
+                current = next(children)
+            except StopIteration:
+                active_containers.remove(container_id)
+                frames.pop()
+                continue
+            depth = parent_depth + 1
+            break
+        else:
+            return
 
 
 def _validate_content_part(part: object, message_index: int, part_index: int) -> None:
     """Validate one supported OpenAI multimodal content part."""
-    if not isinstance(part, dict):
+    if type(part) is not dict:
         raise ConversationValidationError(
             f"Message at index {message_index} content[{part_index}] must be an object"
         )
     part = cast(dict[str, Any], part)
 
     part_type = part.get("type")
+    if type(part_type) is not str:
+        raise ConversationValidationError(
+            f"Message at index {message_index} content[{part_index}] must have an exact string type"
+        )
     if part_type == "text":
         unexpected = _unexpected_keys(part, OPENAI_TEXT_PART_KEYS)
-        if unexpected or not isinstance(part.get("text"), str):
+        if unexpected or type(part.get("text")) is not str:
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
                 "text part with string 'text'"
@@ -405,12 +527,16 @@ def _validate_content_part(part: object, message_index: int, part_index: int) ->
 
     if part_type == "image_url":
         image_url = part.get("image_url")
+        detail = image_url.get("detail") if type(image_url) is dict else None
         if (
             _unexpected_keys(part, OPENAI_IMAGE_PART_KEYS)
-            or not isinstance(image_url, dict)
+            or type(image_url) is not dict
             or _unexpected_keys(image_url, OPENAI_IMAGE_URL_KEYS)
-            or not isinstance(image_url.get("url"), str)
-            or ("detail" in image_url and image_url["detail"] not in {"auto", "low", "high"})
+            or type(image_url.get("url")) is not str
+            or (
+                "detail" in image_url
+                and (type(detail) is not str or detail not in {"auto", "low", "high"})
+            )
         ):
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
@@ -420,12 +546,14 @@ def _validate_content_part(part: object, message_index: int, part_index: int) ->
 
     if part_type == "input_audio":
         input_audio = part.get("input_audio")
+        audio_format = input_audio.get("format") if type(input_audio) is dict else None
         if (
             _unexpected_keys(part, OPENAI_AUDIO_PART_KEYS)
-            or not isinstance(input_audio, dict)
+            or type(input_audio) is not dict
             or _unexpected_keys(input_audio, OPENAI_AUDIO_KEYS)
-            or not isinstance(input_audio.get("data"), str)
-            or input_audio.get("format") not in {"wav", "mp3"}
+            or type(input_audio.get("data")) is not str
+            or type(audio_format) is not str
+            or audio_format not in {"wav", "mp3"}
         ):
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
@@ -445,9 +573,9 @@ def _validate_message_content(
     """Validate string or ordered OpenAI content-part-array message content."""
     if content is None and allow_null:
         return
-    if isinstance(content, str):
+    if type(content) is str:
         return
-    if isinstance(content, list):
+    if type(content) is list:
         if not content:
             raise ConversationValidationError(
                 f"Message at index {message_index} content-part arrays must not be empty"
@@ -501,6 +629,54 @@ def validate_conversation_arguments(messages: Messages) -> None:
                 validated.add(arguments)
 
 
+def validate_conversation_top_level(
+    data: object,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Validate the raw envelope without traversing any message or tool value."""
+
+    data_type = type(data)
+    if data_type is not dict:
+        if issubclass(data_type, dict):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+        raise ConversationValidationError(
+            f"Expected dict, got {data_type.__name__}. "
+            "Conversation must be a JSON object with 'messages' key."
+        )
+    data = cast(dict[str, Any], data)
+    keys: list[str] = []
+    for key in dict.__iter__(data):
+        if type(key) is not str:
+            raise ConversationValidationError(f"conversation {_EXACT_KEY_ERROR}")
+        if key not in OPENAI_TOP_LEVEL_KEYS:
+            raise ConversationValidationError(
+                f"Conversation contains unsupported top-level keys: {[key]}. "
+                "Expected only 'messages' and optional 'tools'."
+            )
+        keys.append(key)
+    if "messages" not in data:
+        raise ConversationValidationError(
+            f"Missing required 'messages' key. "
+            f"Available keys: {keys}. "
+            "Did you mean to wrap your data in {'messages': [...]}?"
+        )
+
+    raw_messages = dict.__getitem__(data, "messages")
+    if type(raw_messages) is not list:
+        if issubclass(type(raw_messages), list):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+        raise ConversationValidationError(
+            f"'messages' must be a list, got {type(raw_messages).__name__}"
+        )
+    messages = cast(list[dict[str, Any]], raw_messages)
+
+    raw_tools = dict.__getitem__(data, "tools") if "tools" in keys else None
+    if "tools" in keys and type(raw_tools) is not list:
+        if issubclass(type(raw_tools), list):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+        raise ConversationValidationError(f"'tools' must be a list, got {type(raw_tools).__name__}")
+    return messages, cast(list[dict[str, Any]] | None, raw_tools)
+
+
 def validate_conversation(
     data: dict,
     *,
@@ -514,8 +690,12 @@ def validate_conversation(
     preflight. It validates the argument field's wire type without parsing a
     potentially oversized blob; the scanner validates every argument object
     after limits have been applied. ``max_nesting_depth`` bounds the JSON
-    nesting of message content (and, when ``parse_arguments`` is set, tool-call
-    arguments) — the same limit the lazy ``ToolCall.arguments`` decoder enforces.
+    nesting of message content, tool definitions, and (when ``parse_arguments``
+    is set) tool-call arguments — the same limit the lazy ``ToolCall.arguments``
+    decoder enforces. Raw JSON containers and object keys must use exact built-in
+    types so validation cannot execute overridable accessors between total-size
+    preflight and canonicalization. Tool-call argument strings retain their
+    explicitly supported ``str``-subclass compatibility.
     """
 
     if (
@@ -528,32 +708,10 @@ def validate_conversation(
     if allowed_roles is None:
         allowed_roles = OPENAI_MESSAGE_ROLES
 
-    if not isinstance(data, dict):
-        raise ConversationValidationError(
-            f"Expected dict, got {type(data).__name__}. "
-            "Conversation must be a JSON object with 'messages' key."
-        )
-
-    unexpected = _unexpected_keys(data, OPENAI_TOP_LEVEL_KEYS)
-    if unexpected:
-        raise ConversationValidationError(
-            f"Conversation contains unsupported top-level keys: {unexpected}. "
-            "Expected only 'messages' and optional 'tools'."
-        )
-
-    if "messages" not in data:
-        available_keys = list(data.keys())
-        raise ConversationValidationError(
-            f"Missing required 'messages' key. "
-            f"Available keys: {available_keys}. "
-            "Did you mean to wrap your data in {'messages': [...]}?"
-        )
-
-    messages = data["messages"]
-    if not isinstance(messages, list):
-        raise ConversationValidationError(
-            f"'messages' must be a list, got {type(messages).__name__}"
-        )
+    messages, tools = validate_conversation_top_level(data)
+    _validate_raw_json_container_types(messages)
+    if tools is not None:
+        _validate_raw_json_container_types(tools)
 
     if not messages:
         raise ConversationValidationError("'messages' list is empty. Nothing to scan.")
@@ -561,7 +719,7 @@ def validate_conversation(
     seen_call_ids: set[str] = set()
 
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+        if type(msg) is not dict:
             raise ConversationValidationError(
                 f"Message at index {i} is not a dict (got {type(msg).__name__}). "
                 "Each message must be an object with 'role' and 'content' keys."
@@ -573,7 +731,11 @@ def validate_conversation(
             )
 
         role = msg["role"]
-        if not isinstance(role, str) or role not in allowed_roles:
+        if type(role) is not str:
+            raise ConversationValidationError(
+                f"Message at index {i} role must be an exact built-in string"
+            )
+        if role not in allowed_roles:
             raise ConversationValidationError(
                 f"Message at index {i} has invalid role '{role}'. Valid roles: "
                 f"{sorted(allowed_roles)}"
@@ -593,11 +755,11 @@ def validate_conversation(
             )
 
         if role == "tool":
-            if "content" not in msg or not isinstance(msg["content"], str):
+            if "content" not in msg or type(msg["content"]) is not str:
                 raise ConversationValidationError(
                     f"Tool message at index {i} must have string 'content'"
                 )
-            if not isinstance(msg.get("tool_call_id"), str) or not msg["tool_call_id"]:
+            if type(msg.get("tool_call_id")) is not str or not msg["tool_call_id"]:
                 raise ConversationValidationError(
                     f"Tool message at index {i} must have a non-empty string 'tool_call_id'"
                 )
@@ -615,11 +777,7 @@ def validate_conversation(
             _validate_message_content(msg["content"], i, max_nesting_depth)
 
         if role == "assistant":
-            if (
-                "refusal" in msg
-                and msg["refusal"] is not None
-                and not isinstance(msg["refusal"], str)
-            ):
+            if "refusal" in msg and msg["refusal"] is not None and type(msg["refusal"]) is not str:
                 raise ConversationValidationError(
                     f"Assistant message at index {i} 'refusal' must be a string or null"
                 )
@@ -632,7 +790,7 @@ def validate_conversation(
                 )
             if "tool_calls" in msg:
                 tool_calls = msg["tool_calls"]
-                if not isinstance(tool_calls, list) or not tool_calls:
+                if type(tool_calls) is not list or not tool_calls:
                     raise ConversationValidationError(
                         f"Assistant message at index {i} 'tool_calls' must be a non-empty list"
                     )
@@ -673,14 +831,11 @@ def validate_conversation(
             )
         seen_response_ids.add(tool_call_id)
 
-    if "tools" in data:
-        tools = data["tools"]
-        if not isinstance(tools, list):
-            raise ConversationValidationError(f"'tools' must be a list, got {type(tools).__name__}")
-
+    if tools is not None:
         tool_names: set[str] = set()
+        tool_schema_budget = _JsonTreeBudget()
         for i, tool in enumerate(tools):
-            if not isinstance(tool, dict):
+            if type(tool) is not dict:
                 raise ConversationValidationError(f"Tool at index {i} is not a dict")
 
             if _unexpected_keys(tool, OPENAI_TOOL_KEYS):
@@ -688,29 +843,43 @@ def validate_conversation(
                     f"Tool at index {i} has unsupported keys: "
                     f"{_unexpected_keys(tool, OPENAI_TOOL_KEYS)}. Expected OpenAI tool fields."
                 )
-            if tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+            tool_type = tool.get("type")
+            if (
+                type(tool_type) is not str
+                or tool_type != "function"
+                or type(tool.get("function")) is not dict
+            ):
                 raise ConversationValidationError(
                     f"Tool at index {i} has invalid format. "
                     "Expected OpenAI format with type='function' and a function object. "
                     f"Got keys: {list(tool.keys())}"
                 )
-            function = tool["function"]
+            function = cast(dict[str, Any], tool["function"])
             unexpected_function_keys = _unexpected_keys(function, OPENAI_FUNCTION_KEYS)
             if unexpected_function_keys:
                 raise ConversationValidationError(
                     f"Tool at index {i} function has unsupported keys: {unexpected_function_keys}"
                 )
-            if not isinstance(function.get("name"), str) or not function["name"]:
+            if type(function.get("name")) is not str or not function["name"]:
                 raise ConversationValidationError(
                     f"Tool at index {i} function must have a non-empty string 'name'"
                 )
-            if "description" in function and not isinstance(function["description"], str):
+            if "description" in function and type(function["description"]) is not str:
                 raise ConversationValidationError(
                     f"Tool at index {i} function 'description' must be a string"
                 )
-            if "parameters" in function and not isinstance(function["parameters"], dict):
+            if "parameters" in function and type(function["parameters"]) is not dict:
                 raise ConversationValidationError(
                     f"Tool at index {i} function 'parameters' must be an object"
+                )
+            if "parameters" in function:
+                # Tool schemas are caller-supplied JSON. Validate them with the bounded,
+                # depth-sized walk before canonicalization recursively freezes the tree.
+                _validate_json_tree(
+                    function["parameters"],
+                    f"tools[{i}].function.parameters",
+                    max_nesting_depth,
+                    budget=tool_schema_budget,
                 )
 
             tool_name = function["name"]
@@ -732,7 +901,7 @@ def _validate_tool_call(
 ) -> None:
     """Validate one OpenAI assistant tool call without parsing its arguments."""
 
-    if not isinstance(tool_call, dict):
+    if type(tool_call) is not dict:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             f"is not an object (got {type(tool_call).__name__})"
@@ -745,7 +914,7 @@ def _validate_tool_call(
             f"has unsupported keys: {unexpected}"
         )
     call_id = tool_call.get("id")
-    if not isinstance(call_id, str) or not call_id:
+    if type(call_id) is not str or not call_id:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "must have a non-empty string 'id'"
@@ -754,7 +923,12 @@ def _validate_tool_call(
         raise ConversationValidationError(
             f"Duplicate tool-call id '{call_id}' at assistant message index {message_index}"
         )
-    if tool_call.get("type") != "function" or not isinstance(tool_call.get("function"), dict):
+    tool_type = tool_call.get("type")
+    if (
+        type(tool_type) is not str
+        or tool_type != "function"
+        or type(tool_call.get("function")) is not dict
+    ):
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "must use type='function' with a function object"
@@ -766,12 +940,12 @@ def _validate_tool_call(
             f"Assistant message at index {message_index} tool_calls[{call_index}].function "
             f"has unsupported keys: {unexpected_function_keys}"
         )
-    if not isinstance(function.get("name"), str) or not function["name"]:
+    if type(function.get("name")) is not str or not function["name"]:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "function must have a non-empty string 'name'"
         )
-    if not isinstance(function.get("arguments"), str):
+    if not issubclass(type(function.get("arguments")), str):
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "function 'arguments' must be a JSON string"

@@ -16,7 +16,7 @@
 
 """Context for rule evaluation."""
 
-import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +32,12 @@ from quarry.types.messages import Message, Messages, ToolCall, ToolCallTypeRegis
 # must not build a 10,000-clause message. This caps items WITHIN a violation, not the number of
 # violations reported — every breached limit is always named.
 _MAX_REPORTED_ITEMS = 5
+_EXACT_CONTAINER_ERROR = (
+    "conversation contains an overridable dict/list subclass; "
+    "use exact built-in dict and list containers"
+)
+_EXACT_KEY_ERROR = "conversation JSON object keys must use exact built-in strings"
+_REFERENCE_BYTES = max(1, list.__sizeof__([None]) - list.__sizeof__([]))
 
 
 def _summarize(details: list[str]) -> str:
@@ -69,49 +75,149 @@ def _timeline_items(msg: dict[str, Any]) -> int:
     return 1
 
 
-def _bounded_deep_size(value: Any, limit: int, seen: set[int] | None = None) -> int:
+def _exact_dict_children(value: dict) -> Iterator[Any]:
+    """Yield an exact dict's keys and values without calling overridable methods."""
+
+    for key, child in dict.items(value):
+        if type(key) is not str:
+            raise ConversationValidationError(_EXACT_KEY_ERROR)
+        yield key
+        yield child
+
+
+def _base_object_size(value: Any) -> int:
+    """Measure with built-in descriptors, never an untrusted ``__sizeof__`` override."""
+
+    value_type = type(value)
+    if value_type is dict:
+        return dict.__sizeof__(value)
+    if value_type is list:
+        return list.__sizeof__(value)
+    if issubclass(value_type, str):
+        return str.__sizeof__(value)
+    if issubclass(value_type, int):
+        return int.__sizeof__(value)
+    if issubclass(value_type, float):
+        return float.__sizeof__(value)
+    return object.__sizeof__(value)
+
+
+def _bounded_deep_size(value: Any, limit: int) -> int:
     """Measure nested input without walking beyond the configured byte budget.
 
     Two properties callers must account for.
 
-    The unit is the PYTHON OBJECT footprint (``sys.getsizeof``, summed recursively), not
-    serialized length, and the gap between them depends on SHAPE rather than size. A payload
-    dominated by a few large strings — a conversation carrying inline media — measures within a
-    percent of its JSON length, because a ``str``'s footprint is its bytes plus a small header.
-    A payload of many small objects pays that header thousands of times over: 10,000 short
-    messages measure ~6x their JSON length, and a single tiny message ~12x.
+    The unit is the PYTHON OBJECT footprint (built-in ``__sizeof__`` descriptors, summed
+    recursively), not serialized length, and the gap between them depends on SHAPE rather than
+    size. A payload dominated by a few large strings — a conversation carrying inline media —
+    measures within a percent of its JSON length, because a ``str``'s footprint is its bytes plus
+    a small header. A payload of many small objects pays that header thousands of times over:
+    10,000 short messages measure ~6x their JSON length, and a single tiny message ~12x.
 
-    And the result saturates: once the running total passes ``limit`` this returns ``limit + 1``
-    and stops walking, so a return value above ``limit`` means "over budget" and is not a
-    measurement of how far over.
+    Shared immutable scalars are charged once, matching their live memory footprint. Container
+    occurrences are charged every time they appear: validation and canonicalization materialize
+    every occurrence, so identity-deduplicating a reused schema would hide their aggregate work
+    and output memory.
+
+    The result saturates: once the running total or reference-work budget passes ``limit`` this
+    returns ``limit + 1`` and stops walking, so a return value above ``limit`` means "over budget"
+    and is not a measurement of how far over. Iterator frames keep traversal memory proportional
+    to nesting depth; the scalar identity set is bounded by the charged object footprint.
     """
-    if seen is None:
-        seen = set()
+    total = 0
+    visits = 0
+    max_visits = max(1, limit // _REFERENCE_BYTES + 1)
+    seen_scalars: set[int] = set()
+    active_containers: set[int] = set()
+    frames: list[tuple[int | None, Any]] = [(None, iter((value,)))]
+    while frames:
+        try:
+            current = next(frames[-1][1])
+        except StopIteration:
+            container_id, _ = frames.pop()
+            if container_id is not None:
+                active_containers.remove(container_id)
+            continue
 
-    value_id = id(value)
-    if value_id in seen:
-        return 0
-    seen.add(value_id)
+        visits += 1
+        if visits > max_visits:
+            return limit + 1
 
-    try:
-        total = sys.getsizeof(value)
-    except TypeError:
-        total = 0
-    if total > limit:
-        return limit + 1
+        current_id = id(current)
+        current_type = type(current)
+        is_container = current_type is dict or current_type is list
+        if is_container:
+            if current_id in active_containers:
+                # Structural validation reports the cycle after this bounded preflight.
+                continue
+        elif issubclass(current_type, (dict, list)):
+            raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+        elif current_id in seen_scalars:
+            continue
+        else:
+            seen_scalars.add(current_id)
 
-    if isinstance(value, dict):
-        children = (child for pair in value.items() for child in pair)
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        children = iter(value)
-    else:
-        return total
-
-    for child in children:
-        total += _bounded_deep_size(child, limit - total, seen)
+        total += _base_object_size(current)
         if total > limit:
             return limit + 1
+
+        if current_type is dict:
+            active_containers.add(current_id)
+            frames.append((current_id, _exact_dict_children(current)))
+        elif current_type is list:
+            active_containers.add(current_id)
+            frames.append((current_id, list.__iter__(current)))
     return total
+
+
+@dataclass(frozen=True)
+class _TotalSizePreflight:
+    """Identity-bound proof that one raw conversation passed its total-size budget."""
+
+    messages: object
+    tools: object
+    limit: int
+
+    def matches(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, limit: int
+    ) -> bool:
+        if type(messages) is not list or (tools is not None and type(tools) is not list):
+            return False
+        return (
+            self.messages is messages
+            and self.tools is (tools if tools else None)
+            and self.limit == limit
+        )
+
+
+def preflight_conversation_total_size(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, limit: int
+) -> _TotalSizePreflight:
+    """Reject an oversized raw conversation before any full nested-data traversal."""
+
+    if type(messages) is not list or (tools is not None and type(tools) is not list):
+        raise ConversationValidationError(_EXACT_CONTAINER_ERROR)
+    total_size = _bounded_deep_size({"messages": messages, "tools": tools or []}, limit)
+    if total_size <= limit:
+        return _TotalSizePreflight(messages, tools if tools else None, limit)
+
+    # No measured size is reported. ``_bounded_deep_size`` stops walking the moment it
+    # passes the budget and returns ``limit + 1``, so any number here would always be
+    # ``limit + 1`` — a fake measurement that reads like a real one. Stating the budget
+    # and the unit is the honest version.
+    raise _limit_error(
+        {
+            "max_total_size": (
+                f"input exceeds the {limit}-byte aggregate PYTHON OBJECT budget. This is not "
+                "serialized length: repeated container references are charged per occurrence "
+                "because validation materializes each occurrence, while shared immutable scalars "
+                "are charged once. Large strings such as inline media measure near their JSON "
+                "length, but per-object overhead makes many small messages measure roughly "
+                "5-12x their JSON size. The exact size is not reported because measurement stops "
+                "at the budget rather than walking an oversized payload in full"
+            )
+        }
+    )
 
 
 @dataclass
@@ -129,6 +235,7 @@ class ScanContext:
         tool_call_types: ToolCallTypeRegistry | None = None,
         parameters=None,
         parameter_specs=None,
+        _total_size_preflight: _TotalSizePreflight | None = None,
     ):
         self.resource_manager = resource_manager
         self.function_cache = function_cache
@@ -149,7 +256,7 @@ class ScanContext:
         if self.limits.enforce_limits:
             # Validation only. ``messages`` and ``tools`` are handed to ``Conversation`` exactly
             # as the caller passed them — same objects, same bytes.
-            self._enforce_limits(messages, tools)
+            self._enforce_limits(messages, tools, total_size_preflight=_total_size_preflight)
 
         self.conversation = Conversation(
             messages,
@@ -166,7 +273,11 @@ class ScanContext:
         self.map_filter_results: dict = {}
 
     def _enforce_limits(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        *,
+        total_size_preflight: _TotalSizePreflight | None = None,
     ) -> None:
         """Reject any input that breaches a configured safety limit. Never reshape it.
 
@@ -183,38 +294,20 @@ class ScanContext:
         alone: it is what bounds the cost of measuring everything else, so a payload breaching it
         is rejected before the per-message and per-call walks run over it.
         """
-        if not isinstance(messages, list):
+        if type(messages) is not list:
             raise ConversationValidationError(
                 f"messages must be a list, got {type(messages).__name__}"
             )
-        if tools is not None and not isinstance(tools, list):
+        if tools is not None and type(tools) is not list:
             raise ConversationValidationError(f"tools must be a list, got {type(tools).__name__}")
 
-        # Total size first and alone. It is the limit that bounds the cost of measuring the
-        # others, so a payload breaching it is rejected before the per-message and per-call
-        # walks below run over it. Measured recursively: a shallow top-level sizeof
-        # lets arbitrarily large nested argument dicts bypass the budget.
-        total_size = _bounded_deep_size(
-            {"messages": messages, "tools": tools or []}, self.limits.max_total_size
-        )
-        if total_size > self.limits.max_total_size:
-            # No measured size is reported. ``_bounded_deep_size`` stops walking the moment it
-            # passes the budget and returns ``limit + 1``, so any number here would always be
-            # ``limit + 1`` — a fake measurement that reads like a real one. Stating the budget
-            # and the unit is the honest version.
-            raise _limit_error(
-                {
-                    "max_total_size": (
-                        f"input exceeds the {self.limits.max_total_size}-byte budget. This limit "
-                        "counts the PYTHON OBJECT footprint in memory, not serialized length. The "
-                        "two are within a percent for a conversation dominated by large strings "
-                        "such as inline media, but per-object overhead makes a conversation of "
-                        "many small messages measure roughly 5-12x its JSON size. The exact size "
-                        "is not reported because measurement stops at the budget rather than "
-                        "walking an oversized payload in full"
-                    )
-                }
-            )
+        # Scanner paths run this before full conversation validation so a wide tool schema
+        # cannot consume work first. Direct ``ScanContext`` callers still get the same check
+        # here; the private marker avoids measuring scanner input twice.
+        if total_size_preflight is None or not total_size_preflight.matches(
+            messages, tools, self.limits.max_total_size
+        ):
+            preflight_conversation_total_size(messages, tools, self.limits.max_total_size)
 
         violations: dict[str, str] = {}
 
@@ -281,7 +374,7 @@ class ScanContext:
             function = tool_call.get("function") if isinstance(tool_call, dict) else None
             arguments = function.get("arguments") if isinstance(function, dict) else None
             argument_size = (
-                len(arguments.encode("utf-8"))
+                len(str.encode(arguments, "utf-8"))
                 if isinstance(arguments, str)
                 else _bounded_deep_size(arguments, self.limits.max_tool_argument_size)
             )

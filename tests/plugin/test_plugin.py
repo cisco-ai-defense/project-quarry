@@ -1450,6 +1450,132 @@ async def test_an_invalid_conversation_is_reported_without_a_verdict():
     assert result["diagnostics"][0]["code"] == "invalid_conversation"
 
 
+async def test_a_deep_tool_schema_is_reported_as_invalid_input():
+    schema: dict[str, Any] = {}
+    for _ in range(600):
+        schema = {"child": schema}
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": schema},
+            }
+        ],
+    }
+
+    result = await QuarryPlugin().scan(
+        rule_text=FLOW_RULE,
+        conversation=conversation,
+        explore_rate=1.0,
+    )
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"] == [
+        {
+            "code": "invalid_conversation",
+            "message": "tools[0].function.parameters exceeds max_nesting_depth 100",
+        }
+    ]
+    assert "matched" not in result
+
+
+async def test_an_oversized_wide_tool_schema_has_no_verdict():
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"enum": list(range(1_000))},
+                },
+            }
+        ],
+    }
+    plugin = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(max_total_size=2_000)))
+
+    result = await plugin.scan(rule_text=FLOW_RULE, conversation=conversation)
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"][0]["code"] == "invalid_conversation"
+    assert "max_total_size" in result["diagnostics"][0]["message"]
+    assert "matched" not in result
+
+
+async def test_a_shared_wide_tool_schema_is_charged_for_each_tool():
+    schema = {"enum": list(range(10_000))}
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": f"lookup_{index}", "parameters": schema},
+            }
+            for index in range(4)
+        ],
+    }
+    plugin = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(max_total_size=500_000)))
+
+    result = await plugin.scan(rule_text=FLOW_RULE, conversation=conversation)
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"][0]["code"] == "invalid_conversation"
+    assert "max_total_size" in result["diagnostics"][0]["message"]
+    assert "matched" not in result
+
+
+async def test_an_overridable_schema_container_has_no_verdict_or_callback():
+    class ExpandingList(list):
+        triggered = False
+
+        def _expand(self, *args, **kwargs):
+            self.triggered = True
+            list.extend(self, [0] * 100_000)
+            raise AssertionError("overridable schema access must not run")
+
+        __iter__ = _expand
+        __getitem__ = _expand
+        __len__ = _expand
+        __bool__ = _expand
+
+    values = ExpandingList([1, 2, 3])
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"enum": values}},
+            }
+        ],
+    }
+
+    result = await QuarryPlugin().scan(
+        rule_text=FLOW_RULE,
+        conversation=conversation,
+        explore_rate=1.0,
+    )
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"] == [
+        {
+            "code": "invalid_conversation",
+            "message": (
+                "conversation contains an overridable dict/list subclass; "
+                "use exact built-in dict and list containers"
+            ),
+        }
+    ]
+    assert "matched" not in result
+    assert result["decision_path"]["conversation_sha256"] is None
+    assert result["decision_path"]["leaf"] is None
+    assert values.triggered is False
+
+
 @pytest.mark.parametrize("fail_on_timeout", [True, False])
 async def test_plugin_returns_a_structured_timeout_result(fail_on_timeout):
     # A timeout is reported per conversation with its partial result, whether or not the

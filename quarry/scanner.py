@@ -17,6 +17,7 @@
 """Scanner engine."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -82,8 +83,9 @@ from quarry.safety.validator import (
     Severity,
     validate_conversation,
     validate_conversation_arguments,
+    validate_conversation_top_level,
 )
-from quarry.types.context import ScanContext
+from quarry.types.context import ScanContext, preflight_conversation_total_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -942,6 +944,7 @@ class DSLScanner:
         rules_subset: set[str] | None = None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute parameters already validated by ``CompiledPolicy``."""
@@ -956,6 +959,7 @@ class DSLScanner:
                 parameters=parameters,
                 decision_paths=decision_paths,
                 explore=explore,
+                explore_selector=explore_selector,
                 deferred_evidence=deferred_evidence,
             )
 
@@ -970,6 +974,7 @@ class DSLScanner:
         parameters: dict[str, ParameterValue] | None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
@@ -1008,7 +1013,15 @@ class DSLScanner:
             )
         bound_parameters = parameters or {}
 
+        total_size_preflight = None
         try:
+            # Reject the envelope and unsupported top-level keys without touching their values.
+            # Accepted messages/tools then receive total-size preflight before any deep walk.
+            raw_messages, raw_tools = validate_conversation_top_level(data)
+            if self.limits.enforce_limits:
+                total_size_preflight = preflight_conversation_total_size(
+                    raw_messages, raw_tools, self.limits.max_total_size
+                )
             validate_conversation(
                 data,
                 parse_arguments=False,
@@ -1061,6 +1074,7 @@ class DSLScanner:
                 tool_call_types=self.tool_call_types,
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
+                _total_size_preflight=total_size_preflight,
             )
         except ConversationValidationError as e:
             message = str(e)
@@ -1107,6 +1121,11 @@ class DSLScanner:
                 error=f"Conversation validation error: {message}",
                 validation_error=message,
             )
+
+        if explore_selector is not None:
+            # Selection hashes only fully validated, size-bounded exact-container JSON. This
+            # keeps plugin/policy callers from traversing hostile containers before preflight.
+            explore = explore_selector(data)
 
         # No post-construction limit handling. ``ScanContext`` raises on any breach and the
         # handler above turns that into an INVALID result naming the limit, so there is no

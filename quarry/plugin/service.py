@@ -712,10 +712,10 @@ class QuarryPlugin:
                 tree,
                 (result.decision_paths or {}).get(rule_name),
                 matched=rule_name in result.rule_matches if result.is_complete else None,
-                conversation=item,
+                conversation=None if result.validation_error is not None else item,
                 parameter_digest=result.parameter_digest,
                 explain=bool(explain),
-                explore_rate=float(explore_rate),
+                explore_rate=0.0 if result.validation_error is not None else float(explore_rate),
             )
             payloads.append(payload)
         if conversation is not None:
