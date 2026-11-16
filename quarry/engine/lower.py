@@ -108,6 +108,12 @@ class _Tables:
         """Return whether the node contains a model call."""
         return self._k._Compiler._contains_model_call(node)
 
+    def reads_spans(self, node) -> bool:
+        return self._k._Compiler._reads_spans(node)
+
+    def lists_spans(self, node, scope=None) -> bool:
+        return self._f.lists_spans(node, scope)
+
     def model_calls(self, node):
         """Return the model calls in the node."""
         return self._k._Compiler._model_calls(node)
@@ -313,6 +319,8 @@ class _Tables:
         if len(fc.args) != 1 or not isinstance(fc.args[0], FilterComprehension):
             return None
         comp = fc.args[0]
+        if self.lists_spans(comp.collection):
+            return None
         if (
             isinstance(comp.collection, FunctionCall)
             and comp.collection.name == k._chunk_source_func()

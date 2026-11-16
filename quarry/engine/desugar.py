@@ -177,7 +177,9 @@ class Desugarer:
             return C.neg(self.cond(node.operand, scope))
         if isinstance(node, FlowOp):
             return self.flow(node, scope)
-        if isinstance(node, (AnyComprehension, AllComprehension)):
+        if isinstance(node, (AnyComprehension, AllComprehension)) and not self._t.lists_spans(
+            node.collection, scope
+        ):
             return self.comprehension(node, scope)
         counted = self.filter_count(node, scope)
         if counted is not None:
@@ -193,7 +195,7 @@ class Desugarer:
         if not reads:
             if scope and self._t.is_chunked(node):
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
-            if self._t.contains_model_call(node):
+            if self._t.contains_model_call(node) or self._t.reads_spans(node):
                 # A model input reads `X[i]` as a message that may not exist, not as an event
                 # to pin the check to: a model check that reads no element in scope is scored
                 # once per scan against the conversation, as `messages[-1:]` is.

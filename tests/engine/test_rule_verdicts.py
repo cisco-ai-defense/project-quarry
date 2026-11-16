@@ -117,6 +117,21 @@ _HIT = [_user("x"), _call("a", "c1"), _call("b", "c2")]
 
 
 _VERDICTS = [
+    pytest.param(
+        _rule("len($p.spans(messages)) > 0", '$p = "needle"'),
+        _conv(_user("a needle here")),
+        True,
+        id="declared-string-spans-match-chat",
+    ),
+    pytest.param(
+        _rule(
+            '"a needle" in messages[-1].content.extract($p.spans(messages[-1].content), left=2)',
+            '$p = "needle"',
+        ),
+        _conv(_user("a needle here")),
+        True,
+        id="extract-window-preserves-left-context",
+    ),
     # ── string matching on message and argument fields ──────────────────
     pytest.param(
         _rule(_SUDO), _conv(_call("execute_shell", command="sudo rm")), True, id="contains-any-hit"

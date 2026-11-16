@@ -251,5 +251,13 @@ class RegexCache:
         compiled = self._compiled_for_match(str(pattern), flags)
         return (m.group(0) for m in compiled.finditer(str(text)))
 
+    def iter_match_spans(
+        self, pattern: str, text: str, flags: int = 0
+    ) -> Iterator[tuple[int, int]]:
+        """Stream nonoverlapping RE2 match offsets through the validated cache."""
+
+        compiled = self._compiled_for_match(pattern, flags)
+        return (m.span() for m in compiled.finditer(str(text)))
+
 
 regex_cache = RegexCache()
