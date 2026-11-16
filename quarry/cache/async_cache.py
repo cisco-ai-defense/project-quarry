@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import math
+import os
 import sys
 import threading
 import time
@@ -37,6 +38,7 @@ from quarry.cache.constants import (
     RESULT_CACHE_MAX_ENTRIES,
     RESULT_CACHE_TTL_SECONDS,
 )
+from quarry.cache.scan_responses import ResponseReader, ScanLease, ScanResponses
 from quarry.safety.timer import (
     QuarryTimeoutError,
     current_evaluation_deadline,
@@ -60,18 +62,30 @@ def scan_scope(scan: object = None) -> Generator[object, None, None]:
     """Run one scan, or resume ``scan`` (as its deferred evidence does): the calls it starts
     are its own."""
 
-    scan = object() if scan is None else scan
+    scan = ScanResponses() if scan is None else scan
+    if type(scan) is ScanResponses and scan.pid != os.getpid():
+        scan = ScanResponses()
+    lease = ScanLease(scan if type(scan) is ScanResponses else None)
     token = _scan.set(scan)
     try:
         yield scan
     finally:
-        _scan.reset(token)
+        try:
+            _scan.reset(token)
+        finally:
+            lease.close()
 
 
 def current_scan() -> object:
     """Return the running scan, for resuming it with ``scan_scope``."""
 
     return _scan.get()
+
+
+def retain_scan() -> ScanLease:
+    """Keep the current scan's replies until explicitly owned deferred work closes."""
+    scan = _scan.get()
+    return ScanLease(scan if type(scan) is ScanResponses else None)
 
 
 class SlidingTTLCache(MutableMapping):
@@ -186,6 +200,11 @@ class SlidingTTLCache(MutableMapping):
         self._running = 0
         self._sizes.clear()
         self._byte_total = 0
+
+    def _peek(self, key: Any, default: Any) -> Any:
+        """Inspect identity for invalidation without refreshing a different reply's TTL."""
+        entry = self._entries.get(key)
+        return default if entry is None else entry[0]
 
     def clear_results(self) -> None:
         """Drop completed results while retaining calls that are still running."""
@@ -539,12 +558,24 @@ class AsyncFunctionCache:
             finally:
                 await self._leave(pending)
 
-    def forget(self, key: bytes) -> None:
+    def response_reader(self, key: bytes) -> ResponseReader:
+        """Read one model reply with this scan's explicit acceptance lifetime."""
+        scan = _scan.get()
+        return ResponseReader(self, key, scan if type(scan) is ScanResponses else None)
+
+    def forget(self, key: bytes, *, expected: Any = _MISSING) -> None:
         """Drop the result kept under ``key``, so the next caller calls again; a call
-        running under it is kept."""
+        running under it is kept. With ``expected``, invalidate only that physical reply,
+        without touching a replacement reply's expiry or recency."""
 
         with self._lock:
-            if not isinstance(self._store.get(key), _Pending):
+            store = self._store
+            value = (
+                store._peek(key, _MISSING)
+                if expected is not _MISSING and isinstance(store, SlidingTTLCache)
+                else store.get(key, _MISSING)
+            )
+            if not isinstance(value, _Pending) and (expected is _MISSING or value is expected):
                 self._store.pop(key, None)
 
     def _start(

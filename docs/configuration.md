@@ -76,7 +76,7 @@ model_cache:
 The defaults shown above retain a result for 12 hours after its last use, up to 100,000 completed
 results and 256 MiB of estimated result data. When either aggregate bound is exceeded, Quarry
 drops completed results from least to most recently used. A result larger than `max_bytes` is
-returned to its caller but is not cached. Calls still in flight remain shared, do not count
+returned to its caller but is not kept in this process table. Calls still in flight remain shared, do not count
 toward either aggregate bound, and begin their TTL and byte accounting only when they complete.
 
 `max_bytes` is a deterministic estimate made when a result is inserted, not process RSS or a
@@ -90,6 +90,21 @@ being traversed without limit. If retained-size inspection fails, the result is 
 cached. This does not detect every concurrent mutation: a change that does not make inspection
 fail can go unnoticed. Cached results should not be mutated; growth after insertion is not
 remeasured.
+
+## Accepted model replies during a scan
+
+A scan keeps the first accepted raw reply for each identical model request until its work,
+including deferred evidence, finishes. Process-cache eviction, expiry, clearing, or reconfiguration
+therefore preserves that scan's accepted reply. Aliases that send the same request share its raw
+reply; each reader still validates and interprets it using its own settings. A reader that rejects
+a reply invalidates it for later reads. Failed or cancelled reads do not turn an unaccepted reply
+into an accepted one.
+
+Scan-held references are separate from the process table. They can retain replies that exceed
+`max_bytes`, and are outside that byte total. The limit controls process-cache entries, not total
+memory retained by active scans or their deferred work. Those references are released when their
+scan work finishes, fails, is cancelled, or its deferred owner is closed. Other scans continue to
+use the process cache and shared running requests normally.
 
 ## Model templates and inheritance
 
