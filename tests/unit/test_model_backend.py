@@ -573,15 +573,30 @@ collect:
     assert (adapter.classifications, adapter.decoded_spans) == (1, [])
 
 
-def test_spans_over_a_constructed_input_are_rejected_at_load(tmp_path: Path) -> None:
-    rule = """rule "Synthetic"
+def test_spans_over_a_constructed_input_are_explicitly_unmapped(tmp_path: Path) -> None:
+    rule = """rule "Constructed span"
 condition: true
 collect:
-    [span for span in model("email").spans(message("user", "synthetic"), 0.70) if true]
+    [span for span in model("email").spans(message("user", "sample"), 0.70) if true]
 """
 
-    with pytest.raises(RuleValidationError, match="view of the original conversation"):
-        _collect_scanner(tmp_path, rule, ModelAdapter())
+    class ConstructedSpanAdapter(ModelAdapter):
+        async def decode_spans(self, _config, _raw_result, messages, _threshold):
+            assert messages[0].content == "sample"
+            return [Span(0, 0, 6, Score(0.9))]
+
+    scanner = _collect_scanner(tmp_path, rule, ConstructedSpanAdapter())
+    result = scanner.scan_data({"messages": [{"role": "user", "content": "source"}]})
+
+    assert (result.rule_matches, result.evaluation_errors) == (["Constructed span"], None)
+    span = result.outputs["Constructed span"].items[0].value
+    assert span.to_dict() == {
+        "message_index": 0,
+        "start": 0,
+        "end": 6,
+        "score": {"value": 0.9},
+        "source_unmapped": True,
+    }
 
 
 @pytest.mark.asyncio

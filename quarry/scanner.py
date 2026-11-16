@@ -45,8 +45,10 @@ from quarry.dsl.functions import (
     unrequested_action,
 )
 from quarry.dsl.parser import DSLParser
+from quarry.engine.atoms import Cost
 from quarry.engine.compiler import compile_rule
 from quarry.engine.contracts import CompiledRuleArtifact, ScanRecord
+from quarry.engine.decision import artifact_parts, reads_all
 from quarry.engine.events import EvaluationInput, build_evaluation_input
 from quarry.engine.executor import evaluate_async
 from quarry.engine.matchers import compare as _compare
@@ -540,6 +542,7 @@ class DSLScanner:
                     for alias, model in self.config.models.items()
                     if model.complete is not None
                 },
+                transforms=self.config.transforms,
             )
             if not result.ok:
                 msgs = "; ".join(d.message for d in result.diagnostics.errors) or "unknown error"
@@ -903,16 +906,22 @@ class DSLScanner:
                 )
 
     def _rule_grounds_external(self, rule_name: str) -> bool:
-        """Return whether a compiled rule invokes an external detector."""
+        """Return whether executable work may invoke an external service."""
 
         cached = self._external_rule_cache.get(rule_name)
         if cached is not None:
             return cached
-        artifact = self.compiled_rules.get(rule_name)
+        artifact = self.compiled_rules[rule_name]
         specs = getattr(artifact, "atom_specs", {}) or {}
+        # A retained tool-quantifier atom executes its body outside the root DFA. Follow
+        # derived parts recursively so nested body atoms participate in timeout selection.
+        retained = reads_all(artifact.dfa, artifact_parts(artifact))
         collect_plan = getattr(artifact, "collect_plan", None)
         result = any(
-            getattr(spec, "predicate", "") == "external" for spec in specs.values()
+            atom_id in retained
+            and getattr(spec, "predicate", "") == "external"
+            and getattr(spec, "cost", Cost.PURE).requires_external_service
+            for atom_id, spec in specs.items()
         ) or bool(collect_plan is not None and getattr(collect_plan, "has_external_work", False))
         self._external_rule_cache[rule_name] = result
         return result

@@ -36,6 +36,42 @@ texts:
 
 An inline text value also works. A rule reads it with `text_ref("policy")`. Keep policy text and credentials out of logs.
 
+## Content transforms
+
+Version 2 model inputs can apply named, reviewed local transforms to message text:
+
+```yaml
+transforms:
+  normalized:
+    operations:
+      - op: strip
+      - op: casefold
+      - op: replace
+        old: "legacy-label"
+        new: "category"
+```
+
+Use the transform as `messages.transform("normalized")`. The receiver can also be a message
+selection, filter, slice, composition, or another transformed value. Transform names are literal
+and must exist when the rule compiles.
+
+The operation allowlist is `strip`, `casefold`, literal `replace`, `prefix`, and `suffix`.
+`replace.old` must not be empty. Operations never execute custom code, read files, call a model,
+or resolve another transform. Configuration is immutable and rejects unknown fields and value
+types.
+
+Transforms apply independently to string content and each text part of multimodal content.
+Non-text parts, roles, message indexes, and tool-call/response links are preserved. Inserted text
+has no source position; a span that touches it is rejected instead of receiving invented
+coordinates. Replacements map to the complete source range they replaced, deletions map no output,
+and unchanged characters retain exact message and content-part offsets.
+
+The registry supports at most 64 transforms, each with at most 16 operations. A rule may apply at
+most 16 transforms in one expression. Runtime work is capped at 1,000,000 input characters,
+2,000,000 output characters, 8x expansion plus 4,096 inserted characters, 8,192 provenance
+segments, and 4,000,000 character-work units. `strip` uses Unicode whitespace rules; `casefold`
+processes each Unicode character deterministically and maps expansions back to that character.
+
 ## Model aliases
 
 A model alias names an adapter, model, and the operations a rule may use. Here is a score alias:

@@ -42,7 +42,11 @@ DSL_GRAMMAR = r"""
     parameters_block: "parameters:" parameter_def+
     parameter_def: PARAM_NAME ":" PARAM_TYPE POLICY_BOUND?
     condition: expr
-    ?expr: or_expr
+    ?expr: conditional_expr
+    // Conditional values bind more loosely than Boolean `or` and associate to the right.
+    // Comprehension sources and filters stop at `or_expr`, so their `if` stays unambiguous.
+    ?conditional_expr: or_expr "if" or_expr "else" conditional_expr -> conditional_value
+                     | or_expr
     or_expr: and_expr ("or" and_expr)*
     and_expr: not_expr ("and" not_expr)*
     ?not_expr: "not" not_expr -> not_op | flow_expr
@@ -109,8 +113,8 @@ DSL_GRAMMAR = r"""
     comprehension: any_comp | all_comp | filter_comp | map_comp
     any_comp: "any" IDENTIFIER "in" expr "where" expr
     all_comp: "all" IDENTIFIER "in" expr "where" expr
-    filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" expr "if" expr "]"
-    map_comp: "[" expr "for" IDENTIFIER "in" expr "]" | "[" expr "for" IDENTIFIER "in" expr "if" expr "]"
+    filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr "if" or_expr "]"
+    map_comp: "[" expr "for" IDENTIFIER "in" or_expr "]" | "[" expr "for" IDENTIFIER "in" or_expr "if" or_expr "]"
     pattern_block: "{" pattern_expr ("or" pattern_expr)* "}"
     pattern_expr: atom PATTERN_OPERATOR value | IDENTIFIER PATTERN_OPERATOR value
 
@@ -177,13 +181,22 @@ class OperatorPrecedence:
 
 OPERATOR_PRECEDENCE = (
     OperatorPrecedence(
-        1, "boolean or", ("or",), "left", "Evaluated after `and`.", "or_expr", "and_expr"
+        1,
+        "conditional value",
+        ("if ... else",),
+        "right",
+        "Chooses between two compatible values after evaluating a Boolean predicate.",
+        "conditional_expr",
+        "or_expr",
     ),
     OperatorPrecedence(
-        2, "boolean and", ("and",), "left", "Evaluated before `or`.", "and_expr", "not_expr"
+        2, "boolean or", ("or",), "left", "Evaluated after `and`.", "or_expr", "and_expr"
     ),
     OperatorPrecedence(
-        3,
+        3, "boolean and", ("and",), "left", "Evaluated before `or`.", "and_expr", "not_expr"
+    ),
+    OperatorPrecedence(
+        4,
         "boolean not",
         ("not",),
         "right",
@@ -192,7 +205,7 @@ OPERATOR_PRECEDENCE = (
         "flow_expr",
     ),
     OperatorPrecedence(
-        4,
+        5,
         "flow",
         (
             "before",
@@ -212,7 +225,7 @@ OPERATOR_PRECEDENCE = (
         "comparison",
     ),
     OperatorPrecedence(
-        5,
+        6,
         "comparison",
         ("==", "!=", ">", "<", ">=", "<="),
         "none",
@@ -221,7 +234,7 @@ OPERATOR_PRECEDENCE = (
         "in_expr",
     ),
     OperatorPrecedence(
-        6,
+        7,
         "text and membership",
         ("contains", "contains_any", "~", "matches", "in", "as"),
         "none",
@@ -230,19 +243,19 @@ OPERATOR_PRECEDENCE = (
         "arith_expr",
     ),
     OperatorPrecedence(
-        7,
+        8,
         "addition",
         ("+", "-"),
         "left",
-        "Adds or subtracts numeric values.",
+        "Adds or subtracts numbers; `+` also combines compatible message selections.",
         "arith_expr",
         "product_expr",
     ),
     OperatorPrecedence(
-        8, "multiplication", ("*",), "left", "Multiplies numeric values.", "product_expr", "atom"
+        9, "multiplication", ("*",), "left", "Multiplies numeric values.", "product_expr", "atom"
     ),
     OperatorPrecedence(
-        9,
+        10,
         "postfix access",
         (".field", ".method(...)", "[index]", "[slice]", ".*"),
         "left",

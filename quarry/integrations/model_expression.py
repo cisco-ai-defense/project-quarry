@@ -40,9 +40,13 @@ from quarry.engine.matchers import (
 )
 from quarry.engine.pacing import Pacer
 from quarry.engine.witness import MAX_JUDGE_REASONS, ModelResultEvidence
+from quarry.integrations.content_transforms import (
+    apply_content_transform,
+    compiled_content_transform,
+)
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
-from quarry.types.messages import Messages
+from quarry.types.messages import Message, Messages
 from quarry.types.text_resources import TextRef
 
 # The operator that keeps a comparison's meaning when its operands swap sides.
@@ -168,6 +172,106 @@ async def evaluate_model_expression(
             return value is MISSING or value is None
         return value is not MISSING and value is not None and str(value) == expression.value
 
+    if kind == "transform":
+        source = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(source, Messages):
+            raise TypeError("content transform source must be Messages")
+        if not isinstance(expression.value, str):
+            raise TypeError("compiled content transform identity must be a string")
+        return await apply_content_transform(source, compiled_content_transform(expression.value))
+
+    if kind == "conditional":
+        predicate = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if predicate is not MISSING and not isinstance(predicate, bool):
+            raise TypeError("conditional value predicate must be boolean")
+        branch = expression.children[1] if predicate is True else expression.children[2]
+        return await evaluate_model_expression(
+            branch,
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+
+    if kind == "concat":
+        parts = []
+        for child in expression.children:
+            parts.append(
+                await evaluate_model_expression(
+                    child,
+                    context,
+                    event=event,
+                    bindings=environment,
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+            )
+        if any(not isinstance(part, Messages) for part in parts):
+            raise TypeError("message combination operands must be Messages")
+        if context.limits.enforce_limits:
+            count = sum(len(part) for part in parts)
+            limit = context.limits.max_comprehension_size
+            if count > limit:
+                raise ValueError(
+                    f"combined message selection has {count} items, exceeding "
+                    f"max_comprehension_size={limit}"
+                )
+        raise_if_evaluation_expired()
+        return await Messages._combine_async(cast(list[Messages], parts))
+
+    if kind == "message_select":
+        source = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(source, Messages):
+            raise TypeError("message selection source must be Messages")
+        limit = context.limits.max_comprehension_size
+        if context.limits.enforce_limits and len(source) > limit:
+            raise ValueError(
+                f"message selection source has {len(source)} items, exceeding "
+                f"max_comprehension_size={limit}"
+            )
+        variable = str(expression.value)
+        positions: list[int] = []
+        pacer = Pacer()
+        for position, item in enumerate(source):
+            raise_if_evaluation_expired()
+            if pacer.due():
+                await asyncio.sleep(0)
+            predicate = await evaluate_model_expression(
+                expression.children[1],
+                context,
+                event=event,
+                bindings={**environment, variable: item},
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+            if predicate is not MISSING and not isinstance(predicate, bool):
+                raise TypeError("message selection predicate must be boolean")
+            if predicate is True:
+                positions.append(position)
+        return source._select_positions(positions)
+
     if kind == "field":
         base = await evaluate_model_expression(
             expression.children[0],
@@ -238,43 +342,50 @@ async def evaluate_model_expression(
         stop = expression.children[2].value
         return base[slice(start, stop)]
     if kind in {"message", "add_message"}:
-        offset = 0
-        messages = Messages()
-        if kind == "add_message":
-            messages = await evaluate_model_expression(
-                expression.children[0],
+        constructors = []
+        current = expression
+        while current.kind == "add_message":
+            constructors.append(current)
+            current = current.children[0]
+        if current.kind != "message":
+            raise ValueError("constructed message chain has an invalid receiver")
+        constructors.append(current)
+        constructors.reverse()
+
+        specifications = []
+        for index, constructor in enumerate(constructors):
+            if index and index % 16 == 0:
+                await asyncio.sleep(0)
+            raise_if_evaluation_expired()
+            offset = 0 if constructor.kind == "message" else 1
+            role = constructor.children[offset].value
+            content_expression = constructor.children[offset + 1]
+            # A field is read from its owner here, so the explain record can point at the owner.
+            field_read = content_expression.kind == "field"
+            content = owner = await evaluate_model_expression(
+                content_expression.children[0] if field_read else content_expression,
                 context,
                 event=event,
                 bindings=environment,
                 trace=trace,
                 regex_backend=regex_backend,
             )
-            offset = 1
-        role = expression.children[offset].value
-        content_expression = expression.children[offset + 1]
-        # A field is read from its owner here, so the explain record can point at the owner.
-        field_read = content_expression.kind == "field"
-        content = owner = await evaluate_model_expression(
-            content_expression.children[0] if field_read else content_expression,
-            context,
-            event=event,
-            bindings=environment,
-            trace=trace,
-            regex_backend=regex_backend,
-        )
-        if field_read and owner is not MISSING:
-            content = field_access(owner, str(content_expression.value))
-        # A turn with no content (a message that does not exist, a missing, null, or empty field)
-        # is omitted, not built: a different turn of the same chain can still have content, as a
-        # populated join() alongside an empty one. The chain as a whole has no content only when
-        # every turn does (checked where the built value is consumed).
-        if content is MISSING or content is None or content == "":
-            return messages
-        if not isinstance(content, str):
-            raise TypeError("model message content must resolve to a string")
-        if field_read:
-            _record_pieces(trace, context, [(owner, content)], content_expression)
-        return messages.add_message(str(role), content)
+            if field_read and owner is not MISSING:
+                content = field_access(owner, str(content_expression.value))
+            # Missing and null fields omit a turn. An explicitly empty string is still an
+            # authored message and remains distinct in model input and cache identity.
+            if content is MISSING or content is None:
+                continue
+            if not isinstance(content, str):
+                raise TypeError("model message content must resolve to a string")
+            provenance = None
+            if field_read:
+                _record_pieces(trace, context, [(owner, content)], content_expression)
+                if isinstance(owner, Message) and content_expression.value == "content":
+                    provenance = owner._content_provenance()
+            specifications.append((str(role), content, (id(constructor), 0), provenance))
+        raise_if_evaluation_expired()
+        return Messages()._add_synthetic_messages(tuple(specifications))
 
     if kind in {"refused", "if_refused"}:
         try:
@@ -513,13 +624,15 @@ def _split_comparator(expression: ModelExpression, context) -> tuple[str | None,
 def _span_of(messages: Messages, transcript: Messages) -> dict[str, Any]:
     """Return the span of the scanned transcript an input covers, first message to last.
 
-    Messages a rule built with ``message(...)`` have their own root, so their indexes are
-    not transcript positions; such an input is marked ``constructed``.
+    A mixed input retains its source envelope and is also marked as containing constructed text.
     """
 
-    if not messages.shares_root_with(transcript):
+    if not (messages.shares_root_with(transcript) or messages.shares_source_with(transcript)):
         return {"constructed": True}
-    return messages.span.to_dict()
+    result = messages.span.to_dict()
+    if not messages.shares_root_with(transcript):
+        result["constructed"] = True
+    return result
 
 
 def _chunk_spans(
@@ -657,10 +770,9 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         return result
     if operation == "spans":
         messages, threshold = arguments
-        if not isinstance(messages, Messages) or not messages.shares_root_with(
-            context.conversation.messages
-        ):
-            raise ValueError("model().spans() input must be a view of the original conversation")
+        if not isinstance(messages, Messages):
+            raise TypeError("model().spans() input must be Messages")
+        messages.assert_self_contained()
         return await backend.model_span_messages(
             alias,
             messages,

@@ -33,7 +33,19 @@ import orjson
 
 from quarry.config import QuarryConfig
 from quarry.engine import temporal as T
-from quarry.engine.atoms import AtomDomain, AtomSpec, Cost, ModelExpression, StringSemantics
+from quarry.engine.atoms import (
+    MAX_MODEL_EXPRESSION_DEPTH,
+    MAX_MODEL_EXPRESSION_FANOUT,
+    MAX_MODEL_EXPRESSION_NODES,
+    AtomDomain,
+    AtomSpec,
+    Cost,
+    ModelExpression,
+    StringSemantics,
+    validate_constructed_message_graph,
+    validate_model_expression,
+    validate_transform_expression_graph,
+)
 from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, ElementPlan
 from quarry.engine.collect import CollectPlan
 from quarry.engine.contracts import (
@@ -54,6 +66,7 @@ from quarry.scanner import DSLScanner
 from quarry.types.exceptions import RuleCompatibilityError
 from quarry.types.parameters import ParameterSpec, validate_parameter_values
 from quarry.types.rules import DSLRule
+from quarry.types.transforms import MAX_TRANSFORM_CHAIN, ContentTransform
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -428,17 +441,50 @@ def serialize_compiled_policy(policy: CompiledPolicy) -> bytes:
 def _model_expression_from_wire(raw: object, name: str) -> ModelExpression | None:
     if raw is None:
         return None
-    value = _mapping(raw, name)
-    _exact_keys(value, _MODEL_EXPRESSION_FIELDS, name)
-    children = tuple(
-        _required_model_expression(child, f"{name}.children[{index}]")
-        for index, child in enumerate(_list(value["children"], f"{name}.children"))
-    )
-    return ModelExpression(
-        kind=_string(value["kind"], f"{name}.kind"),
-        value=value["value"],
-        children=children,
-    )
+
+    count = 0
+
+    def load(value_raw: object, path: str, depth: int) -> ModelExpression:
+        nonlocal count
+        if depth > MAX_MODEL_EXPRESSION_DEPTH:
+            raise _fail(
+                f"{name} exceeds {MAX_MODEL_EXPRESSION_DEPTH} nested model-expression levels"
+            )
+        count += 1
+        if count > MAX_MODEL_EXPRESSION_NODES:
+            raise _fail(f"{name} exceeds {MAX_MODEL_EXPRESSION_NODES} model-expression nodes")
+        value = _mapping(value_raw, path)
+        _exact_keys(value, _MODEL_EXPRESSION_FIELDS, path)
+        raw_children = _list(value["children"], f"{path}.children")
+        if len(raw_children) > MAX_MODEL_EXPRESSION_FANOUT:
+            raise _fail(
+                f"{path}.children exceeds {MAX_MODEL_EXPRESSION_FANOUT} model-expression children"
+            )
+        scalar = value["value"]
+        if scalar is not None and not isinstance(scalar, str | int | float | bool):
+            raise _fail(f"{path}.value must be a string, number, Boolean, or null")
+        children = tuple(
+            load(child, f"{path}.children[{index}]", depth + 1)
+            for index, child in enumerate(raw_children)
+        )
+        return ModelExpression(
+            kind=_string(value["kind"], f"{path}.kind"),
+            value=scalar,
+            children=children,
+        )
+
+    expression = load(raw, name, 1)
+    try:
+        validate_model_expression(expression)
+        validate_constructed_message_graph(expression)
+        validate_transform_expression_graph(
+            expression,
+            maximum=MAX_TRANSFORM_CHAIN,
+            validate_plan=ContentTransform.from_canonical_json,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(f"{name} is invalid: {exc}") from exc
+    return expression
 
 
 def _required_model_expression(raw: object, name: str) -> ModelExpression:
@@ -454,6 +500,9 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
     _exact_keys(value, _ATOM_FIELDS, name)
     semantics = _mapping(value["string_semantics"], f"{name}.string_semantics")
     _exact_keys(semantics, _STRING_SEMANTICS_FIELDS, f"{name}.string_semantics")
+    model_expression = _model_expression_from_wire(
+        value["model_expression"], f"{name}.model_expression"
+    )
 
     kwargs = dict(value)
     try:
@@ -471,9 +520,7 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
             tuple(_list(turn, f"{name}.constructed_input[]"))
             for turn in _list(value["constructed_input"], f"{name}.constructed_input")
         )
-        kwargs["model_expression"] = _model_expression_from_wire(
-            value["model_expression"], f"{name}.model_expression"
-        )
+        kwargs["model_expression"] = model_expression
         return AtomSpec(**kwargs)
     except (TypeError, ValueError) as exc:
         raise _fail(f"{name} is incompatible with format_version {FORMAT_VERSION}") from exc
@@ -574,16 +621,36 @@ def _collect_from_wire(raw: object) -> CollectPlan | None:
         return None
     value = _mapping(raw, "rule.artifact.collect_plan")
     _exact_keys(value, _COLLECT_PLAN_FIELDS, "rule.artifact.collect_plan")
+    source = _required_model_expression(value["source"], "rule.artifact.collect_plan.source")
+    local_predicate = _required_model_expression(
+        value["local_predicate"], "rule.artifact.collect_plan.local_predicate"
+    )
+    model_predicate = _model_expression_from_wire(
+        value["model_predicate"], "rule.artifact.collect_plan.model_predicate"
+    )
+    try:
+        additional_roots = (
+            local_predicate,
+            *((model_predicate,) if model_predicate is not None else ()),
+        )
+        validate_constructed_message_graph(
+            source,
+            additional_roots=additional_roots,
+        )
+        validate_transform_expression_graph(
+            source,
+            maximum=MAX_TRANSFORM_CHAIN,
+            validate_plan=ContentTransform.from_canonical_json,
+            additional_roots=additional_roots,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(f"rule.artifact.collect_plan is invalid: {exc}") from exc
     return CollectPlan(
         variable=_string(value["variable"], "rule.artifact.collect_plan.variable"),
         item_type=_string(value["item_type"], "rule.artifact.collect_plan.item_type"),
-        source=_required_model_expression(value["source"], "rule.artifact.collect_plan.source"),
-        local_predicate=_required_model_expression(
-            value["local_predicate"], "rule.artifact.collect_plan.local_predicate"
-        ),
-        model_predicate=_model_expression_from_wire(
-            value["model_predicate"], "rule.artifact.collect_plan.model_predicate"
-        ),
+        source=source,
+        local_predicate=local_predicate,
+        model_predicate=model_predicate,
         has_external_work=_boolean(
             value["has_external_work"], "rule.artifact.collect_plan.has_external_work"
         ),

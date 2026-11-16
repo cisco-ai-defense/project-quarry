@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-6 admitted colliding `variables:`/`as`
-# bindings and referenced captures on the sustained side of `until`.
-COMPILER_VERSION = "compiler-7"
+# previously produced artifacts. Compiler-10 adds bounded message composition and literal
+# transforms, including aggregate expression validation and source-backed span projection.
+COMPILER_VERSION = "compiler-10"
 
 
 @dataclass(frozen=True, slots=True)

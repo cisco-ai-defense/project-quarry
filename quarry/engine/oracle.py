@@ -343,7 +343,11 @@ class Oracle:
         binding: str | None,
         event,
     ) -> Grounded:
-        self.external_calls += 1
+        # Some compiler-native value expressions use the async evaluator for cooperative
+        # scheduling even though every operation is local. Count only atoms whose cost proves
+        # they may perform service work.
+        if spec.cost.requires_external_service:
+            self.external_calls += 1
         if self._async_detector_accepts_event:
             result = await self._async_detector(spec, text or "", event)
         else:

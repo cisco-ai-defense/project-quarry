@@ -15,17 +15,18 @@ a public function, surface, or grammar form.
 | `len(value: collection \| string) -> integer` | Return the size of a supported collection or the length of text. |
 | `llm_split_conversation(model: string, input: model_input, max_input_tokens: integer) -> collection<model_input>` | Split model input into chunks no larger than `max_input_tokens`. |
 | `message(role: string, content: string) -> model_input` | Build a one-message model input from a role and literal or field-backed content. |
+| `messages.transform(name: string) -> model_input` | Apply one reviewed configured transform to message text. |
 | `model(alias: string) -> model_reference` | Select a configured model by its literal alias for a following method call. |
 | `model.classify(messages: model_input, tools: collection<tool_definition> = null) -> number` | Return the configured classifier head's probability for these messages. |
 | `model.complete(messages: model_input, tools: collection<tool_definition> = null) -> message` | Generate one assistant message from the supplied messages. |
 | `model.input_tokens(messages: model_input, tools: collection<tool_definition> = null) -> integer` | Return the model-specific token count for the supplied messages and optional tools. |
 | `model.score(messages: model_input, constitution: string \| text_reference, tools: collection<tool_definition> = null) -> number` | Score messages against policy text and return a number from 0 through 1. |
-| `model.spans(messages: model_input, threshold: number) -> collection<span>` | Return original-conversation spans from the alias-configured span operation. |
+| `model.spans(messages: model_input, threshold: number) -> collection<span>` | Return spans from the alias-configured typed message input. |
 | `model.split(messages: model_input, max_input_tokens: integer, overlap: integer = null, context: model_input = null) -> collection<model_input>` | Partition messages into model-sized chunks for one non-nested `any` score check. |
 | `model_split(model: string, messages: model_input, max_input_tokens: integer) -> collection<model_input>` | Deprecated. Compatibility spelling for `model("alias").split(...)` in version 2 rules. |
 | `refused(value: boolean \| number \| string \| message) -> boolean` | Return whether a `model("alias").score(...)` or `.complete(...)` call in `value` was refused. |
 | `text_ref(name: string) -> text_reference` | Refer to configured policy text by its exact resource name. |
-| `add_message(role: string, content: string) -> model_input` | Append one text message to a model input created with `message(...)`. |
+| `add_message(role: string, content: string) -> model_input` | Append one allowlisted text message to an immutable model input. |
 | `assistant_said(text: string, case_sensitive: boolean = false) -> boolean` | Return whether any assistant message contains the supplied text. |
 | `call_sequence() -> collection<string>` | Return assistant tool-call names in chronological order. |
 | `called_tool(name: string) -> boolean` | Return whether the assistant called a tool with this exact name. |
@@ -150,10 +151,26 @@ Examples: [examples/chunked-inference.rule](examples/chunked-inference.rule) (re
 Build a one-message model input from a role and literal or field-backed content.
 
 In a version 2 model expression, `content` can also be the text that `join()` gives.
+Use `+` to place the constructed message before, after, or between source selections.
 
 - `role`: must be written directly in the rule; choices: system, developer, user, assistant
 
 Examples: [examples/model-inference.rule](examples/model-inference.rule) (requires a configured backend)
+
+### `messages.transform`
+
+`messages.transform(name: string) -> model_input`
+
+Rule syntax: `messages.transform("name")`
+
+Apply one reviewed configured transform to message text.
+
+The result keeps message roles, tool links, and source provenance. Transforms may be
+chained, filtered, sliced, composed, or passed directly to a model operation.
+
+- `name`: must be written directly in the rule
+
+Examples: [examples/content-transform.rule](examples/content-transform.rule) (requires a configured backend)
 
 ### `model`
 
@@ -236,11 +253,11 @@ Examples: [examples/model-interface.rule](examples/model-interface.rule) (requir
 
 Rule syntax: `model("alias").spans(messages, threshold)`
 
-Return original-conversation spans from the alias-configured span operation.
+Return spans from the alias-configured typed message input.
 
-`messages` must be the root conversation or one of its views. Quarry reuses the raw
-classifier response cached for the same model input. The adapter owns span decoding and
-how the required `threshold` is applied.
+Source-backed characters retain exact original ranges. Constructed characters are
+explicitly unmapped. Quarry reuses the raw classifier response cached for the same model
+input. The adapter owns span decoding and how the required `threshold` is applied.
 
 - Allowed in: comprehension_source
 - Requires: `model` backend support
@@ -325,10 +342,12 @@ Examples: [examples/model-inference.rule](examples/model-inference.rule) (requir
 
 Rule syntax: `.add_message("role", content)`
 
-Append one text message to a model input created with `message(...)`.
+Append one allowlisted text message to an immutable model input.
 
-Use this only after a model-input value, for example
+In rules, use this after a `message(...)` constructor, for example
 `message("user", "hello").add_message("assistant", "hi")`.
+Python integrations may also append to a source selection; its source messages retain
+identity and the new message has separate scan-local identity with unmapped text.
 
 - `role`: must be written directly in the rule; choices: system, developer, user, assistant
 
@@ -643,15 +662,15 @@ Surfaces are bare names. Do not add `()`.
 
 | Surface | Type | Item fields | What it contains |
 |---|---|---|---|
-| `assistant_messages` | `collection<message>` | `content`, `refusal`, `role`, `tool_calls` | Assistant-role messages from the selected conversation, in source order. |
-| `developer_messages` | `collection<message>` | `content`, `role` | Developer-role messages from the selected conversation, in source order. |
+| `assistant_messages` | `collection<message>` | `content`, `refusal`, `role`, `tool_calls` | Assistant-role messages from this value, in its current order. |
+| `developer_messages` | `collection<message>` | `content`, `role` | Developer-role messages from this value, in its current order. |
 | `messages` | `collection<message>` | `content`, `role` | All messages in the inspected conversation, in chronological order. |
-| `system_messages` | `collection<message>` | `content`, `role` | System-role messages from the selected conversation, in source order. |
+| `system_messages` | `collection<message>` | `content`, `role` | System-role messages from this value, in its current order. |
 | `system_prompt` | `string` | — | Text content of the leading system message. |
 | `tool_calls` | `collection<tool_call>` | `arguments`, `id`, `name`, `raw_arguments`, `response`, `type` | Assistant tool calls in chronological order. |
 | `tool_responses` | `collection<tool_response>` | `call`, `content`, `id`, `name`, `result`, `role`, `tool_call_id` | Tool-result messages linked to assistant calls by `tool_call_id`. |
 | `tools` | `collection<tool_definition>` | `description`, `name`, `parameters`, `type` | Tools offered to the model in the inspected request. |
-| `user_messages` | `collection<message>` | `content`, `role` | User-role messages from the selected conversation, in source order. |
+| `user_messages` | `collection<message>` | `content`, `role` | User-role messages from this value, in its current order. |
 
 ### Surface fields
 
@@ -697,25 +716,31 @@ so the intended grouping is explicit.
 
 | Precedence | Family | Operators | Associativity | Meaning |
 |---|---|---|---|---|
-| 1 | boolean or | `or` | left | Evaluated after `and`. |
-| 2 | boolean and | `and` | left | Evaluated before `or`. |
-| 3 | boolean not | `not` | right | Applies to the expression immediately after it. |
-| 4 | flow | `before`, `before(within:N)`, `right_before`, `after`, `after(within:N)`, `right_after`, `until` | none | Relates two event conditions. Each operand is one event: a single condition, an `any` comprehension, `and`/`or`/`not` over the element of an enclosing comprehension, or an `or` of such operands. `all` is allowed only on the sustained side of `until`. Chain flow operators only with parentheses. |
-| 5 | comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` | none | Compares two values. Chain comparisons only with parentheses. |
-| 6 | text and membership | `contains`, `contains_any`, `~`, `matches`, `in`, `as` | none | Tests text or membership and binds captures. |
-| 7 | addition | `+`, `-` | left | Adds or subtracts numeric values. |
-| 8 | multiplication | `*` | left | Multiplies numeric values. |
-| 9 | postfix access | `.field`, `.method(...)`, `[index]`, `[slice]`, `.*` | left | Reads fields, calls methods, indexes, slices, or expands object values. |
+| 1 | conditional value | `if ... else` | right | Chooses between two compatible values after evaluating a Boolean predicate. |
+| 2 | boolean or | `or` | left | Evaluated after `and`. |
+| 3 | boolean and | `and` | left | Evaluated before `or`. |
+| 4 | boolean not | `not` | right | Applies to the expression immediately after it. |
+| 5 | flow | `before`, `before(within:N)`, `right_before`, `after`, `after(within:N)`, `right_after`, `until` | none | Relates two event conditions. Each operand is one event: a single condition, an `any` comprehension, `and`/`or`/`not` over the element of an enclosing comprehension, or an `or` of such operands. `all` is allowed only on the sustained side of `until`. Chain flow operators only with parentheses. |
+| 6 | comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` | none | Compares two values. Chain comparisons only with parentheses. |
+| 7 | text and membership | `contains`, `contains_any`, `~`, `matches`, `in`, `as` | none | Tests text or membership and binds captures. |
+| 8 | addition | `+`, `-` | left | Adds or subtracts numbers; `+` also combines compatible message selections. |
+| 9 | multiplication | `*` | left | Multiplies numeric values. |
+| 10 | postfix access | `.field`, `.method(...)`, `[index]`, `[slice]`, `.*` | left | Reads fields, calls methods, indexes, slices, or expands object values. |
 
 ## Language forms
 
 ### addition
 
-Add two numeric values.
+Add numbers or combine source-backed message selections in written order.
+
+Message combination is available in typed model inputs. It preserves immutable values,
+content, provenance, written order, transcript indexes, and tool identities. It normally
+reuses message objects, but may return immutable relinked tool variants when independent
+views must form one self-contained call/result graph; object identity is not guaranteed.
 
 Grammar: `arith_expr: arith_expr "+" product_expr`
 
-Examples: [examples/patterns-and-aliases.rule](examples/patterns-and-aliases.rule)
+Examples: [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend), [examples/patterns-and-aliases.rule](examples/patterns-and-aliases.rule)
 
 ### adjacent-alias
 
@@ -802,6 +827,18 @@ Grammar: `in_expr: arith_expr "in" arith_expr "as" IDENTIFIER`
 
 Examples: [examples/capture.rule](examples/capture.rule)
 
+### conditional-value
+
+Choose one of two compatible values using a Boolean predicate.
+
+Only the selected branch is evaluated. Both branches must have compatible static
+types. A Boolean conditional can be a rule condition; other values can feed a typed
+comparison or model input.
+
+Grammar: `conditional_expr: or_expr "if" or_expr "else" conditional_expr`
+
+Examples: [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend)
+
 ### contains
 
 Test whether text or a collection contains a supplied value.
@@ -850,9 +887,9 @@ In `[msg for msg in user_messages if msg.content contains "sudo"]`, the result
 contains only user messages whose content contains `sudo`. Use the same item name
 before and after `for`.
 
-Grammar: `filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" expr "if" expr "]"`
+Grammar: `filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr "if" or_expr "]"`
 
-Examples: [examples/filter-count.rule](examples/filter-count.rule)
+Examples: [examples/filter-count.rule](examples/filter-count.rule), [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend)
 
 ### flow-after
 
@@ -970,7 +1007,7 @@ Project each selected item for use as the first argument of `join()`.
 The map is supported in `message()` content of a version 2 model input.
 Its value and optional filter cannot call a model.
 
-Grammar: `map_comp: "[" expr "for" IDENTIFIER "in" expr "]" | "[" expr "for" IDENTIFIER "in" expr "if" expr "]"`
+Grammar: `map_comp: "[" expr "for" IDENTIFIER "in" or_expr "]" | "[" expr "for" IDENTIFIER "in" or_expr "if" or_expr "]"`
 
 Examples: [examples/joined-tool-commands.rule](examples/joined-tool-commands.rule) (requires a configured backend)
 
@@ -1244,6 +1281,7 @@ Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
 | `contains` | operator | no |
 | `contains_any` | operator | no |
 | `.` | punctuation | no |
+| `else` | operator | no |
 | `==` | operator | no |
 | `false` | literal | yes |
 | `for` | operator | no |

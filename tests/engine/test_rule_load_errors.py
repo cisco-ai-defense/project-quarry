@@ -264,11 +264,6 @@ _REJECTED = [
         id="split-in-the-collect-filter",
     ),
     pytest.param(
-        _collect("true", 'model("privacy").spans(message("user", "synthetic"), 0.70)'),
-        "must be a view of the original conversation",
-        id="spans-over-a-synthetic-message",
-    ),
-    pytest.param(
         _collect("true", 'model("privacy").spans(messages, 1.1)'),
         "threshold must be at most 1.0",
         id="spans-threshold-above-one",
@@ -455,3 +450,10 @@ _LOADED_V1 = [
 @pytest.mark.parametrize("condition", _LOADED_V1)
 def test_version_1_model_rule_loads(compile_v1_policy, condition):
     compile_v1_policy(_rule(condition))  # raises RuleValidationError if the rule does not load
+
+
+def test_synthetic_span_inputs_compile_without_running_a_model(compile_rule_policy):
+    policy = compile_rule_policy(
+        _collect("true", 'model("privacy").spans(message("user", "synthetic"), 0.70)')
+    )
+    assert policy.to_bytes()

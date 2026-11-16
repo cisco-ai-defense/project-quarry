@@ -30,6 +30,7 @@ from quarry.types.dsl import (
     AnyComprehension,
     Assignment,
     BinaryOp,
+    ConditionalValue,
     ConditionNode,
     ContainsAnyOp,
     FieldAccess,
@@ -99,6 +100,12 @@ def render_condition(node: ConditionNode) -> str:
                 for bound in (start, stop)
             ]
             return f"{render_condition(base)}[{bounds[0]}:{bounds[1]}]"
+        if node.name == "_transform":
+            receiver, arguments = (
+                (node.args[0], node.args[1:]) if node.args else (Identifier("messages"), ())
+            )
+            args = ", ".join(render_condition(argument) for argument in arguments)
+            return f"{render_condition(receiver)}.transform({args})"
         args = ", ".join(render_condition(arg) for arg in node.args)
         return f"{node.name}({args})"
     if isinstance(node, ModelCall):
@@ -106,6 +113,11 @@ def render_condition(node: ConditionNode) -> str:
         return f'model("{node.alias}").{node.operation}({args})'
     if isinstance(node, UnaryOp):
         return f"{node.operator} {render_condition(node.operand)}"
+    if isinstance(node, ConditionalValue):
+        return (
+            f"({render_condition(node.chosen)} if {render_condition(node.predicate)} "
+            f"else {render_condition(node.fallback)})"
+        )
     if isinstance(node, BinaryOp):
         operator = "==" if node.operator == "=" else node.operator
         if isinstance(node, FlowOp) and node.max_distance is not None:
@@ -116,7 +128,11 @@ def render_condition(node: ConditionNode) -> str:
     if isinstance(node, AllComprehension):
         return f"all {node.variable} in {render_condition(node.collection)} where {render_condition(node.condition)}"
     if isinstance(node, FilterComprehension):
-        return f"[{node.variable} for {render_condition(node.collection)} if {render_condition(node.condition)}]"
+        output = node.output_variable or node.variable
+        return (
+            f"[{output} for {node.variable} in {render_condition(node.collection)} "
+            f"if {render_condition(node.condition)}]"
+        )
     if isinstance(node, MapComprehension):
         suffix = f" if {render_condition(node.condition)}" if node.condition is not None else ""
         return f"[{render_condition(node.expression)} for {node.variable} in {render_condition(node.collection)}{suffix}]"

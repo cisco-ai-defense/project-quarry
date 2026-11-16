@@ -80,6 +80,7 @@ from quarry.types.dsl import (
 )
 from quarry.types.dsl.render import render_condition
 from quarry.types.dsl.traversal import walk_condition_nodes
+from quarry.types.transforms import ContentTransform
 
 
 class _Tables:
@@ -1224,6 +1225,7 @@ def compile_core(
     max_work: int | None = DEFAULT_MAX_WORK,
     decompose: bool = True,
     response_schemas: Mapping[str, str] | None = None,
+    transforms: Mapping[str, ContentTransform] | None = None,
 ):
     """Compile a parsed rule through the core calculus into a :class:`CompileResult`.
 
@@ -1239,17 +1241,17 @@ def compile_core(
     A rule that fails that way at a construction limit is compiled whole, with a fresh
     budget, before any candidate retry, so a compile does at most three times ``max_work``."""
     result, limited, candidates = _compile(
-        rule, WorkBudget(max_work), None, decompose, response_schemas
+        rule, WorkBudget(max_work), None, decompose, response_schemas, transforms
     )
     if limited and decompose:
         result, limited, candidates = _compile(
-            rule, WorkBudget(max_work), None, False, response_schemas
+            rule, WorkBudget(max_work), None, False, response_schemas, transforms
         )
     if not limited:
         return result
     retries = WorkBudget(max_work)
     for var in candidates:
-        retry, _, _ = _compile(rule, retries, var, False, response_schemas)
+        retry, _, _ = _compile(rule, retries, var, False, response_schemas, transforms)
         if retry.ok:
             return retry
     return result
@@ -1261,6 +1263,7 @@ def _compile(
     bind: str | None,
     decompose: bool,
     response_schemas: Mapping[str, str] | None,
+    transforms: Mapping[str, ContentTransform] | None,
 ):
     """:func:`_attempt` spending ``budget``, with a rule nested deeper than the recursive
     walkers allow failing to load with a named reason. It is not a construction limit: a retry
@@ -1269,7 +1272,7 @@ def _compile(
 
     try:
         with spending(budget):
-            return _attempt(rule, bind, decompose, response_schemas)
+            return _attempt(rule, bind, decompose, response_schemas, transforms)
     except RecursionError:
         name = str(getattr(rule, "name", "") or "")
         diagnostics = Diagnostics()
@@ -1282,7 +1285,13 @@ def _compile(
         return CompileResult(name, None, diagnostics), False, []
 
 
-def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[str, str] | None):
+def _attempt(
+    rule,
+    bind: str | None,
+    decompose: bool,
+    response_schemas: Mapping[str, str] | None,
+    transforms: Mapping[str, ContentTransform] | None,
+):
     """One compilation, with ``bind`` decided per candidate when given. Returns the result,
     whether it failed at a construction limit, and the elements a retry may decide per
     candidate (none once an element or a value is bound).
@@ -1291,7 +1300,7 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
     decided per run, which binds across the whole root."""
     from quarry.engine.compiler import CompileResult, _Compiler, reject_unguarded_refusal_reads
 
-    c = _Compiler(rule, response_schemas)
+    c = _Compiler(rule, response_schemas, transforms)
     source = SourceRef(rule_name=c.rule_name)
     condition = getattr(rule, "condition", None)
     if condition is None:
@@ -1343,7 +1352,7 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
                     "cannot be combined with a value capture or a join"
                 ) from None
             split_root = False
-            c = _Compiler(rule, response_schemas)
+            c = _Compiler(rule, response_schemas, transforms)
             if collect_plan is not None:
                 collect_plan = c.compile_collect(rule.collect)
             lowerer = _Lowerer(c)
