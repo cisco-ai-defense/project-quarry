@@ -1281,7 +1281,11 @@ class Messages(Sequence[MessageType]):
             call = span._source
             if not any(known is call for known in self._root._all_calls):
                 raise ValueError("span source call is not present in these messages")
-            texts = dict(call.texts())
+            texts = (
+                {"raw_arguments": call.raw_arguments}
+                if span.field == "raw_arguments"
+                else dict(call.texts())
+            )
             order = list(texts)
             if span.field not in texts or span.end_field not in texts:
                 raise ValueError("span is outside the call's argument texts")
