@@ -358,6 +358,25 @@
       "checks": [
         {
           "expected_match": true,
+          "input_path": "examples/span-lists.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/span-lists.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "compiler_form:outermost",
+        "compiler_form:union"
+      ],
+      "id": "example:span-lists",
+      "requires_backend": false,
+      "rule_path": "examples/span-lists.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
           "input_path": "examples/string-operations.matching.json"
         },
         {
@@ -1178,6 +1197,43 @@
       "syntax": "model_split(\"alias\", messages, max_input_tokens)"
     },
     {
+      "allowed_uses": [
+        "condition",
+        "comprehension_source",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Keep spans that no other span in the list contains, in text order.",
+      "id": "compiler_form:outermost",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "outermost",
+      "parameters": [
+        {
+          "accepted_types": [
+            "collection<span>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "spans",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "collection<span>",
+      "signature": "outermost(spans: collection<span>) -> collection<span>",
+      "source": "quarry.engine.compiler._Compiler._bind_outermost",
+      "summary": "Keep spans that no other span in the list contains, in text order.",
+      "syntax": "outermost(spans)"
+    },
+    {
       "allowed_uses": [],
       "compiler_tags": [],
       "deprecated": false,
@@ -1245,6 +1301,57 @@
       "source": "quarry.types.text_resources.TextRef",
       "summary": "Refer to configured policy text by its exact resource name.",
       "syntax": null
+    },
+    {
+      "allowed_uses": [
+        "condition",
+        "comprehension_source",
+        "comprehension_body"
+      ],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Combine two span lists in text order, keeping equal spans once.",
+      "id": "compiler_form:union",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "union",
+      "parameters": [
+        {
+          "accepted_types": [
+            "collection<span>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "first",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "collection<span>"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "second",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "collection<span>",
+      "signature": "union(first: collection<span>, second: collection<span>) -> collection<span>",
+      "source": "quarry.engine.compiler._Compiler._bind_union",
+      "summary": "Combine two span lists in text order, keeping equal spans once.",
+      "syntax": "union(spans, spans)"
     },
     {
       "description": "Add two numeric values.",
