@@ -728,6 +728,14 @@ class _Renderer:
                         )
                     ),
                 ]
+                if (
+                    len(arguments) > 2
+                    and type(arguments[-1]) is Literal
+                    and arguments[-1].value is None
+                ):
+                    # Named bounds omit trailing null defaults when parsed. Positional
+                    # spelling retains an explicit bound and therefore the same AST.
+                    context = arguments[1:]
                 pending.extend(
                     [
                         ("text", ")"),
@@ -737,7 +745,12 @@ class _Renderer:
                     ]
                 )
                 return
-            if name == "extract" and 2 <= len(arguments) <= 4:
+            if (
+                name == "extract"
+                and 2 <= len(arguments) <= 4
+                and type(arguments[0]) is Identifier
+                and arguments[0].name in {"messages", "conversation"}
+            ):
                 context = [
                     arguments[1],
                     *(
@@ -745,6 +758,12 @@ class _Renderer:
                         for name, value in zip(("left", "right"), arguments[2:], strict=False)
                     ),
                 ]
+                if (
+                    len(arguments) > 2
+                    and type(arguments[-1]) is Literal
+                    and arguments[-1].value is None
+                ):
+                    context = arguments[1:]
                 pending.extend(
                     [
                         ("text", ")"),

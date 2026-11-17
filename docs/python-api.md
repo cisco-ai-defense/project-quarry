@@ -101,6 +101,8 @@ converted through host callbacks. Compiler and visualization entry points conver
 failures to bounded diagnostics. Rendering a parsed condition does not require its source text.
 Internal diagnostic placeholders retain their established display conventions; for example,
 an empty internal transform displays as `messages.transform()`.
+Extraction keeps its parsed operation and argument count: selection/alias receivers retain
+function-call spelling, and explicit trailing `null` bounds retain positional spelling.
 
 For batches, `rule_name` uses `conv_N:rule` for rule failures and `conv_N` for a whole-child
 failure. The batch can also carry an unattributed `unknown` record for its aggregate error
