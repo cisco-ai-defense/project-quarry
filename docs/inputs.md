@@ -65,7 +65,7 @@ Span searches follow each selected occurrence, including different transformed c
 one source message. Indexed `.content` and `.result` sources retain their owning selection;
 reading message content alone does not decode its tool arguments.
 
-Compiler identity is 21 with compiled-policy format 9 unchanged. Recompile older artifacts
+Compiler identity is 22 with compiled-policy format 9 unchanged. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 
 ## Timeline and clocks

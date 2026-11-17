@@ -42,6 +42,12 @@ from quarry.engine.budget import (
     charge,
     spending,
 )
+from quarry.engine.budget import (
+    check as check_budget,
+)
+from quarry.engine.budget import (
+    current as current_work_budget,
+)
 from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, ElementPlan
 from quarry.engine.contracts import (
     COMPILER_VERSION,
@@ -54,6 +60,7 @@ from quarry.engine.contracts import (
 )
 from quarry.engine.decision import Parts, boot_diagram_is_decided, reads
 from quarry.engine.desugar import (
+    COMPOSED_CHECK,
     ORDERS_INPUT_ITEMS,
     Desugarer,
     FlowProbe,
@@ -623,7 +630,10 @@ class _Lowerer:
         if isinstance(node, FunctionCall) and node.name in ("called_tool", "called_tools"):
             return self._f._mint_atom("tool_calls", "name", "equals", (self._f._lit(node.args[0]),))
         name = f.name or source_name(var)
-        return self._f.compile_step(node, surface, Scope().bind(name, surface))
+        scope = Scope().bind(name, surface)
+        if isinstance(node, AnyComprehension) and node.variable.startswith(COMPOSED_CHECK):
+            return self._f.compile_composed_check(node, scope, surface)
+        return self._f.compile_step(node, surface, scope)
 
     def pinned_join(self, side: _JoinSide, surface: str) -> T.Formula:
         """A join to the candidate element, parameterized by the candidate's field:
@@ -1351,19 +1361,32 @@ def compile_core(
     ``decompose`` compiles each operand of the rule's root ``and``/``or``/``not`` as a check
     of its own, so the artifact carries the rule's decision tree (``quarry.engine.decision``).
     A rule that fails that way at a construction limit is compiled whole, with a fresh
-    budget, before any candidate retry, so a compile does at most three times ``max_work``."""
+    budget, before any candidate retry, so a compile does at most three times ``max_work``.
+    Called rules share their enclosing attempt's budget, including any retries."""
+    parent_budget = current_work_budget.get()
+
+    def attempt_budget() -> WorkBudget:
+        return parent_budget if parent_budget is not None else WorkBudget(max_work)
+
     result, limited, candidates = _compile(
-        rule, WorkBudget(max_work), None, decompose, response_schemas, transforms
+        rule, attempt_budget(), None, decompose, response_schemas, transforms
     )
+    if parent_budget is not None:
+        # Propagate exhaustion to the enclosing attempt so only its root can grant a retry.
+        parent_budget.check()
     if limited and decompose:
         result, limited, candidates = _compile(
-            rule, WorkBudget(max_work), None, False, response_schemas, transforms
+            rule, attempt_budget(), None, False, response_schemas, transforms
         )
+        if parent_budget is not None:
+            parent_budget.check()
     if not limited:
         return result
-    retries = WorkBudget(max_work)
+    retries = attempt_budget()
     for var in candidates:
         retry, _, _ = _compile(rule, retries, var, False, response_schemas, transforms)
+        if parent_budget is not None:
+            parent_budget.check()
         if retry.ok:
             return retry
     return result
@@ -1520,6 +1543,7 @@ def _attempt(
         return CompileResult(c.rule_name, None, c.diagnostics), True, retry
 
     try:
+        check_budget()
         c.reject_unsupported_input_state_functions(condition)
         c.reject_unsupported_input_state_functions(getattr(rule, "collect", None))
         reject_unguarded_refusal_reads(condition)
@@ -1695,6 +1719,7 @@ def _attempt(
         collect_plan=collect_plan,
         tool_quantifiers=c.tool_quantifiers,
         closed_conditions=closed_conditions,
+        split_checks=c.split_checks,
         full_trace_proof=full_trace_proof,
         decision_tree=decision_tree,
     )

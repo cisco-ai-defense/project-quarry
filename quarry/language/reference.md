@@ -988,6 +988,14 @@ Grammar: `comparison: in_expr ">=" in_expr`
 
 Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
 
+### imports
+
+Name public rules to call on a messages value in `condition:`.
+
+Grammar: `imports_block: "imports:" import_group+`
+
+Examples: [examples/public-rule-call.rule](examples/public-rule-call.rule)
+
 ### inside
 
 Test whether one span is covered by a span from the right-hand list.
@@ -1128,7 +1136,7 @@ Examples: [examples/string-operations.rule](examples/string-operations.rule)
 Define one named rule with a required condition and optional metadata, strings,
 variables, parameters, and typed collection output.
 
-Grammar: `rule: "rule" STRING metadata_block? strings_block? variables_block? parameters_block? "condition:" condition collect_block?`
+Grammar: `rule: "rule" STRING imports_block? metadata_block? strings_block? variables_block? parameters_block? "condition:" condition collect_block?`
 
 Examples: [examples/case-insensitive-match.rule](examples/case-insensitive-match.rule), [examples/language-basics.rule](examples/language-basics.rule)
 
@@ -1306,6 +1314,7 @@ Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
 | `>` | operator | no |
 | `>=` | operator | no |
 | `if` | operator | no |
+| `imports:` | block_keyword | no |
 | `in` | operator | yes |
 | `inside` | operator | no |
 | `{` | punctuation | no |

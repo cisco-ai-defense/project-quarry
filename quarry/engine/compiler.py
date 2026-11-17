@@ -51,6 +51,7 @@ from quarry.engine.atoms import (
     ModelExpression,
     StringSemantics,
     make_atom,
+    model_expression_requires_model,
     validate_constructed_message_graph,
     validate_model_expression,
     validate_transform_expression_graph,
@@ -58,6 +59,7 @@ from quarry.engine.atoms import (
 from quarry.engine.budget import DEFAULT_MAX_WORK, charge
 from quarry.engine.collect import CollectPlan
 from quarry.engine.contracts import CompiledRuleArtifact, ToolQuantifierPlan
+from quarry.engine.desugar import COMPOSED_CHECK
 from quarry.engine.diagnostics import (
     Diagnostics,
     ErrorCategory,
@@ -227,6 +229,8 @@ _MODEL_FIELD_TYPES: dict[str, dict[str, str]] = {
         "user_messages": "Messages",
         "assistant_messages": "Messages",
         "tool_responses": "Messages",
+        "tool_calls": "ToolCall[]",
+        "system_prompt": "string",
     },
     "AssistantMessage": {
         "role": "string",
@@ -403,6 +407,17 @@ class CompileResult:
         return self.artifact is not None and not self.diagnostics.has_errors
 
 
+@dataclass(frozen=True)
+class _ComposedCheck:
+    """The called rule's condition, evaluated over one messages value."""
+
+    name: str
+    condition: ConditionNode
+    strings: Mapping[str, object]
+    parameters: tuple
+    collect: None = None
+
+
 class _Compiler:
     @staticmethod
     def _written(node: ConditionNode) -> str:
@@ -416,6 +431,7 @@ class _Compiler:
     ):
         self.rule = rule
         self.rule_name = getattr(rule, "name", "")
+        self._response_schemas = response_schemas
         # An alias with a response schema completes to a message whose `.json` the schema
         # types, so a rule reading a field the schema lacks fails at load.
         self._field_types = dict(_MODEL_FIELD_TYPES)
@@ -464,6 +480,7 @@ class _Compiler:
         self.temporal = False
         self.has_static = False
         self.tool_quantifiers: dict[str, ToolQuantifierPlan] = {}
+        self.split_checks: dict[str, CompiledRuleArtifact] = {}
         self.notes: list[str] = []
         # Active surface window for a sliced comprehension (``any m in messages[-4:] …``):
         # (surface, start, stop). While set, EVENT atoms minted on ``surface`` are restricted
@@ -682,6 +699,8 @@ class _Compiler:
         ``ChunkQuant`` leaves): a chunked-scoring comprehension or count, a model check, a
         system-prompt test, a collection-count macro or a top-level function."""
         scope = Scope()
+        if isinstance(node, AnyComprehension) and node.variable.startswith(COMPOSED_CHECK):
+            return self.compile_composed_check(node, scope)
         if not (self._contains_model_call(node) or self._reads_spans(node)):
             self._reject_model_text_forms(node)
         if isinstance(node, BinaryOp) and node.operator in _COMPARISONS | _CONTENT_OPS:
@@ -1911,6 +1930,77 @@ class _Compiler:
         )
         spec = self._intern_atom(spec)
         self.notes.append("model expression")
+        return T.Atom(spec.atom_id)
+
+    def compile_composed_check(
+        self, node: AnyComprehension, scope: Scope, surface: str | None = None
+    ) -> T.Formula:
+        """Compile a called rule once and test it over the selected messages."""
+
+        from quarry.engine.lower import compile_core
+        from quarry.types.dsl.render import render_condition
+
+        expression, value_type = self._lower_model_expression(node.collection, scope)
+        if value_type in {"Message", "AssistantMessage"}:
+            expression = ModelExpression("as_messages", None, (expression,))
+            value_type = "Messages"
+        if value_type != "Messages":
+            raise UnsupportedConstruct(
+                f"`{render_condition(node.collection)}` is {value_type}, which a rule cannot "
+                "read as its conversation. Write messages, such as a filter of `messages`"
+            )
+        try:
+            validate_model_expression(expression)
+            validate_constructed_message_graph(expression)
+            validate_transform_expression_graph(
+                expression,
+                maximum=MAX_TRANSFORM_CHAIN,
+                validate_plan=ContentTransform.from_canonical_json,
+                validate_reference=adapter_transform_reference_parts,
+            )
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedConstruct(str(exc)) from exc
+        nested = compile_core(
+            _ComposedCheck(
+                self.rule_name,
+                node.condition,
+                self.strings,
+                tuple(self.parameters.values()),
+            ),
+            response_schemas=self._response_schemas,
+            transforms=self._transforms,
+        )
+        if not nested.ok:
+            raise UnsupportedConstruct(
+                "; ".join(item.message for item in nested.diagnostics.errors)
+                or "the called rule did not compile"
+            )
+        check = nested.artifact
+        assert check is not None
+        cost = max(
+            (spec.cost for spec in check.atom_specs.values()),
+            key=lambda item: item.rank,
+            default=Cost.PURE,
+        )
+        if model_expression_requires_model(expression):
+            cost = max(cost, Cost.LLM, key=lambda item: item.rank)
+        spec = self._intern_atom(
+            make_atom(
+                domain=AtomDomain.STATIC if surface is None else AtomDomain.EVENT,
+                selector="messages" if surface is None else surface,
+                value_expr_key="split",
+                predicate="external",
+                patterns=(node.variable, check.dfa_hash),
+                cost=cost,
+                detector="split",
+                detector_arg="any",
+                model_expression=expression,
+                evidence_policy="model",
+            )
+        )
+        self.split_checks[spec.atom_id] = check
+        self.has_static = self.has_static or surface is None
+        self.notes.append("split check")
         return T.Atom(spec.atom_id)
 
     def _lower_refusal_guard(self, node: FunctionCall, scope: Scope) -> tuple[ModelExpression, str]:
