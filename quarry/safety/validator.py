@@ -27,6 +27,7 @@ from typing import Any, cast
 import orjson
 
 from quarry.cache.regex_cache import regex_cache
+from quarry.engine.matchers import Modifiers, apply_modifiers
 from quarry.language.runtime import (
     accessor_functions,
     external_function_costs,
@@ -844,11 +845,23 @@ class RuleValidator:
             patterns_to_check = pattern if isinstance(pattern, list) else [pattern]
 
             for p in patterns_to_check:
-                error = self._validate_single_regex(str(p))
+                error = self._validate_single_regex(self._declared_regex(str(p), modifiers))
                 if error:
                     errors.append(RegexError(variable=var_name, pattern=str(p), error=error))
 
         return errors
+
+    @staticmethod
+    def _declared_regex(pattern: str, modifiers: StringModifiers | None) -> str:
+        """The regex to check for a declared pattern. A `regex` declaration is checked as
+        written. A `fullword` literal is escaped before matching, so check the escaped form:
+        `"C++" fullword` is valid even though `C++` is not a regex."""
+        if modifiers is None or modifiers.regex:
+            return pattern
+        effective, _ = apply_modifiers(
+            pattern, Modifiers(fullword=modifiers.fullword, base64=modifiers.base64)
+        )
+        return effective
 
     @staticmethod
     def _validate_string_arrays(strings: dict) -> list[SemanticError]:
@@ -927,7 +940,9 @@ class RuleValidator:
                 checked_names.add(name)
                 value = strings[name]
                 pattern, modifiers = value if isinstance(value, tuple) else (value, None)
-                if self._is_regex_pattern(modifiers):
+                # The strings block already checked a `regex` declaration as `~` compiles
+                # it. A `fullword` literal was checked escaped, but `~` compiles it as written.
+                if isinstance(modifiers, StringModifiers) and modifiers.regex:
                     continue
                 for item in pattern if isinstance(pattern, list) else [pattern]:
                     error = self._validate_single_regex(str(item))
