@@ -28,6 +28,7 @@ from typing import Any, cast
 import orjson
 
 from quarry.cache.regex_cache import regex_cache
+from quarry.engine.matchers import Modifiers, apply_modifiers
 from quarry.language.runtime import (
     accessor_functions,
     external_function_costs,
@@ -247,7 +248,15 @@ def _follow_fields(
     return current, None
 
 
-def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _ValueShape]:
+def _is_extension_collection(node: ConditionNode, extension_event_surfaces: frozenset[str]) -> bool:
+    while isinstance(node, FunctionCall) and node.name == "_slice" and node.args:
+        node = node.args[0]
+    return isinstance(node, Identifier) and node.name in extension_event_surfaces
+
+
+def _scopes_from_ancestors(
+    ancestors: tuple[ConditionNode, ...], extension_event_surfaces: frozenset[str] = frozenset()
+) -> dict[str, _ValueShape]:
     scopes: dict[str, _ValueShape] = {}
     comprehension_types = (
         AnyComprehension,
@@ -261,6 +270,10 @@ def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _V
         collection = _expression_shape(ancestor.collection, scopes)
         if collection is not None and collection.element is not None:
             scopes[ancestor.variable] = collection.element
+        elif _is_extension_collection(ancestor.collection, extension_event_surfaces):
+            # The scanner's registered extension schema types this collection.
+            # Its element must still shadow any outer binding of the same name.
+            scopes[ancestor.variable] = _ValueShape("extension event", open_fields=True)
     return scopes
 
 
@@ -681,6 +694,7 @@ def validate_conversation(
     data: dict,
     *,
     parse_arguments: bool = True,
+    allow_empty: bool = False,
     allowed_roles: set[str] | frozenset[str] | None = None,
     max_nesting_depth: int = 100,
 ) -> None:
@@ -713,7 +727,7 @@ def validate_conversation(
     if tools is not None:
         _validate_raw_json_container_types(tools)
 
-    if not messages:
+    if not messages and not allow_empty:
         raise ConversationValidationError("'messages' list is empty. Nothing to scan.")
 
     seen_call_ids: set[str] = set()
@@ -961,7 +975,8 @@ def _validate_tool_call(
 class RuleValidator:
     """Validates rules for performance and correctness issues."""
 
-    def __init__(self):
+    def __init__(self, extension_event_surfaces: frozenset[str] = frozenset()):
+        self.extension_event_surfaces = extension_event_surfaces
         self.max_flow_ops = 5
         self.max_nested_comprehensions = 3
         self.max_total_comprehensions = 10
@@ -1018,11 +1033,23 @@ class RuleValidator:
             patterns_to_check = pattern if isinstance(pattern, list) else [pattern]
 
             for p in patterns_to_check:
-                error = self._validate_single_regex(str(p))
+                error = self._validate_single_regex(self._declared_regex(str(p), modifiers))
                 if error:
                     errors.append(RegexError(variable=var_name, pattern=str(p), error=error))
 
         return errors
+
+    @staticmethod
+    def _declared_regex(pattern: str, modifiers: StringModifiers | None) -> str:
+        """The regex to check for a declared pattern. A `regex` declaration is checked as
+        written. A `fullword` literal is escaped before matching, so check the escaped form:
+        `"C++" fullword` is valid even though `C++` is not a regex."""
+        if modifiers is None or modifiers.regex:
+            return pattern
+        effective, _ = apply_modifiers(
+            pattern, Modifiers(fullword=modifiers.fullword, base64=modifiers.base64)
+        )
+        return effective
 
     @staticmethod
     def _validate_string_arrays(strings: dict) -> list[SemanticError]:
@@ -1101,7 +1128,9 @@ class RuleValidator:
                 checked_names.add(name)
                 value = strings[name]
                 pattern, modifiers = value if isinstance(value, tuple) else (value, None)
-                if self._is_regex_pattern(modifiers):
+                # The strings block already checked a `regex` declaration as `~` compiles
+                # it. A `fullword` literal was checked escaped, but `~` compiles it as written.
+                if isinstance(modifiers, StringModifiers) and modifiers.regex:
                     continue
                 for item in pattern if isinstance(pattern, list) else [pattern]:
                     error = self._validate_single_regex(str(item))
@@ -1274,7 +1303,7 @@ class RuleValidator:
             ):
                 self._check_field_access(
                     current,
-                    _scopes_from_ancestors(visit.ancestors),
+                    _scopes_from_ancestors(visit.ancestors, self.extension_event_surfaces),
                     errors,
                 )
 
@@ -1329,7 +1358,7 @@ class RuleValidator:
         parent = ancestors[-1]
         if parent.operator != "matches" or parent.right is not pattern:
             return
-        scopes = _scopes_from_ancestors(ancestors)
+        scopes = _scopes_from_ancestors(ancestors, self.extension_event_surfaces)
         subject = _expression_shape(parent.left, scopes)
         if subject is None:
             return
