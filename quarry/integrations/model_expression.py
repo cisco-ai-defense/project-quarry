@@ -108,6 +108,54 @@ def _finite(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundMessage:
+    """One scoped message together with the selected view that owns its variant."""
+
+    message: Message
+    view: Messages
+
+
+async def _evaluate_owned_value(expression, context, *, event, bindings, trace, regex_backend):
+    """Evaluate once, retaining the owning selection for an indexed or bound message."""
+
+    if expression.kind == "index":
+        base = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=bindings,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if base is MISSING:
+            return MISSING, None
+        index = int(expression.value)
+        try:
+            value = base[index]
+        except (IndexError, KeyError, TypeError):
+            return MISSING, None
+        return value, base._select_positions((index,)) if isinstance(base, Messages) else None
+    if expression.kind == "binding":
+        bound = bindings.get(str(expression.value))
+        if isinstance(bound, _BoundMessage):
+            return bound.message, bound.view._view_ordinals((bound.message.message_index,))
+    value = await evaluate_model_expression(
+        expression,
+        context,
+        event=event,
+        bindings=bindings,
+        trace=trace,
+        regex_backend=regex_backend,
+    )
+    if isinstance(value, Message):
+        transcript = context.conversation.messages
+        ordinal = value.message_index
+        if transcript._contains_root_ordinal(ordinal) and transcript._message_at(ordinal) is value:
+            return value, transcript._view_ordinals((ordinal,))
+    return value, None
+
+
 async def evaluate_model_expression(
     expression: ModelExpression,
     context,
@@ -148,7 +196,8 @@ async def evaluate_model_expression(
     if kind == "binding":
         name = str(expression.value)
         if name in environment:
-            return environment[name]
+            value = environment[name]
+            return value.message if isinstance(value, _BoundMessage) else value
         if event is None:
             raise ValueError(f"model expression binding {name!r} has no current event")
         return event.source
@@ -262,7 +311,7 @@ async def evaluate_model_expression(
                 expression.children[1],
                 context,
                 event=event,
-                bindings={**environment, variable: item},
+                bindings={**environment, variable: _BoundMessage(item, source)},
                 trace=trace,
                 regex_backend=regex_backend,
             )
@@ -315,9 +364,7 @@ async def evaluate_model_expression(
         except (IndexError, KeyError, TypeError):
             return MISSING
     if kind == "as_messages":
-        # A conversation message where messages are expected: the view of the conversation that
-        # holds only that message, or none when the message does not exist.
-        message = await evaluate_model_expression(
+        message, owner = await _evaluate_owned_value(
             expression.children[0],
             context,
             event=event,
@@ -325,10 +372,11 @@ async def evaluate_model_expression(
             trace=trace,
             regex_backend=regex_backend,
         )
-        transcript = context.conversation.messages
         if message is MISSING:
-            return transcript[0:0]
-        return transcript[message.message_index : message.message_index + 1]
+            return context.conversation.messages[0:0]
+        if not isinstance(message, Message) or owner is None:
+            raise ValueError("a promoted message must retain its owning selection")
+        return owner
     if kind == "slice":
         base = await evaluate_model_expression(
             expression.children[0],
@@ -353,6 +401,7 @@ async def evaluate_model_expression(
         constructors.reverse()
 
         specifications = []
+        construction_source = None
         for index, constructor in enumerate(constructors):
             if index and index % 16 == 0:
                 await asyncio.sleep(0)
@@ -362,7 +411,7 @@ async def evaluate_model_expression(
             content_expression = constructor.children[offset + 1]
             # A field is read from its owner here, so the explain record can point at the owner.
             field_read = content_expression.kind == "field"
-            content = owner = await evaluate_model_expression(
+            content, owner_view = await _evaluate_owned_value(
                 content_expression.children[0] if field_read else content_expression,
                 context,
                 event=event,
@@ -370,6 +419,7 @@ async def evaluate_model_expression(
                 trace=trace,
                 regex_backend=regex_backend,
             )
+            owner = content
             if field_read and owner is not MISSING:
                 content = field_access(owner, str(content_expression.value))
             # Missing and null fields omit a turn. An explicitly empty string is still an
@@ -383,9 +433,26 @@ async def evaluate_model_expression(
                 _record_pieces(trace, context, [(owner, content)], content_expression)
                 if isinstance(owner, Message) and content_expression.value == "content":
                     provenance = owner._content_provenance()
+                    if any(segment.sources for segment in provenance):
+                        candidate = None if owner_view is None else owner_view._root._source_root
+                        if candidate is None:
+                            raise ValueError("copied content must retain its owning source")
+                        if construction_source is not None and candidate is not construction_source:
+                            raise ValueError("copied content must share one canonical source")
+                        construction_source = candidate
             specifications.append((str(role), content, (id(constructor), 0), provenance))
         raise_if_evaluation_expired()
-        return Messages()._add_synthetic_messages(tuple(specifications))
+        base = (
+            Messages()
+            if construction_source is None
+            else Messages._from_items(
+                (),
+                construction_source._tool_call_types,
+                construction_source._max_nesting_depth,
+                source_root=construction_source,
+            )
+        )
+        return base._add_synthetic_messages(tuple(specifications))
 
     if kind in {"refused", "if_refused"}:
         try:
@@ -1017,7 +1084,8 @@ async def _evaluate_model_text(expression, context, event, bindings, trace, rege
         raise_if_evaluation_expired()
         if pacer.due():
             await asyncio.sleep(0)
-        scope = {**bindings, variable: item, _ITEM_TEXTS: {}}
+        bound = _BoundMessage(item, source) if isinstance(source, Messages) else item
+        scope = {**bindings, variable: bound, _ITEM_TEXTS: {}}
         # A call whose argument text Quarry cannot decode — not JSON, not a JSON object, or
         # another reason such as more levels than max_nesting_depth — fails the rule, as a rule
         # step that reads the call's arguments does: it cannot be told apart from a call whose

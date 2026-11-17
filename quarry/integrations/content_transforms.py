@@ -642,7 +642,7 @@ async def apply_content_transform(
             changed = changed or text != source_text
         final_segments = _merge_segments(mapped)
         budget.keep(output_offset, final_segments)
-        if changed:
+        if changed or final_segments != provenance:
             overrides[ordinal] = message._with_transformed_content(replacements, final_segments)
     return messages if not overrides else messages._with_overrides(overrides)
 
