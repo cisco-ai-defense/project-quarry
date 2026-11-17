@@ -24,6 +24,7 @@ import math
 import uuid
 from bisect import bisect_right
 from collections.abc import Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from itertools import accumulate
 from types import MethodType
@@ -67,6 +68,7 @@ from quarry.types.adapter_transforms import (
     adapter_transform_reference_parts,
 )
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
+from quarry.types.message_groups import MessageGroups
 from quarry.types.messages import Message, Messages, ToolCall, _synthetic_key
 from quarry.types.origins import (
     Place,
@@ -148,13 +150,8 @@ class _BoundMessage:
     view: Messages
 
 
-def _message_value_key(expression: ModelExpression, bindings: dict[str, Any], event) -> tuple:
-    """Name a source expression and the live bindings it actually reads, within this rule.
-
-    The digest preserves scalar types (unlike Python's True == 1), while binding wrappers
-    compare by identity and keep their objects alive only as long as this rule's memo.
-    """
-
+def _message_free_bindings(expression: ModelExpression) -> set[str]:
+    """Names supplied by a caller rather than introduced by this value's own binders."""
     names = set()
     pending = [(expression, frozenset())]
     while pending:
@@ -163,9 +160,31 @@ def _message_value_key(expression: ModelExpression, bindings: dict[str, Any], ev
             names.add(str(node.value))
         for index, child in enumerate(node.children):
             child_names = local_names
-            if node.kind in {"map", "message_map", "message_select", "split_any"} and index:
+            if (
+                node.kind
+                in {
+                    "map",
+                    "message_map",
+                    "message_select",
+                    "split_any",
+                    "span_any",
+                    "span_all",
+                    "span_filter",
+                }
+                and index
+            ):
                 child_names = local_names | {str(node.value)}
             pending.append((child, child_names))
+    return names
+
+
+def _message_value_key(expression: ModelExpression, bindings: dict[str, Any], event) -> tuple:
+    """Name a source expression and the live bindings it actually reads, within this rule.
+
+    The digest preserves scalar types (unlike Python's True == 1), while binding wrappers
+    compare by identity and keep their objects alive only as long as this rule's memo.
+    """
+    names = _message_free_bindings(expression)
     identities = []
     for name in sorted(names):
         value = bindings.get(name, event.source if event is not None else None)
@@ -221,6 +240,46 @@ async def _evaluate_owned_value(expression, context, *, event, bindings, trace, 
         if transcript._contains_root_ordinal(ordinal) and transcript._message_at(ordinal) is value:
             return value, transcript._view_ordinals((ordinal,))
     return value, None
+
+
+async def evaluate_scoped_model_expression(expression, context, *, event=None, **kwargs):
+    """Evaluate event-dependent values once for this question, then release them.
+
+    A later child question is a new evaluation even at the same event. Subexpressions
+    independent of that event retain the enclosing rule's memo scope and stable value.
+    """
+    async with scoped_model_expression(expression, context, event=event, **kwargs) as (value, _):
+        return value
+
+
+@asynccontextmanager
+async def scoped_model_expression(expression, context, *, event=None, **kwargs):
+    """Own a computed source for the full child evaluation, independently of cache scope."""
+    names = _message_free_bindings(expression)
+    memo = context.message_value_memo
+    if names and event is None:
+        raise ValueError("a bound model expression needs a current event")
+    scope = memo.new_scope() if names else None
+    bindings = (
+        {_BINDING_SCOPES: {name: scope for name in names}, _CONSTRUCTION_SCOPE: scope}
+        if scope is not None
+        else None
+    )
+    lease = None
+    try:
+        value = await evaluate_model_expression(
+            expression, context, event=event, bindings=bindings, **kwargs
+        )
+        if isinstance(value, Messages | MessageGroups):
+            lease = await memo.budget.retain(value)
+        if scope is not None:
+            memo.release_scope(scope)
+        yield value, lease
+    finally:
+        if scope is not None:
+            memo.release_scope(scope)
+        if lease is not None:
+            lease.close()
 
 
 async def evaluate_model_expression(
@@ -555,7 +614,7 @@ async def evaluate_model_expression(
         )
         projection_trace = ModelExpressionTrace()
 
-        async def project() -> Messages:
+        async def project() -> Messages | MessageGroups:
             return await _evaluate_message_selection(
                 expression, source, context, event, environment, projection_trace, regex_backend
             )
@@ -573,6 +632,46 @@ async def evaluate_model_expression(
                 if all(existing != name for existing, _ in trace.parameters):
                     trace.parameters.append((name, parameter))
         return result
+
+    if kind == "length":
+        value = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+        if not isinstance(value, MessageGroups):
+            raise TypeError("map cardinality requires message-valued entries")
+        return len(value)
+
+    if kind == "flatten_messages":
+        value = await evaluate_model_expression(
+            expression.children[0],
+            context,
+            event=event,
+            bindings=environment,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+
+        async def flatten() -> Messages:
+            if value is MISSING:
+                return context.conversation.messages[:0]
+            if isinstance(value, Messages):
+                return value
+            if isinstance(value, MessageGroups):
+                return (
+                    await Messages._combine_async(list(value), _mapped=True)
+                    if value
+                    else value._empty
+                )
+            raise TypeError("message conversion requires a message collection")
+
+        memo = context.message_value_memo
+        key = _message_value_key(expression, environment, event)
+        return await memo.evaluate(key, flatten, scope=key[-1])
 
     if kind == "field":
         base = await evaluate_model_expression(
@@ -1004,13 +1103,15 @@ async def _evaluate_message_selection(
                                 "message map constructed text exceeds "
                                 f"{MAX_CONSTRUCTED_TEXT_CHARACTERS} characters"
                             )
+                if memo is not None:
+                    await memo.retain_part(part)
                 parts.append(part)
         finally:
             if memo is not None:
                 memo.release_scope(item_scope)
     if kind == "message_select":
         return source._select_positions(positions)
-    return await Messages._combine_async(parts, _mapped=True)
+    return MessageGroups(tuple(parts), context.conversation.messages[:0])
 
 
 def _trace_operand(expression: ModelExpression, value: Any, context) -> Any:

@@ -402,6 +402,14 @@ class Conversation:
         return conversation
 
     @classmethod
+    def _with_messages(cls, source: Conversation, messages: Messages) -> Conversation:
+        """Wrap a selected value while sharing the original lazy offered-tool envelope."""
+        conversation = cls._from_parts(messages)
+        for name in ("_tools", "_tools_fault", "_tools_by_name", "_tools_supplied"):
+            object.__setattr__(conversation, name, object.__getattribute__(source, name))
+        return conversation
+
+    @classmethod
     def _from_parts(
         cls,
         messages: Messages,

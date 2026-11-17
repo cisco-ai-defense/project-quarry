@@ -89,6 +89,11 @@ def requirements_from_artifact(artifact) -> dict[str, set[Any]]:
         if name not in requirements:
             raise ValueError(f"compiled artifact contains an unknown resource kind {name!r}")
         requirements[name].update(values)
+    for plan in artifact.computed_conditions.values():
+        _expression_collector(requirements)(plan.source)
+        child = requirements_from_artifact(plan.artifact)
+        for name, values in child.items():
+            requirements[name].update(values)
     if artifact.collect_plan is not None:
         collect = _expression_collector(requirements)
         collect(artifact.collect_plan.source)

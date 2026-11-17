@@ -109,6 +109,7 @@ from quarry.types.dsl import (
     condition_child_fields,
     iter_condition_children,
     walk_condition_nodes,
+    walk_condition_visits,
 )
 from quarry.types.dsl.operators.flow import FlowOp
 from quarry.types.dsl.operators.string import (
@@ -437,6 +438,7 @@ class _Compiler:
         self._field_types = dict(_MODEL_FIELD_TYPES)
         self._completion_types: dict[str, str] = {}
         self._transforms = dict(transforms or {})
+        self._response_schemas = dict(response_schemas or {})
         for alias, schema_text in (response_schemas or {}).items():
             root, objects = response_schema_types(alias, schema_text)
             completion = f"completion of model {alias!r}"
@@ -481,6 +483,11 @@ class _Compiler:
         self.has_static = False
         self.tool_quantifiers: dict[str, ToolQuantifierPlan] = {}
         self.split_checks: dict[str, CompiledRuleArtifact] = {}
+
+        self.computed_conditions: dict = {}
+        self._computed_family = None
+        self._flow_probes: tuple = ()
+        self._ordering_sources: tuple = ()
         self.notes: list[str] = []
         # Active surface window for a sliced comprehension (``any m in messages[-4:] …``):
         # (surface, start, stop). While set, EVENT atoms minted on ``surface`` are restricted
@@ -1659,6 +1666,15 @@ class _Compiler:
         expression reports a misplaced argument instead of an unsupported condition.
         """
 
+        if not service_only and any(
+            isinstance(visit.node, MapComprehension)
+            and not any(
+                isinstance(parent, FunctionCall) and parent.name in _EXTERNAL_FUNCS
+                for parent in visit.ancestors
+            )
+            for visit in walk_condition_visits(node)
+        ):
+            return True
         return any(
             isinstance(current, ModelCall)
             or (
@@ -1948,6 +1964,8 @@ class _Compiler:
         if value_type in {"Message", "AssistantMessage"}:
             expression = ModelExpression("as_messages", None, (expression,))
             value_type = "Messages"
+        if value_type == "Messages[]":
+            expression, value_type = _convert(expression, value_type, {"Messages"})
         if value_type != "Messages":
             raise UnsupportedConstruct(
                 f"`{render_condition(node.collection)}` is {value_type}, which a rule cannot "
@@ -2146,6 +2164,10 @@ class _Compiler:
             return ModelExpression("field", ".".join(fields), (base,)), result_type
 
         if isinstance(node, FunctionCall):
+            if node.name in {"len", "count"} and len(node.args) == 1:
+                value, value_type = self._lower_model_expression(node.args[0], scope)
+                if value_type == "Messages[]":
+                    return ModelExpression("length", None, (value,)), "int"
             if node.name == "_transform":
                 if len(node.args) != 2:
                     raise UnsupportedConstruct("messages.transform() takes one literal name")
@@ -2218,6 +2240,8 @@ class _Compiler:
                 return ModelExpression("union", None, (left, right)), "Span[]"
             if node.name == "extract" and 2 <= len(node.args) <= 4:
                 messages, messages_type = self._lower_model_expression(node.args[0], scope)
+                if messages_type == "Messages[]":
+                    messages, messages_type = _convert(messages, messages_type, {"Messages"})
                 span, span_type = self._lower_model_expression(node.args[1], scope)
                 if messages_type != "Messages" or span_type != "Span":
                     raise UnsupportedConstruct("messages.extract() requires Messages and a span")
@@ -2250,7 +2274,7 @@ class _Compiler:
                 return ModelExpression("text_ref", name), "TextRef"
             if node.name == "_slice" and len(node.args) == 3:
                 base, base_type = self._lower_model_expression(node.args[0], scope)
-                if base_type != "Messages":
+                if base_type not in {"Messages", "Messages[]"}:
                     raise UnsupportedConstruct("only Messages values can be sliced for a model")
                 start = self._model_slice_bound(node.args[1])
                 stop = self._model_slice_bound(node.args[2])
@@ -2260,7 +2284,7 @@ class _Compiler:
                         None,
                         (base, ModelExpression("literal", start), ModelExpression("literal", stop)),
                     ),
-                    "Messages",
+                    base_type,
                 )
             if node.name == "_index" and len(node.args) == 2:
                 base, base_type = self._lower_model_expression(node.args[0], scope)
@@ -2425,8 +2449,11 @@ class _Compiler:
                     raise UnsupportedConstruct("a message map cannot call a model")
                 self._reject_provenance_selectors(part)
         source, source_type = self._lower_model_expression(node.collection, scope)
-        source, source_type = _convert(source, source_type, {"Messages"})
-        item_type = {"Messages": "Message", "Tools": "Tool"}.get(source_type)
+        if source_type != "Messages[]":
+            source, source_type = _convert(source, source_type, {"Messages"})
+        item_type = {"Messages": "Message", "Messages[]": "Messages", "Tools": "Tool"}.get(
+            source_type
+        )
         if item_type is None and source_type is not None and source_type.endswith("[]"):
             candidate = source_type[:-2]
             if candidate in self._field_types:
@@ -2443,7 +2470,9 @@ class _Compiler:
         value, value_type = _convert(value, value_type, {"Messages"})
         if value_type != "Messages":
             raise UnsupportedConstruct(_MAP_COMPREHENSION_FORM)
-        return ModelExpression("message_map", node.variable, (source, predicate, value)), "Messages"
+        return ModelExpression(
+            "message_map", node.variable, (source, predicate, value)
+        ), "Messages[]"
 
     def _lower_message_selection(
         self, node: FilterComprehension, scope: Scope
@@ -2761,6 +2790,8 @@ class _Compiler:
                 if path == "raw_arguments" or path.startswith("arguments."):
                     return ModelExpression("span_text", path, (base,))
         value, value_type = self._lower_model_expression(node, scope)
+        if value_type == "Messages[]":
+            value, value_type = _convert(value, value_type, {"Messages"})
         if value_type == "Messages":
             return value
         if value_type in {"Message", "RoleMessage", "AssistantMessage", "ToolResponse"}:
@@ -2792,6 +2823,8 @@ class _Compiler:
 
     def _lower_span_list(self, node, scope: Scope) -> ModelExpression:
         value, value_type = self._lower_model_expression(node, scope, allow_collection_source=True)
+        if value_type == "Messages[]":
+            value, value_type = _convert(value, value_type, {"Messages"})
         if value_type == "Span[]":
             return value
         if value_type in {
@@ -4966,6 +4999,12 @@ def _convert(
     one-message ``Messages`` of it (``as_messages``). A model reply is not a conversation
     message, so it is not converted."""
 
+    if "Messages" in accepted and (
+        result_type == "Messages[]"
+        or result_type == "Messages"
+        and expression.kind in {"index", "binding", "slice", "field"}
+    ):
+        return ModelExpression("flatten_messages", None, (expression,)), "Messages"
     if (
         "Messages" in accepted
         and result_type in {"Message", "AssistantMessage"}

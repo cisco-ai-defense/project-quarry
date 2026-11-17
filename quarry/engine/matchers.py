@@ -434,8 +434,11 @@ def field_access(obj, path: str):
                 return list(cur.values())
             if isinstance(cur, (list, tuple)):
                 return list(cur)
+            allowed = getattr(type(cur), "DSL_FIELDS", None)
+            if allowed is not None:
+                return [_step(cur, name) for name in sorted(allowed) if not name.startswith("_")]
             if hasattr(cur, "__dict__"):
-                return list(vars(cur).values())
+                return [value for name, value in vars(cur).items() if not name.startswith("_")]
             return _MISSING
         cur = _step(cur, seg)
         if cur is _MISSING:
@@ -451,6 +454,11 @@ def _step(obj, seg: str):
             return obj[int(seg)]
         except (ValueError, IndexError):
             return _MISSING
+    # Prepared value graphs use this same accessor. They must not gain access to frame
+    # storage, Python internals, or a rewrite's original graph through private attributes.
+    # JSON mapping keys, including underscore-prefixed keys, were handled above.
+    if seg.startswith("_"):
+        return _MISSING
     # Host value types opt into semantic field guards. JSON dictionaries were handled
     # above, and looking on the class avoids evaluating an instance descriptor here.
     guard = getattr(type(obj), "guard_read", None)

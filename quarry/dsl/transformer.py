@@ -954,6 +954,10 @@ class DSLTransformer(Transformer):
             raise ValueError("Numeric literals must be finite")
         return Literal(value)
 
+    def negative_number_literal(self, num):
+        """Keep signed numeric values exact, including integers beyond float precision."""
+        return Literal(-self.number_literal(num).value)
+
     def true_literal(self):
         """True literal node."""
         return Literal(True)
@@ -1078,7 +1082,9 @@ class DSLTransformer(Transformer):
         A message-valued map can be used as typed model input. A text-valued map is
         supported as the first argument of ``join()`` in ``message()`` content.
         The projection and optional filter cannot call a model. Message maps keep
-        source provenance, flatten each projected message sequence in order, and
+        source provenance and keep each projected message sequence as one map entry.
+        Model input and quantifiers combine those entries in order. Bare len/count
+        measure map entries, and indexing/slicing preserve their collection values. Maps
         apply ``max_comprehension_size`` to both source and output. Structural limits
         always cap each map at 10,000 source/output items and 2,000,000 output text
         characters; the existing constructed-message limits also apply.

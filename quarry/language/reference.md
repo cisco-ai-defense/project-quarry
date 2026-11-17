@@ -684,6 +684,7 @@ Examples: [examples/language-basics.rule](examples/language-basics.rule)
 | From | To | Rule |
 |---|---|---|
 | `message` | `model_input` | A message of the conversation, such as `user_messages[-1]` or the element `m` of `any m in messages`, is the model input that holds only that message. A message the conversation does not have is an empty model input, which makes no model call. |
+| `collection<model_input>` | `model_input` | A message-valued map becomes one model input by combining its entries in written order. Counting or indexing the map still addresses its entries. |
 
 ## Data surfaces
 
@@ -1053,7 +1054,9 @@ Project selected items into messages or text values in written order.
 A message-valued map can be used as typed model input. A text-valued map is
 supported as the first argument of `join()` in `message()` content.
 The projection and optional filter cannot call a model. Message maps keep
-source provenance, flatten each projected message sequence in order, and
+source provenance and keep each projected message sequence as one map entry.
+Model input and quantifiers combine those entries in order. Bare len/count
+measure map entries, and indexing/slicing preserve their collection values. Maps
 apply `max_comprehension_size` to both source and output. Structural limits
 always cap each map at 10,000 source/output items and 2,000,000 output text
 characters; the existing constructed-message limits also apply.

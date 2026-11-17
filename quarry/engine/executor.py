@@ -1456,7 +1456,11 @@ def _ground_order(dfa, state, is_last, run: _Run) -> list[str]:
     specs = run.artifact.atom_specs
     return sorted(
         dfa.relevant_atoms(state, is_last=is_last),
-        key=lambda a: (specs[a].cost.rank, run.is_derived(a)) if a in specs else (-1, False),
+        key=lambda a: (
+            (specs[a].cost.rank, specs[a].detector == "computed_messages", run.is_derived(a))
+            if a in specs
+            else (-1, False, False)
+        ),
     )
 
 
