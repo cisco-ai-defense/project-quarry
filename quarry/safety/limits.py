@@ -19,7 +19,7 @@
 from dataclasses import dataclass
 from json.encoder import encode_basestring
 from math import isfinite
-from typing import Any
+from typing import Any, cast
 
 _END = object()
 _MAX_JSON_DEPTH = 1_000
@@ -169,9 +169,9 @@ def json_size(value: Any, limit: int) -> int:
         if kind is not str and issubclass(kind, str):
             current = str.__str__(current)
         elif kind is not int and issubclass(kind, int):
-            current = int.__int__(current)
+            current = int.__int__(cast(int, current))
         elif kind is not float and issubclass(kind, float):
-            current = float.__float__(current)
+            current = float.__float__(cast(Any, current))
         if type(current) not in (str, int, float, bool, dict, list, tuple, type(None)):
             return limit + 1
         if type(current) is str:
@@ -194,7 +194,7 @@ def json_size(value: Any, limit: int) -> int:
             stack.append([(item for pair in current.items() for item in pair), True, 0])
         elif type(current) in (list, tuple):
             total += 2
-            stack.append([iter(current), False, 0])
+            stack.append([iter(cast(list | tuple, current)), False, 0])
         if total > limit or len(stack) > _MAX_JSON_DEPTH:
             return limit + 1
     return total

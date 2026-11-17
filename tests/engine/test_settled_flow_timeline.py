@@ -82,7 +82,9 @@ def test_settled_flow_does_not_hide_a_live_flow_timeline_fault(problem):
     assert set(result.evaluation_errors) == {"Live", "Mixed"}
 
 
-@pytest.mark.parametrize("problem", ["list-subclass", "entry-subclass", "entry-key", "unread-key"])
+@pytest.mark.parametrize(
+    "problem", ["list-subclass", "entry-subclass", "entry-key", "value-subclass", "unread-key"]
+)
 def test_malformed_clock_objects_fail_only_the_flow(problem):
     class BadList(list):
         def __iter__(self):
@@ -98,6 +100,10 @@ def test_malformed_clock_objects_fail_only_the_flow(problem):
 
         def __eq__(self, other):
             raise AssertionError("timeline key equality hook ran")
+
+    class BadString(str):
+        def __hash__(self):
+            raise AssertionError("timeline value hash hook ran")
 
     config = QuarryConfig(
         config_version=2,
@@ -115,6 +121,8 @@ def test_malformed_clock_objects_fail_only_the_flow(problem):
         data["timeline"][0] = BadDict(data["timeline"][0])
     elif problem == "entry-key":
         data["timeline"][0] = {BadKey(): 0}
+    elif problem == "value-subclass":
+        data["timeline"][-1]["input"] = BadString("memory.writes")
     else:
         data["audit"] = {BadKey(): []}
         data["timeline"].insert(1, {"input": "audit.rogue", "id": "r"})

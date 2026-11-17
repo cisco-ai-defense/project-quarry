@@ -364,7 +364,7 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
         if current is None or issubclass(type(current), str | bool | int):
             continue
         if issubclass(type(current), float):
-            if isfinite(float.__float__(current)):
+            if isfinite(float.__float__(cast(Any, current))):
                 continue
             raise ConversationValidationError(f"{path} contains a non-finite number")
         if type(current) is list:

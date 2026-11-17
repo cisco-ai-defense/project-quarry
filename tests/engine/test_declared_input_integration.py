@@ -130,6 +130,19 @@ def test_malformed_json_container_faults_only_its_declared_input():
     assert result.rule_matches == ["Chat"]
     assert "Read" in result.evaluation_errors
 
+    class HostileId(str):
+        def __hash__(self):
+            raise AssertionError("untrusted ID hash must not run")
+
+    result = scanner.scan_data(
+        {
+            "messages": [{"role": "user", "content": "go"}],
+            "memory": {"writes": [{"id": HostileId("w"), "content": "x"}]},
+        }
+    )
+    assert result.rule_matches == ["Chat"]
+    assert "Read" in result.evaluation_errors
+
 
 def test_chat_tool_arguments_keep_string_subclass_support_with_declared_inputs():
     class Argument(str):

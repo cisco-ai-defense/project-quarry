@@ -917,7 +917,7 @@ class InputRegistry:
             if not isinstance(item, dict):
                 raise ConversationValidationError(f"{surface}[{index}] must be an object")
             item_id = item.get(ITEM_ID)
-            if not isinstance(item_id, str) or not item_id or item_id in ids:
+            if type(item_id) is not str or not item_id or item_id in ids:
                 raise ConversationValidationError(
                     f"{surface}[{index}] needs a unique non-empty string 'id'"
                 )
@@ -1038,11 +1038,15 @@ class InputRegistry:
                 raise ConversationValidationError(f"Timeline entry {position} must be an object")
             if set(entry) == {"input", ITEM_ID}:
                 surface, item_id = entry["input"], entry[ITEM_ID]
-                if not isinstance(surface, str) or surface not in self.event_surfaces:
+                if type(surface) is not str:
+                    raise ConversationValidationError(
+                        f"Timeline entry {position} has invalid input name"
+                    )
+                if surface not in self.event_surfaces:
                     raise ConversationValidationError(
                         f"Timeline entry {position} names {surface!r}, not a list input"
                     )
-                if not isinstance(item_id, str) or not item_id:
+                if type(item_id) is not str or not item_id:
                     raise ConversationValidationError(f"Timeline entry {position} has invalid id")
                 key = ("input", surface, item_id)
             elif len(entry) == 1 and "message_index" in entry:
@@ -1054,7 +1058,7 @@ class InputRegistry:
                 key = ("message_index", value)
             elif len(entry) == 1 and "tool_call_id" in entry:
                 value = entry["tool_call_id"]
-                if not isinstance(value, str) or not value:
+                if type(value) is not str or not value:
                     raise ConversationValidationError(
                         f"Timeline entry {position} has invalid tool_call_id"
                     )
