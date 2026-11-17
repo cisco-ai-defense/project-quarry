@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-20 records cross-section until clock
-# requirements so declaration order cannot substitute for an explicit timeline.
-COMPILER_VERSION = "compiler-20"
+# previously produced artifacts. Compiler-21 integrates located input text and pattern spans with
+# explicit cross-section clocks, lazy guards and bounded model span ownership.
+COMPILER_VERSION = "compiler-21"
 
 
 @dataclass(frozen=True, slots=True)

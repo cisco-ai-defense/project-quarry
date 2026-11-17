@@ -132,3 +132,44 @@ def test_plugin_lists_declared_inputs():
     assert plugin.reference(action="index")["inputs"]["memory.writes"]["facts"]["content"] == {
         "type": "string"
     }
+
+
+@pytest.mark.parametrize(
+    ("condition", "data", "matches"),
+    [
+        (
+            'any w in memory.notes where w.body.extract($p.spans(w.body)) contains "ignore"',
+            {"memory": {"notes": [{"id": "n1", "title": "please ", "body": "ignore this"}]}},
+            True,
+        ),
+        (
+            "any s in $p.spans(skill.instructions.body) where "
+            "s inside $q.spans(skill.instructions.body)",
+            {"skill": {"instructions": {"body": "x ignore this"}}},
+            True,
+        ),
+        (
+            "any w in memory.notes where any s in $p.spans(w.body) where "
+            "s inside $q.spans(skill.instructions.body)",
+            {
+                "memory": {"notes": [{"id": "n1", "title": "", "body": "ignore this"}]},
+                "skill": {"instructions": {"body": "ignore this"}},
+            },
+            False,
+        ),
+    ],
+)
+def test_input_text_spans_keep_their_source(condition, data, matches):
+    config = QuarryConfig(
+        config_version=2,
+        quarry_rule_texts=(
+            f'rule "R"\nstrings:\n    $p = "ignore"\n    $q = "ignore this"\ncondition: {condition}',
+        ),
+        inputs={
+            "memory.notes": {"content": ["title", "body"]},
+            "skill.instructions": {"single": True, "content": ["body"]},
+        },
+    )
+    result = DSLScanner(config, limits=SafetyLimits(rule_timeout=None)).scan_data(data)
+    assert result.is_complete, result.completion_issues
+    assert (result.rule_matches == ["R"]) is matches
