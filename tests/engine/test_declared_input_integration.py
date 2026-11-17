@@ -77,6 +77,25 @@ async def test_plugin_digest_ignores_unread_declared_input():
     assert invalid["completion_state"] == "incomplete"
     assert invalid["decision_path"]["conversation_sha256"] is None
 
+    class Hostile(dict):
+        def items(self):
+            raise AssertionError("overridden items must not run")
+
+        def __contains__(self, key):
+            raise AssertionError("overridden membership must not run")
+
+    bad_namespace = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": Hostile(DATA["memory"])},
+        explore_rate=1.0,
+    )
+    assert bad_namespace["completion_state"] == "incomplete"
+    assert bad_namespace["decision_path"]["conversation_sha256"] is None
+
+    bad_root = await plugin.scan(rule_text=RULE, conversation=Hostile(DATA), explore_rate=1.0)
+    assert bad_root["completion_state"] == "invalid"
+    assert bad_root["decision_path"]["conversation_sha256"] is None
+
 
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
