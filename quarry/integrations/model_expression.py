@@ -191,7 +191,7 @@ async def _evaluate_owned_value(expression, context, *, event, bindings, trace, 
     if expression.kind == "binding":
         bound = bindings.get(str(expression.value))
         if isinstance(bound, _BoundMessage):
-            return bound.message, bound.view._view_ordinals((bound.message.message_index,))
+            return bound.message, bound.view
     value = await evaluate_model_expression(
         expression,
         context,
@@ -766,7 +766,9 @@ async def _evaluate_message_selection(
             await asyncio.sleep(0)
         item_environment = {
             **environment,
-            variable: _BoundMessage(item, source) if isinstance(source, Messages) else item,
+            variable: _BoundMessage(item, source[position : position + 1])
+            if isinstance(source, Messages)
+            else item,
         }
         item_scope = (*environment.get(_CONSTRUCTION_SCOPE, ()), id(expression), position)
         item_environment[_BINDING_SCOPES] = {
@@ -901,9 +903,7 @@ def _chunk_spans(
 
     if not split_context:
         return None, _span_of(chunk, transcript)
-    own = chunk._select_ordinals(
-        ordinal for ordinal in chunk._ordinals if ordinal not in split_context._ordinals
-    )
+    own = chunk[len(split_context) :]
     return _span_of(split_context, transcript), _span_of(own, transcript)
 
 
@@ -1277,12 +1277,16 @@ async def _evaluate_model_text(expression, context, event, bindings, trace, rege
     passed = _filter_results(context, keep, variable, regex_backend)
     values = []
     pacer = Pacer()
-    for item in source:
+    for position, item in enumerate(source):
         # The items are synchronous work, so stop at the rule deadline and let other tasks run.
         raise_if_evaluation_expired()
         if pacer.due():
             await asyncio.sleep(0)
-        bound = _BoundMessage(item, source) if isinstance(source, Messages) else item
+        bound = (
+            _BoundMessage(item, source[position : position + 1])
+            if isinstance(source, Messages)
+            else item
+        )
         scope = {**bindings, variable: bound, _ITEM_TEXTS: {}}
         # A call whose argument text Quarry cannot decode — not JSON, not a JSON object, or
         # another reason such as more levels than max_nesting_depth — fails the rule, as a rule

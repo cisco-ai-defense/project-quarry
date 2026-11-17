@@ -485,25 +485,37 @@ class Message(OpenAIObject):
         into ranges carries them once.
         """
 
-        if not isinstance(self.source_content, str):
-            raise ValueError("only a message with string content can be divided")
-        if not 0 <= start < end <= len(self.source_content):
+        if not self._can_split_text():
+            raise ValueError("only a message with text-only content can be divided")
+        text = self.content
+        if not 0 <= start < end <= len(text):
             raise ValueError("message segment is outside the message content")
-        update: dict[str, Any] = {"source_content": self.source_content[start:end]}
-        if end < len(self.source_content) and isinstance(self, AssistantMessage):
-            update |= {"tool_calls": (), "refusal": None}
+        update: dict[str, Any] = {"source_content": text[start:end]}
+        if end < len(text) and isinstance(self, AssistantMessage):
+            if self.tool_calls:
+                update["tool_calls"] = ()
+            if self.refusal is not None:
+                update["refusal"] = None
         segment = self.model_copy(update=update)
         object.__setattr__(segment, "_content_cache", None)
         object.__setattr__(segment, "_content_parts_cache", None)
         object.__setattr__(segment, "_digest_cache", None)
         object.__setattr__(segment, "_segment", (start, end))
-        if self._provenance is not None:
-            object.__setattr__(
-                segment,
-                "_provenance",
-                slice_provenance(self._provenance, start, end),
-            )
+        object.__setattr__(
+            segment, "_provenance", slice_provenance(self._content_provenance(), start, end)
+        )
+        if not isinstance(self.source_content, str):
+            object.__setattr__(segment, "_rewrite_content_changed", True)
         return segment
+
+    def _can_split_text(self) -> bool:
+        source = self.source_content
+        return (
+            isinstance(source, str)
+            or isinstance(source, tuple)
+            and bool(source)
+            and all(isinstance(part, Mapping) and part.get("type") == "text" for part in source)
+        )
 
     def _content_provenance(self) -> tuple[ProvenanceSegment, ...]:
         """Return this text's map to the root message's original content parts."""
@@ -1328,6 +1340,7 @@ class Messages(Sequence[MessageType]):
         "_responses_by_name",
         "_tool_call_types",
         "_segments",
+        "_position_variants",
         "_chunk",
         "_sealed",
     )
@@ -1348,6 +1361,8 @@ class Messages(Sequence[MessageType]):
         self._tool_call_types: ToolCallTypeRegistry = MappingProxyType({})
         # Root ordinal -> the segment of that message this view holds instead of the whole.
         self._segments: Mapping[int, MessageType] = MappingProxyType({})
+        # Local selection position -> a variant differing from the ordinal's first one.
+        self._position_variants: Mapping[int, MessageType] = MappingProxyType({})
         # Whether this view is a ``split`` chunk (see ``_select_ranges``).
         self._chunk = False
         self._sealed = True
@@ -1644,7 +1659,11 @@ class Messages(Sequence[MessageType]):
         return len(self._ordinals)
 
     def __iter__(self) -> Iterator[MessageType]:
-        return (self._message_at(index) for index in self._ordinals)
+        return (self._message_at_position(position) for position in range(len(self)))
+
+    def _message_at_position(self, position: int) -> MessageType:
+        variant = self._position_variants.get(position)
+        return self._message_at(self._ordinals[position]) if variant is None else variant
 
     def _message_at(self, ordinal: int) -> MessageType:
         segment = self._segments.get(ordinal)
@@ -1658,8 +1677,9 @@ class Messages(Sequence[MessageType]):
 
     def __getitem__(self, index: int | slice) -> MessageType | Messages:
         if isinstance(index, slice):
-            return self._view_ordinals(self._ordinals[index])
-        return self._message_at(self._ordinals[index])
+            return self._view_positions(range(len(self))[index])
+        position = range(len(self))[index]
+        return self._message_at_position(position)
 
     def __bool__(self) -> bool:
         return bool(self._ordinals)
@@ -1681,6 +1701,15 @@ class Messages(Sequence[MessageType]):
             raise ValueError("message ordinals must be strictly increasing")
         if any(value < 0 or value >= len(self._root._items) for value in selected):
             raise IndexError("message ordinal is outside the root collection")
+
+        if self._position_variants:
+            by_ordinal: dict[int, list[int]] = {}
+            for position, ordinal in enumerate(self._ordinals):
+                by_ordinal.setdefault(ordinal, []).append(position)
+            if all(ordinal in by_ordinal for ordinal in selected):
+                return self._view_positions(
+                    position for ordinal in selected for position in by_ordinal[ordinal]
+                )
 
         return self._view_ordinals(selected)
 
@@ -1712,11 +1741,59 @@ class Messages(Sequence[MessageType]):
         view._segments = MappingProxyType(
             {ordinal: self._segments[ordinal] for ordinal in selected if ordinal in self._segments}
         )
+        view._position_variants = MappingProxyType({})
         view._chunk = False
         view._sealed = True
         return view
 
+    def _view_positions(self, positions: Iterable[int]) -> Messages:
+        """Select occurrences rather than resolving a repeated source index again."""
+
+        selected = tuple(positions)
+        view = self._view_ordinals(self._ordinals[position] for position in selected)
+        view._install_variants(tuple(self[position] for position in selected))
+        return view
+
+    def _install_variants(self, messages: Sequence[MessageType]) -> None:
+        """Install already validated occurrence variants on a newly constructed view."""
+
+        if len(messages) != len(self):
+            raise ValueError("message variants must cover every selected occurrence")
+        first: dict[int, MessageType] = {}
+        positions: dict[int, MessageType] = {}
+        for position, (ordinal, message) in enumerate(zip(self._ordinals, messages, strict=True)):
+            if message.message_index != ordinal:
+                raise ValueError("message variant does not match its source index")
+            previous = first.setdefault(ordinal, message)
+            if previous is not message:
+                positions[position] = message
+        object.__setattr__(
+            self,
+            "_segments",
+            MappingProxyType(
+                {
+                    ordinal: message
+                    for ordinal, message in first.items()
+                    if message is not self._root._items[ordinal]
+                }
+            ),
+        )
+        object.__setattr__(self, "_position_variants", MappingProxyType(positions))
+
     def _with_overrides(self, overrides: Mapping[int, MessageType]) -> Messages:
+        """Apply one variant to every occurrence of each named source ordinal."""
+
+        if any(ordinal not in self._ordinal_set for ordinal in overrides):
+            raise ValueError("transformed message override is outside its source selection")
+        return self._with_position_overrides(
+            {
+                position: overrides[ordinal]
+                for position, ordinal in enumerate(self._ordinals)
+                if ordinal in overrides
+            }
+        )
+
+    def _with_position_overrides(self, overrides: Mapping[int, MessageType]) -> Messages:
         """Apply content variants with the same graph validation as the async path."""
 
         steps = self._override_steps(overrides)
@@ -1735,9 +1812,8 @@ class Messages(Sequence[MessageType]):
     def rewritten(self, wires: Sequence[Mapping[str, Any]]) -> Messages:
         """Return text-preserving message variants, retaining original indexes and provenance.
 
-        A changed entry and its source must make no tool calls. Reordered selections keep
-        their order. Conflicting rewrites of one repeated source ordinal are rejected by
-        the current canonical-view representation.
+        A changed entry and its source must make no tool calls. Reordered and repeated
+        selections keep each occurrence, including independently rewritten variants.
         """
 
         steps = self._rewrite_steps(wires)
@@ -1745,7 +1821,7 @@ class Messages(Sequence[MessageType]):
             try:
                 next(steps)
             except StopIteration as finished:
-                return self if not finished.value else self._with_overrides(finished.value)
+                return self if not finished.value else self._with_position_overrides(finished.value)
             _raise_if_combine_expired()
 
     async def _rewritten_async(
@@ -1758,7 +1834,9 @@ class Messages(Sequence[MessageType]):
                 next(steps)
             except StopIteration as finished:
                 return (
-                    self if not finished.value else await self._with_overrides_async(finished.value)
+                    self
+                    if not finished.value
+                    else await self._with_position_overrides_async(finished.value)
                 )
             _raise_if_combine_expired()
             count += 1
@@ -1776,7 +1854,6 @@ class Messages(Sequence[MessageType]):
         if len(wires) != len(selected):
             raise ValueError("message rewrite must return one message per input")
         overrides: dict[int, MessageType] = {}
-        seen: dict[int, dict] = {}
         calls = {call.id: call for call in self._root._all_calls if call._readable_for_rewrite()}
         for position, wire in zip(selected, wires, strict=True):
             yield
@@ -1787,11 +1864,8 @@ class Messages(Sequence[MessageType]):
             _checked_rewrite_json(wire, self._root._max_nesting_depth)
             original = self[position]
             ordinal = self._ordinals[position]
-            if ordinal in seen and seen[ordinal] != wire:
-                raise ValueError("conflicting rewrites of a repeated source message")
             original_wire = original.to_openai_dict()
             if wire == original_wire:
-                seen[ordinal] = original_wire
                 continue
             if wire.get("tool_calls") or (
                 isinstance(original, AssistantMessage) and original.tool_calls
@@ -1839,11 +1913,23 @@ class Messages(Sequence[MessageType]):
             )
             if isinstance(replacement, ToolMessage):
                 object.__setattr__(replacement, "_call", calls.get(replacement.tool_call_id))
-            overrides[ordinal] = replacement
-            seen[ordinal] = replacement.to_openai_dict()
+            overrides[position] = replacement
         return overrides
 
     async def _with_overrides_async(self, overrides: Mapping[int, MessageType]) -> Messages:
+        if any(ordinal not in self._ordinal_set for ordinal in overrides):
+            raise ValueError("transformed message override is outside its source selection")
+        return await self._with_position_overrides_async(
+            {
+                position: overrides[ordinal]
+                for position, ordinal in enumerate(self._ordinals)
+                if ordinal in overrides
+            }
+        )
+
+    async def _with_position_overrides_async(
+        self, overrides: Mapping[int, MessageType]
+    ) -> Messages:
         """Apply view-local tool relinking with deadline and cancellation checkpoints."""
 
         steps = self._override_steps(overrides)
@@ -1866,14 +1952,15 @@ class Messages(Sequence[MessageType]):
     ) -> Generator[None, None, Messages]:
         """Return this view with content variants and a view-local linked tool graph."""
 
-        if any(ordinal not in self._ordinal_set for ordinal in overrides):
+        if any(position < 0 or position >= len(self) for position in overrides):
             raise ValueError("transformed message override is outside its source selection")
         view = self._view_ordinals(self._ordinals)
-        segments = dict(view._segments)
         selected = {
-            ordinal: overrides.get(ordinal, self._message_at(ordinal))
-            for ordinal in self._ordinal_set
+            position: overrides.get(position, self[position]) for position in range(len(self))
         }
+        selected_by_ordinal: dict[int, list[MessageType]] = {}
+        for position, message in selected.items():
+            selected_by_ordinal.setdefault(self._ordinals[position], []).append(message)
 
         # A transformed assistant/result must never traverse back into the canonical graph.
         # Prefer selected variants, then clone any linked counterpart outside this selection.
@@ -1886,6 +1973,8 @@ class Messages(Sequence[MessageType]):
             if isinstance(message, AssistantMessage):
                 call_sources.update((call.id, call) for call in message.tool_calls)
             elif isinstance(message, ToolMessage):
+                if message.tool_call_id in response_sources:
+                    raise ValueError("message rewrite contains duplicate tool results")
                 response_sources[message.tool_call_id] = message
         for response in tuple(response_sources.values()):
             yield
@@ -1893,14 +1982,16 @@ class Messages(Sequence[MessageType]):
                 call_sources.setdefault(response.tool_call_id, response._call)
         for call in tuple(call_sources.values()):
             yield
-            selected_response = (
-                selected.get(call._response.message_index) if call._response is not None else None
+            selected_responses = (
+                selected_by_ordinal.get(call._response.message_index, [])
+                if call._response is not None
+                else []
             )
             if call._response is not None and (
-                selected_response is None
-                or (
-                    isinstance(selected_response, ToolMessage)
-                    and selected_response.tool_call_id == call.id
+                not selected_responses
+                or any(
+                    isinstance(response, ToolMessage) and response.tool_call_id == call.id
+                    for response in selected_responses
                 )
             ):
                 response_sources.setdefault(call.id, call._response)
@@ -1925,11 +2016,9 @@ class Messages(Sequence[MessageType]):
                 object.__setattr__(call, "_response", response)
                 object.__setattr__(response, "_call", call)
 
-        for ordinal, message in selected.items():
+        for position, message in selected.items():
             yield
             if not message._readable_for_rewrite():
-                if ordinal in overrides:
-                    segments[ordinal] = message
                 continue
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 message = message.model_copy(
@@ -1939,9 +2028,8 @@ class Messages(Sequence[MessageType]):
                 )
             elif isinstance(message, ToolMessage):
                 message = response_clones[message.tool_call_id]
-            if ordinal in overrides or isinstance(message, AssistantMessage | ToolMessage):
-                segments[ordinal] = message
-        object.__setattr__(view, "_segments", MappingProxyType(segments))
+            selected[position] = message
+        view._install_variants(tuple(selected.values()))
         object.__setattr__(view, "_chunk", self._chunk)
         return view
 
@@ -1981,14 +2069,15 @@ class Messages(Sequence[MessageType]):
         registry = source_root._tool_call_types if source_root is not None else MappingProxyType({})
         nesting = source_root._max_nesting_depth if source_root is not None else 100
         synthetic_ordinals: dict[tuple[str, object], int] = {}
-        specifications: list[tuple[Messages, tuple[int, ...], dict[int, MessageType]]] = []
+        synthetic_sources: dict[tuple[str, object], MessageType] = {}
+        specifications: list[tuple[Messages, tuple[int, ...], list[MessageType]]] = []
 
         for part in parts:
             mapped_ordinals: list[int] = []
-            mapped_segments: dict[int, MessageType] = {}
-            for ordinal in part._ordinals:
+            mapped_items: list[MessageType] = []
+            for position, ordinal in enumerate(part._ordinals):
                 yield from _charge_combine_steps(meter, "selection_visits")
-                selected = part._message_at(ordinal)
+                selected = part[position]
                 key = _synthetic_key(selected)
                 if key is None:
                     if source_root is None or part._root._source_root is not source_root:
@@ -2007,6 +2096,16 @@ class Messages(Sequence[MessageType]):
                         )
                 else:
                     mapped = synthetic_ordinals.get(key, -1)
+                    canonical = part._root._items[ordinal]
+                    if mapped >= 0 and synthetic_sources[key] is not canonical:
+                        previous = yield from _message_variant_steps(synthetic_sources[key], meter)
+                        current = yield from _message_variant_steps(canonical, meter)
+                        if not (
+                            yield from _variant_representations_equal_steps(
+                                previous, current, meter
+                            )
+                        ):
+                            raise ValueError("constructed identity has different content variants")
                     if mapped < 0:
                         if len(synthetic_ordinals) >= _MAX_SYNTHETIC_MESSAGES:
                             raise ValueError(
@@ -2034,26 +2133,23 @@ class Messages(Sequence[MessageType]):
                         object.__setattr__(clone, "_message_index", len(items))
                         mapped = len(items)
                         synthetic_ordinals[key] = mapped
+                        synthetic_sources[key] = canonical
                         items.append(clone)
                 mapped_ordinals.append(mapped)
-                piece = part._segments.get(ordinal)
-                if key is not None and piece is None:
-                    piece = selected
-                if piece is not None:
-                    remap_rewrite = (
-                        key is not None and piece._rewrite_source is part._root._items[ordinal]
-                    )
-                    if key is not None and (piece.message_index != mapped or remap_rewrite):
-                        yield from _charge_combine_steps(
-                            meter,
-                            "message_clone_visits",
-                        )
-                        piece = piece.model_copy()
-                        object.__setattr__(piece, "_message_index", mapped)
-                        if remap_rewrite:
-                            object.__setattr__(piece, "_rewrite_source", items[mapped])
-                    mapped_segments[mapped] = piece
-            specifications.append((part, tuple(mapped_ordinals), mapped_segments))
+                piece = selected
+                reanchor = (
+                    key is not None
+                    and piece._rewrite_source is part._root._items[ordinal]
+                    and piece._rewrite_source is not items[mapped]
+                )
+                if key is not None and (piece.message_index != mapped or reanchor):
+                    yield from _charge_combine_steps(meter, "message_clone_visits")
+                    piece = piece.model_copy()
+                    object.__setattr__(piece, "_message_index", mapped)
+                    if reanchor:
+                        object.__setattr__(piece, "_rewrite_source", items[mapped])
+                mapped_items.append(piece)
+            specifications.append((part, tuple(mapped_ordinals), mapped_items))
 
         aggregate = cls._from_items(
             tuple(items),
@@ -2062,9 +2158,9 @@ class Messages(Sequence[MessageType]):
             source_root=source_root,
         )
         normalized = []
-        for original, ordinals, segments in specifications:
+        for original, ordinals, variants in specifications:
             view = aggregate._view_ordinals(ordinals)
-            object.__setattr__(view, "_segments", MappingProxyType(segments))
+            view._install_variants(variants)
             object.__setattr__(view, "_chunk", original._chunk)
             normalized.append(view)
         return tuple(normalized)
@@ -2104,13 +2200,15 @@ class Messages(Sequence[MessageType]):
         )
         whole = object()
         pieces: dict[int, MessageType | object] = {}
+        ordered_pieces: list[MessageType | object] = []
         variant_representations: dict[int, tuple[Message, object]] = {}
         variant_compatibility: dict[tuple[int, int], tuple[Message, bool]] = {}
         for part in present:
-            for ordinal in part._ordinals:
+            for position, ordinal in enumerate(part._ordinals):
                 if meter.record("selection_visits") and meter.checkpoint():
                     yield
-                piece = part._segments.get(ordinal, whole)
+                piece = part._position_variants.get(position, part._segments.get(ordinal, whole))
+                ordered_pieces.append(piece)
                 if ordinal not in pieces:
                     pieces[ordinal] = piece
                     continue
@@ -2119,9 +2217,7 @@ class Messages(Sequence[MessageType]):
                     yield from _charge_combine_steps(meter, "variant_cache_hits")
                     continue
                 if not isinstance(existing, Message) or not isinstance(piece, Message):
-                    raise ValueError(
-                        "cannot combine different content variants of the same source message"
-                    )
+                    continue
                 compatibility_key = (ordinal, id(piece))
                 cached = variant_compatibility.get(compatibility_key)
                 if cached is not None and cached[0] is piece:
@@ -2144,10 +2240,8 @@ class Messages(Sequence[MessageType]):
                         meter,
                     )
                     variant_compatibility[compatibility_key] = (piece, compatible)
-                if not compatible:
-                    raise ValueError(
-                        "cannot combine different content variants of the same source message"
-                    )
+                if compatible:
+                    ordered_pieces[-1] = existing
 
         canonical_tools: dict[str, _CanonicalToolUnit] = {}
         for ordinal, canonical in enumerate(root._items):
@@ -2203,11 +2297,13 @@ class Messages(Sequence[MessageType]):
         selected_calls: dict[str, tuple[int, ToolCall, _CanonicalToolUnit]] = {}
         selected_responses: dict[str, tuple[int, ToolMessage, _CanonicalToolUnit]] = {}
         selected_assistants: dict[int, AssistantMessage] = {}
+        response_positions: dict[str, int] = {}
         relink_tool_variants = False
-        for ordinal in combined._ordinals:
+        for position, (ordinal, piece) in enumerate(
+            zip(combined._ordinals, ordered_pieces, strict=True)
+        ):
             if meter.record("selected_message_visits") and meter.checkpoint():
                 yield
-            piece = pieces[ordinal]
             message = root._items[ordinal] if piece is whole else piece
             if not isinstance(message, Message) or message.message_index != ordinal:
                 raise ValueError("combined content variant does not match its source message")
@@ -2240,7 +2336,7 @@ class Messages(Sequence[MessageType]):
                     canonical.tool_calls if isinstance(canonical, AssistantMessage) else ()
                 )
                 if message.tool_calls:
-                    selected_assistants.setdefault(ordinal, message)
+                    selected_assistants[position] = message
                 if len(message.tool_calls) != len(canonical_calls):
                     raise ValueError(
                         "combined tool-call variant does not preserve its source tool identities"
@@ -2306,17 +2402,16 @@ class Messages(Sequence[MessageType]):
                         f"combined selection exceeds {_MAX_COMBINED_TOOL_IDENTITIES} tool results"
                     )
                 selected_responses[call_id] = (ordinal, message, unit)
+                response_positions[call_id] = position
                 relink_tool_variants = relink_tool_variants or piece is not whole
 
-        segments: dict[int, MessageType] = {}
-        for ordinal, piece in pieces.items():
+        variants: list[MessageType] = [
+            root._items[ordinal] if not isinstance(piece, Message) else cast(MessageType, piece)
+            for ordinal, piece in zip(combined._ordinals, ordered_pieces, strict=True)
+        ]
+        for _ in pieces:
             if meter.record("segment_visits") and meter.checkpoint():
                 yield
-            if isinstance(
-                piece,
-                SystemMessage | DeveloperMessage | UserMessage | AssistantMessage | ToolMessage,
-            ):
-                segments[ordinal] = piece
 
         if relink_tool_variants:
             call_clones: dict[str, ToolCall] = {}
@@ -2350,7 +2445,7 @@ class Messages(Sequence[MessageType]):
                     )
                 object.__setattr__(call, "_response", response)
                 object.__setattr__(response, "_call", call)
-            for ordinal, assistant in selected_assistants.items():
+            for position, assistant in selected_assistants.items():
                 cloned_calls: list[ToolCall] = []
                 for call in assistant.tool_calls:
                     if meter.record("assembly_visits") and meter.checkpoint():
@@ -2358,13 +2453,15 @@ class Messages(Sequence[MessageType]):
                     cloned_calls.append(call_clones[call.id])
                 if meter.record("message_clone_visits") and meter.checkpoint():
                     yield
-                segments[ordinal] = assistant.model_copy(update={"tool_calls": tuple(cloned_calls)})
-            for call_id, (ordinal, _response, _unit) in selected_responses.items():
+                variants[position] = assistant.model_copy(
+                    update={"tool_calls": tuple(cloned_calls)}
+                )
+            for call_id in selected_responses:
                 if meter.record("relink_visits") and meter.checkpoint():
                     yield
-                segments[ordinal] = response_clones[call_id]
+                variants[response_positions[call_id]] = response_clones[call_id]
 
-        object.__setattr__(combined, "_segments", MappingProxyType(segments))
+        combined._install_variants(variants)
         object.__setattr__(combined, "_chunk", all(part._chunk for part in present))
         if meter.checkpoint(finish=True):
             yield
@@ -2430,12 +2527,17 @@ class Messages(Sequence[MessageType]):
         """
 
         view = self._select_ordinals(ordinals)
-        segments = dict(view._segments)
-        for ordinal, (start, end) in ranges.items():
+        for ordinal in ranges:
             if not view._contains_root_ordinal(ordinal):
                 raise ValueError("a divided message must be selected by the view")
-            segments[ordinal] = self._message_at(ordinal)._segment_of(start, end)
-        object.__setattr__(view, "_segments", MappingProxyType(segments))
+        view._install_variants(
+            tuple(
+                message._segment_of(*ranges[message.message_index])
+                if message.message_index in ranges
+                else message
+                for message in view
+            )
+        )
         object.__setattr__(view, "_chunk", True)
         return view
 
@@ -2451,6 +2553,8 @@ class Messages(Sequence[MessageType]):
 
         if not self._ordinals:
             raise ValueError("an empty message selection has no span")
+        if self._position_variants:
+            return self._occurrence_span()
         first, last = min(self._ordinals), max(self._ordinals)
         part_contexts = {
             ordinal: source_part_mapping_for(
@@ -2531,6 +2635,36 @@ class Messages(Sequence[MessageType]):
             ),
         )
 
+    def _occurrence_span(self) -> Span:
+        """Envelope all occurrence variants, including distinct ranges of one source."""
+
+        spans = [self._view_positions((position,)).span for position in range(len(self))]
+        first = min(span.message_index for span in spans)
+        last = max(
+            span.end_message_index if span.end_message_index is not None else span.message_index
+            for span in spans
+        )
+        contextual = any(
+            span.source_ranges or span.source_parts or span.source_unmapped for span in spans
+        )
+        ranges: dict[ContentSourceRange, None] = {}
+        if contextual:
+            for message in self:
+                if message.content:
+                    mapped, _ = source_mapping_for(
+                        message._content_provenance(), 0, len(message.content)
+                    )
+                    ranges.update(dict.fromkeys(mapped))
+        return Span(
+            first,
+            min(span.start for span in spans if span.message_index == first),
+            max(span.end for span in spans if span.end_message_index == last),
+            end_message_index=last,
+            source_ranges=tuple(ranges),
+            source_unmapped=any(span.source_unmapped for span in spans),
+            source_parts=tuple(dict.fromkeys(part for span in spans for part in span.source_parts)),
+        )
+
     def source_ranges(
         self, message_index: int, start: int, end: int
     ) -> tuple[ContentSourceRange, ...]:
@@ -2542,7 +2676,14 @@ class Messages(Sequence[MessageType]):
             or message_index not in self._ordinal_set
         ):
             raise ValueError("source range message_index must name a selected message")
-        return self._message_at(message_index)._source_ranges(start, end)
+        result = self._message_at(message_index)._source_ranges(start, end)
+        for message in self._position_variants.values():
+            if (
+                message.message_index == message_index
+                and message._source_ranges(start, end) != result
+            ):
+                raise ValueError("source range is ambiguous; bind a span to one occurrence")
+        return result
 
     def _contains_root_ordinal(self, ordinal: int) -> bool:
         """Return whether this view selects one root-message ordinal."""
@@ -2596,6 +2737,16 @@ class Messages(Sequence[MessageType]):
             raise ValueError("extract() context bounds must be non-negative integers")
         message = self._span_message(span, require_bound=True)
         selected = self._segments.get(span.message_index)
+        if isinstance(span._view, Message):
+            selected = next(
+                (
+                    message
+                    for message in self
+                    if message.message_index == span.message_index
+                    and (message is span._view or _same_message_variant(message, span._view))
+                ),
+                None,
+            )
         if (
             span._view is not None
             and selected is not None
@@ -2621,7 +2772,7 @@ class Messages(Sequence[MessageType]):
         if local_index >= len(self._ordinals):
             raise ValueError("span message index is outside the model input")
         ordinal = self._ordinals[local_index]
-        selected = self._message_at(ordinal)
+        selected = self[local_index]
         if span.end > len(selected.content):
             raise ValueError("span is outside message content")
         if span.end <= span.start and selected.content:
@@ -2700,20 +2851,18 @@ class Messages(Sequence[MessageType]):
     def _select_role(self, role: str) -> Messages:
         """Keep messages of ``role`` in this value's current order."""
 
-        return self._view_ordinals(
-            ordinal for ordinal in self._ordinals if self._message_at(ordinal).role == role
+        return self._view_positions(
+            position for position, message in enumerate(self) if message.role == role
         )
 
     def _select_positions(self, positions: Iterable[int]) -> Messages:
         """Return a reference-backed sub-view from LOCAL positions of this collection.
 
-        ``positions`` index into this view's own sequence (0..len-1); they are mapped through
-        to the underlying root ordinals so the result reuses the SAME canonical ``Message``
-        objects — no copy, no re-index. Used by token-bounded chunking to build chunks that
-        share the transcript's messages (and, wrapped in a ``Conversation``, its tools) by
-        reference. Positions must be strictly increasing (``_select_ordinals`` enforces it)."""
+        ``positions`` index into this view's own sequence (0..len-1). Repeated and reordered
+        positions retain their matching message variants without copying or re-indexing the
+        source. Token-bounded chunks therefore share their selected occurrences by reference."""
 
-        return self._view_ordinals(self._ordinals[position] for position in positions)
+        return self._view_positions(positions)
 
     def assert_self_contained(self) -> None:
         """Reject a selection that is not a valid standalone OpenAI sequence.
@@ -3143,6 +3292,7 @@ class Messages(Sequence[MessageType]):
             (*self._ordinals, *(message.message_index for message in additions))
         )
         object.__setattr__(result, "_segments", self._segments)
+        object.__setattr__(result, "_position_variants", self._position_variants)
         object.__setattr__(result, "_chunk", self._chunk)
         return result
 

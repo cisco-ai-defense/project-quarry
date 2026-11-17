@@ -3354,29 +3354,73 @@ class ModelInferenceBackend:
             return _llm_error("conversation_too_large", detail, model_id)
 
         def text_of(ordinal: int) -> str:
-            return messages._root._items[ordinal].content
+            return messages[ordinal].content
 
         def piece(ordinal: int, start: int, end: int) -> Messages:
-            return messages._select_ranges((ordinal,), {ordinal: (start, end)})
+            selected = messages[ordinal : ordinal + 1]
+            return selected._select_ranges(
+                selected._ordinals, {selected[0].message_index: (start, end)}
+            )
 
-        context_ordinals = () if context is None else context._ordinals
-        body = tuple(ordinal for ordinal in messages._ordinals if ordinal not in context_ordinals)
+        # Packing keys are local positions. Two occurrences may have one source index
+        # while holding different text, roles, or provenance.
+        context_positions: list[int] = []
+        external_context: list[int] = []
+        consumed: set[int] = set()
+        if context is not None:
+            available: dict[int, list[int]] = {}
+            by_ordinal: dict[int, list[int]] = {}
+            for position in range(len(messages) - 1, -1, -1):
+                available.setdefault(id(messages[position]), []).append(position)
+                by_ordinal.setdefault(messages[position].message_index, []).append(position)
+            for message in context:
+                position = None
+                for matches in (
+                    available.get(id(message), []),
+                    by_ordinal.get(message.message_index, []),
+                ):
+                    while matches and matches[-1] in consumed:
+                        matches.pop()
+                    if matches:
+                        position = matches.pop()
+                        break
+                if position is None:
+                    external_context.append(message.message_index)
+                else:
+                    consumed.add(position)
+                    context_positions.append(position)
+        context_ordinals = tuple(context_positions)
+        body = tuple(position for position in range(len(messages)) if position not in consumed)
         if not body:
             raise ValueError("split input holds no messages besides its context")
-        if context_ordinals and context_ordinals[-1] > body[0]:
-            # A view keeps transcript order, so only a leading context starts every chunk.
+        if (
+            context_ordinals
+            and (
+                max(context_ordinals) > body[0]
+                or context_ordinals != tuple(sorted(context_ordinals))
+            )
+            or external_context
+            and max(external_context) >= min(messages[position].message_index for position in body)
+        ):
+            # Only a leading context can prefix every chunk without reordering its body.
             raise ValueError("split context must come before every message it is split from")
 
         def chunk(ranges: dict[int, tuple[int, int] | None]) -> Messages:
-            ordinals = sorted({*context_ordinals, *ranges})
-            return messages._select_ranges(
-                ordinals,
-                {
-                    ordinal: text_range
-                    for ordinal, text_range in ranges.items()
-                    if text_range is not None and text_range != (0, len(text_of(ordinal)))
-                },
-            )
+            positions = sorted(ranges)
+            prefix = tuple(context) if context is not None else ()
+            variants = (*prefix, *(messages[position] for position in positions))
+            selected = messages._view_ordinals(message.message_index for message in variants)
+            selected._install_variants(variants)
+            replacements = {
+                len(prefix) + local: messages[position]._segment_of(*text_range)
+                for local, position in enumerate(positions)
+                if (text_range := ranges.get(position)) is not None
+                and text_range != (0, len(text_of(position)))
+            }
+            if replacements or context is not None:
+                selected = selected._with_position_overrides(replacements)
+            object.__setattr__(selected, "_chunk", True)
+            return selected
 
         whole = chunk(dict.fromkeys(body))
         if await count(whole) <= max_input_tokens:
@@ -3386,7 +3430,7 @@ class ModelInferenceBackend:
         # framing, so summed counts overcount a chunk; a chunk of several parts is confirmed.
         context_tokens = 0 if context is None else await count(context)
         message_tokens = await asyncio.gather(
-            *(count(messages._select_ordinals((ordinal,))) for ordinal in body)
+            *(count(messages[ordinal : ordinal + 1]) for ordinal in body)
         )
         # Overlap is optional, so it must not force an otherwise fitting message to be cut.
         budget = max_input_tokens - context_tokens
@@ -3423,12 +3467,16 @@ class ModelInferenceBackend:
         async def parts_of(ordinal: int, tokens: int) -> list[_ChunkPart]:
             if tokens <= budget:
                 return [_ChunkPart(ordinal, None, tokens)]
-            source = messages._root._items[ordinal].source_content
-            if not isinstance(source, str) or not source:
+            if context is not None and await count(chunk({ordinal: None})) <= max_input_tokens:
+                # Summing two requests charges framing twice. Keep a whole occurrence
+                # when the actual context-plus-message request fits.
+                return [_ChunkPart(ordinal, None, budget)]
+            message = messages[ordinal]
+            if not message._can_split_text() or not message.content:
                 # Counted alone it pays the request framing twice beside the context, so
                 # only the exact count of its chunk in ``confirm`` can reject it.
                 return [_ChunkPart(ordinal, None, tokens)]
-            return await cut(ordinal, 0, len(source), tokens)
+            return await cut(ordinal, 0, len(message.content), tokens)
 
         split_messages = await asyncio.gather(
             *(
@@ -3446,8 +3494,8 @@ class ModelInferenceBackend:
             used += part.tokens
 
         def has_text(part: _ChunkPart) -> bool:
-            source = messages._root._items[part.ordinal].source_content
-            return isinstance(source, str) and bool(source)
+            message = messages[part.ordinal]
+            return message._can_split_text() and bool(message.content)
 
         async def tail(parts: list[_ChunkPart]) -> dict[int, tuple[int, int] | None]:
             """Return what the next chunk repeats from the end of ``parts``.
