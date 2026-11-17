@@ -202,9 +202,10 @@ class AssistantTextAsUser:
 
 Role views and tool-result associations follow the rewritten value. Message indexes and character
 provenance still point to the source conversation. A changed non-text layout retains message-level
-context rather than inventing original content-part indexes. The current message-view contract
-requires repeated occurrences of one source message to receive the same rewrite; conflicting
-variants fail instead of overwriting an earlier occurrence.
+context rather than inventing original content-part indexes. The message view
+keeps each selected occurrence independently, so two occurrences of the same source message
+may receive different roles, metadata, or content-part layouts. Slices, role selections and
+later transforms preserve those variants while their source indexes remain unchanged.
 
 ## Model aliases
 
@@ -317,8 +318,9 @@ resolution, models use the same strict validation and immutable runtime represen
 written-out aliases.
 
 Prepared policies bind registered transforms to their complete reviewed definition. This layer
-uses compiler 11 and compiled-policy format 9; policies from earlier formats must be recompiled
-from their saved rule source. The format change records transform resource requirements.
+uses compiler 12 and compiled-policy format 9. Policies from earlier compiler versions or formats
+must be recompiled from their saved rule source. Format 9 records transform resource requirements;
+compiler 12 applies occurrence-specific message selection and rewrite admission.
 
 Adapter diagnostics omit host exception messages and arbitrary exception details. Known retry
 and refusal codes are retained so model accounting and recovery still apply.

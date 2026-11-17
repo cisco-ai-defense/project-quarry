@@ -70,6 +70,14 @@ objects. When independently evaluated transformed views contribute opposite side
 call/result pair, Quarry creates immutable relinked variants so the combined graph is
 self-contained. Object identity is therefore not guaranteed.
 
+Repeated selections retain each occurrence independently. Two variants of one source message
+can have different roles, content layouts or transformed text while keeping the same source
+`message_index`. Slicing, role views, composition and token-bounded splitting keep their written
+order and preserve each variant's provenance. A model span binds to the particular occurrence
+that produced it. If variants map the same character offsets to different original ranges,
+`source_ranges(message_index, start, end)` is ambiguous and raises; use the bound model span's
+`source_ranges` and `messages.extract(span)` instead.
+
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
 messages can be placed before, after, or between source views. Constructed roles are restricted to
 `system`, `developer`, `user`, and `assistant`, and constructors do not accept provider fields or
