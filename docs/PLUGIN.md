@@ -334,9 +334,29 @@ If the rule contains taxonomy labels in `metadata`, the scan copies those labels
 
 The rule author owns the metadata names and values. Quarry only preserves them.
 
+Every scan names its result `verbosity`:
+
+| Verbosity | Default for | Result contract |
+|---|---|---|
+| `full` | One `conversation` | Preserves the detailed response: `decision_path` is present and `explain` defaults to on. |
+| `compact` | A `conversations` batch | Keeps completion state, diagnostics, verdicts, matches, outputs, and `decision_scores`; omits `decision_path`, and `explain` defaults to off. |
+
+Pass `verbosity: "full"` when a batch needs paths for `quarry_decision_flows`. Pass
+`explain: true` or `"support"` with a compact scan when explanations are needed without paths.
+An explicit `explain` value always wins over its verbosity default. A single-conversation scan
+can also request `compact`; rescan an interesting batch item as one conversation to recover its
+detailed path while reusing cached model results.
+
+`decision_scores` maps each score-step ID reached by the path or exploration to the numeric value
+compared with its threshold. It keeps the full step ID, including a `~N` suffix when the same
+authored score check occurs more than once in the decision tree, so distinct steps never
+overwrite each other. It is available at both verbosity levels, so threshold analysis does not
+require retaining conversation hashes, path structure, explanation excerpts, or other bulk
+details for every batch item.
+
 ### Why a rule matched or did not
 
-With `explain` on (the default), a complete scan adds `explanations`: one entry per rule,
+With `explain` on (the default for `full`), a complete scan adds `explanations`: one entry per rule,
 matched or not, rendered from the same scan record. A match cites its supporting positions
 in `witness`. Every entry lists the rule's atoms, the actionable ones first:
 
@@ -679,6 +699,9 @@ timeline attempts; tool indexes belong to nested checks.
 | `matched` | Whether at least one rule matched. Present only after a complete scan. |
 | `matches` | Matched rule names and their authored metadata. |
 | `explanations` | Why each rule matched or did not, when `explain` is enabled: up to 16 cited steps and the rule's atoms; see [Why a rule matched or did not](#why-a-rule-matched-or-did-not). |
+| `decision_scores` | Score-step values keyed by full decision-step ID, including any `~N` suffix. Present at both verbosity levels. |
+| `decision_path` | The decision-tree checks reached and their leaf. Present only with `verbosity: "full"`. |
+| `verbosity` | `compact` or `full`, reported once for the scan response. |
 | `visualization` | Runtime attribution keyed to `compilation.visualization` by node ID. Present only when `visualize` is true. |
 | `diagnostics` | Validation, timeout, truncation, or evaluation problems. |
 | `policy_digest` | Identity of the compiled policy, its fixed values, and referenced runtime configuration. |
@@ -687,8 +710,12 @@ timeline attempts; tool indexes belong to nested checks.
 
 For an ordered batch with `visualize`, the response returns the static graph once at
 `compilation.visualization`. Each result's `visualization` is a runtime-only bundle keyed
-by rule name, and the response-level `visualization.graphs[]` repeats those records, unchanged,
-in `executions`. `aggregate` counts executions per node. Within one execution a node counts
+by rule name. Under `compact`, its `runtime_attribution` retains `status`, `matched`,
+`attempts`, and `proof_attempt`, but omits the full trace, node-evidence list, and
+selected-node convenience view. Those views grow with a conversation or repeat an attempt;
+`verbosity: "full"` restores them for every batch result. The response-level
+`visualization.graphs[]` repeats the corresponding compact or full records in `executions`.
+`aggregate` counts executions per node. Within one execution a node counts
 once: its state is the highest observed across that execution's attempts, proof replay, and
 tool checks (`evaluated_true`, then `evaluated_false`, then `skipped`), and it adds to
 `witness_count` if any of them marks it causal. `evaluated_count`, `true_count`, and
