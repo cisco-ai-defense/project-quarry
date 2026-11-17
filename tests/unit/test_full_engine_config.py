@@ -17,12 +17,14 @@
 """Loading, validating and freezing an Quarry configuration document."""
 
 import dataclasses
+from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 import yaml
 
+import quarry.config as config_module
 from quarry.config import QuarryConfig
 from quarry.types.exceptions import ConfigurationError
 
@@ -197,6 +199,572 @@ def test_an_inference_model_defaults_to_litellm_but_never_to_an_upstream_model(t
         models({})
     with pytest.raises(ValueError, match="requires a non-empty 'adapter' string"):
         models({"adapter": None, "model": "openai/example-model"})
+
+
+def test_model_templates_recursively_merge_to_the_written_out_model(tmp_path):
+    nested = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "model_templates": {
+                "scorer": {
+                    "adapter": "synthetic",
+                    "score": {
+                        "message_builder": "constitution",
+                        "boundary_seed": 7,
+                        "tokens": {"negative": "no", "positive": "yes"},
+                        "extraction": {"probabilities": "scores"},
+                    },
+                },
+                "deployment": {
+                    "extends": "scorer",
+                    "model": "synthetic/model",
+                },
+            },
+            "models": {
+                "inherited": {
+                    "extends": "deployment",
+                    "score": {
+                        "boundary_seed": 11,
+                        "tokens": {"positive": "unsafe"},
+                    },
+                },
+                "written_out": {
+                    "adapter": "synthetic",
+                    "model": "synthetic/model",
+                    "score": {
+                        "message_builder": "constitution",
+                        "boundary_seed": 11,
+                        "tokens": {"negative": "no", "positive": "unsafe"},
+                        "extraction": {"probabilities": "scores"},
+                    },
+                },
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert nested.models["inherited"] == nested.models["written_out"]
+
+
+def test_response_schema_template_accepts_a_valid_partial_inherited_patch(tmp_path):
+    config = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "model_templates": {
+                "base": {
+                    "complete": {
+                        "response_schema": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "base description"}
+                            },
+                            "required": ["label"],
+                            "additionalProperties": False,
+                        }
+                    }
+                },
+                "patched": {
+                    "extends": "base",
+                    "complete": {
+                        "response_schema": {
+                            "properties": {"label": {"description": "patched description"}}
+                        }
+                    },
+                },
+            },
+            "models": {
+                "verdict": {"extends": "patched", "model": "synthetic/model"},
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert config.models["verdict"].complete is not None
+    assert (
+        '"description":"patched description"' in config.models["verdict"].complete.response_schema
+    )
+
+
+def test_unused_template_rejects_a_conflict_created_by_inheritance(tmp_path):
+    with pytest.raises(
+        ConfigurationError,
+        match="Model template 'conflict' score explanation and reasoning are mutually exclusive",
+    ):
+        QuarryConfig.from_mapping(
+            {
+                "config_version": 2,
+                "model_templates": {
+                    "base": {
+                        "score": {
+                            "boundary_seed": 1,
+                            "reasoning": {"max_tokens": 16},
+                        }
+                    },
+                    "conflict": {
+                        "extends": "base",
+                        "score": {"explanation": {"max_tokens": 16}},
+                    },
+                },
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_null_removes_inherited_optional_model_sections(tmp_path):
+    config = QuarryConfig.from_mapping(
+        {
+            "model_templates": {
+                "tagger": {
+                    "adapter": "synthetic",
+                    "model": "synthetic/base",
+                    "category": "SYNTHETIC",
+                    "spans": {"class_index": 2},
+                    "tokens": {
+                        "adapter": "synthetic",
+                        "model": "synthetic/tokenizer",
+                        "extraction": {"count": "count"},
+                    },
+                }
+            },
+            "models": {
+                "plain": {
+                    "extends": "tagger",
+                    "model": "synthetic/plain",
+                    "category": None,
+                    "spans": None,
+                    "tokens": None,
+                }
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    model = config.models["plain"]
+    assert model.category is None
+    assert model.spans is None
+    assert model.tokens is None
+
+
+def test_alias_metadata_is_not_inherited_from_another_alias(tmp_path):
+    config = QuarryConfig.from_mapping(
+        {
+            "models": {
+                "base": {
+                    "model": "synthetic/base",
+                    "description": "Description for the base alias.",
+                },
+                "child": {"extends": "base", "model": "synthetic/child"},
+            }
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert config.model_descriptions == {"base": "Description for the base alias."}
+
+
+def test_template_resolution_does_not_mutate_the_round_trippable_document(tmp_path):
+    document = {
+        "model_templates": {
+            "base": {
+                "adapter": "synthetic",
+                "score": {
+                    "boundary_seed": 1,
+                    "tokens": {"negative": "0", "positive": "1"},
+                },
+            }
+        },
+        "models": {
+            "judge": {
+                "extends": "base",
+                "model": "synthetic/model",
+                "score": {"boundary_seed": 2},
+            }
+        },
+    }
+    original = deepcopy(document)
+
+    QuarryConfig.from_mapping(document, tmp_path, require_rules=False)
+
+    assert document == original
+    assert yaml.safe_load(yaml.safe_dump(document, sort_keys=False)) == original
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        pytest.param(
+            {"model_templates": []},
+            "field 'model_templates' must be a mapping",
+            id="templates-not-a-mapping",
+        ),
+        pytest.param(
+            {"model_templates": {"base": "synthetic/model"}},
+            "Model template 'base' config must be a mapping",
+            id="template-not-a-mapping",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"extends": True}}},
+            "Model template 'base' extends must be a non-empty string",
+            id="extends-not-a-string",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"extends": None}}},
+            "Model template 'base' extends must be a non-empty string",
+            id="extends-not-null",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"score": []}}},
+            "Model template 'base' score must be a mapping or null",
+            id="section-not-a-mapping",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"score": {"extraction": {"probabilites": "p"}}}}},
+            "score extraction has unknown field: 'probabilites'",
+            id="unused-template-nested-typo",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"score": {"boundary_seed": True}}}},
+            "score boundary_seed must be an integer or null",
+            id="unused-template-strict-type",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"classify": {"labels": ["valid", 2]}}}},
+            "classify labels must contain non-empty names",
+            id="unused-template-label-type",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {"classify": {"class_index": -1}},
+                }
+            },
+            "classify class_index must be a non-negative integer",
+            id="unused-template-negative-class-index",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {"spans": {"class_index": -1}},
+                }
+            },
+            "spans class_index must be a non-negative integer",
+            id="unused-template-negative-span-index",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {"classify": {"labels": ["same", "same"]}},
+                }
+            },
+            "classify label names must be unique",
+            id="unused-template-duplicate-labels",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {"score": {"reasoning": {"max_tokens": 15}}},
+                }
+            },
+            "reasoning max_tokens must be an integer of at least 16",
+            id="unused-template-reasoning-budget",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {"score": {"explanation": {"max_tokens": 4097}}},
+                }
+            },
+            "explanation max_tokens must be an integer from 16 to 4096",
+            id="unused-template-explanation-budget",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "base": {
+                        "complete": {
+                            "response_schema": {
+                                "type": "object",
+                                "properties": {"label": {"type": "string"}},
+                                "required": ["label"],
+                            }
+                        }
+                    }
+                }
+            },
+            "response_schema object at / needs additionalProperties: false",
+            id="unused-template-response-schema",
+        ),
+        pytest.param(
+            {
+                "model_templates": {"same": {"adapter": "synthetic"}},
+                "models": {"same": {"model": "synthetic/model"}},
+            },
+            "defined in both blocks: 'same'",
+            id="shared-name",
+        ),
+        pytest.param(
+            {
+                "model_templates": {"base": {"extends": "missing"}},
+                "models": {"judge": {"extends": "base", "model": "synthetic/model"}},
+            },
+            "extends unknown model or template 'missing'",
+            id="unknown-parent",
+        ),
+        pytest.param(
+            {
+                "model_templates": {
+                    "left": {"extends": "right"},
+                    "right": {"extends": "left"},
+                }
+            },
+            "extends cycle",
+            id="cycle",
+        ),
+        pytest.param(
+            {"model_templates": {"base": {"description": "Alias-only metadata."}}},
+            "Model template 'base' has unknown field: 'description'",
+            id="template-description",
+        ),
+    ],
+)
+def test_invalid_model_template_documents_are_rejected(tmp_path, document, message):
+    with pytest.raises(ConfigurationError, match=message):
+        QuarryConfig.from_mapping(document, tmp_path, require_rules=False)
+
+
+def test_model_template_inheritance_depth_is_bounded_with_cached_ancestors(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "MAX_MODEL_CONFIG_INHERITANCE_DEPTH", 3)
+    document = {
+        "model_templates": {
+            "ancestor_0": {"adapter": "synthetic"},
+            "ancestor_1": {"extends": "ancestor_0"},
+            "ancestor_2": {"extends": "ancestor_1"},
+        },
+        # Sorted resolution warms every ancestor in the cache before visiting this alias.
+        "models": {"z_model": {"extends": "ancestor_2", "model": "synthetic/model"}},
+    }
+
+    with pytest.raises(ConfigurationError, match="inheritance limit of 3"):
+        QuarryConfig.from_mapping(document, tmp_path, require_rules=False)
+
+
+def test_model_and_template_definition_count_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "MAX_MODEL_CONFIG_DEFINITIONS", 1)
+
+    with pytest.raises(ConfigurationError, match="more than 1 models and model templates"):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"adapter": "synthetic"}},
+                "models": {"judge": {"extends": "base", "model": "synthetic/model"}},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_resolved_model_template_fanout_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "MAX_RESOLVED_MODEL_CONFIG_VALUES", 7)
+
+    with pytest.raises(ConfigurationError, match="aggregate limit of 7 values"):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"adapter": "synthetic", "model": "synthetic/model"}},
+                "models": {name: {"extends": "base"} for name in ("model_a", "model_b", "model_c")},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_resolved_large_schema_annotation_fanout_is_byte_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "MAX_RESOLVED_MODEL_CONFIG_BYTES", 400)
+
+    with pytest.raises(ConfigurationError, match="aggregate limit of 400 bytes"):
+        QuarryConfig.from_mapping(
+            {
+                "config_version": 2,
+                "model_templates": {
+                    "base": {
+                        "model": "synthetic/model",
+                        "complete": {
+                            "response_schema": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "description": "x" * 64,
+                                    }
+                                },
+                                "required": ["label"],
+                                "additionalProperties": False,
+                            }
+                        },
+                    }
+                },
+                "models": {name: {"extends": "base"} for name in ("model_a", "model_b", "model_c")},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_short_environment_placeholder_cannot_hide_oversized_expansion(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QUARRY_MODEL_CONFIG_OVERSIZED_MODEL",
+        "x" * (config_module.MAX_RESOLVED_MODEL_CONFIG_BYTES + 1),
+    )
+
+    with pytest.raises(ConfigurationError, match="aggregate limit of 1000000 bytes"):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"model": "${QUARRY_MODEL_CONFIG_OVERSIZED_MODEL}"}},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_expanded_environment_fanout_is_byte_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUARRY_MODEL_CONFIG_LARGE_MODEL", "x" * 500)
+    monkeypatch.setattr(config_module, "MAX_RESOLVED_MODEL_CONFIG_BYTES", 600)
+
+    with pytest.raises(ConfigurationError, match="aggregate limit of 600 bytes"):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"model": "${QUARRY_MODEL_CONFIG_LARGE_MODEL}"}},
+                "models": {
+                    "model_a": {"extends": "base"},
+                    "model_b": {"extends": "base"},
+                },
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_expanded_environment_byte_budget_allows_its_exact_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUARRY_MODEL_CONFIG_BOUNDARY_MODEL", "x" * 10)
+    document = {
+        "model_templates": {"base": {"model": "${QUARRY_MODEL_CONFIG_BOUNDARY_MODEL}"}},
+        "models": {"child": {"extends": "base"}},
+    }
+    monkeypatch.setattr(config_module, "MAX_RESOLVED_MODEL_CONFIG_BYTES", 30)
+
+    config = QuarryConfig.from_mapping(document, tmp_path, require_rules=False)
+    assert config.models["child"].model == "x" * 10
+
+    monkeypatch.setattr(config_module, "MAX_RESOLVED_MODEL_CONFIG_BYTES", 29)
+    with pytest.raises(ConfigurationError, match="aggregate limit of 29 bytes"):
+        QuarryConfig.from_mapping(document, tmp_path, require_rules=False)
+
+
+def test_inherited_environment_fields_are_resolved_once(tmp_path, monkeypatch):
+    values = {
+        "QUARRY_MODEL_CONFIG_MODEL": "${QUARRY_MODEL_CONFIG_SECONDARY}",
+        "QUARRY_MODEL_CONFIG_ENDPOINT": "https://example.invalid/model",
+        "QUARRY_MODEL_CONFIG_PROFILE": "synthetic-profile",
+        "QUARRY_MODEL_CONFIG_REGION": "synthetic-region",
+        "QUARRY_MODEL_CONFIG_TOKEN_MODEL": "synthetic/tokenizer",
+        "QUARRY_MODEL_CONFIG_CALIBRATION": "synthetic-calibration",
+        "QUARRY_MODEL_CONFIG_SECONDARY": "must-not-be-resolved",
+    }
+    calls: dict[str, int] = {}
+    real_getenv = config_module.os.getenv
+
+    def getenv(name: str) -> str | None:
+        calls[name] = calls.get(name, 0) + 1
+        return values.get(name) if name in values else real_getenv(name)
+
+    monkeypatch.setattr(config_module.os, "getenv", getenv)
+    config = QuarryConfig.from_mapping(
+        {
+            "model_templates": {
+                "base": {
+                    "model": "${QUARRY_MODEL_CONFIG_MODEL}",
+                    "endpoint": "${QUARRY_MODEL_CONFIG_ENDPOINT}",
+                    "aws_profile": "${QUARRY_MODEL_CONFIG_PROFILE}",
+                    "region": "${QUARRY_MODEL_CONFIG_REGION}",
+                    "tokens": {
+                        "adapter": "synthetic",
+                        "endpoint": "${QUARRY_MODEL_CONFIG_ENDPOINT}",
+                        "model": "${QUARRY_MODEL_CONFIG_TOKEN_MODEL}",
+                        "extraction": {"count": "count"},
+                    },
+                    "score": {
+                        "boundary_seed": 1,
+                        "calibration": "${QUARRY_MODEL_CONFIG_CALIBRATION}",
+                    },
+                }
+            },
+            "models": {"judge": {"extends": "base"}},
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    model = config.models["judge"]
+    assert model.model == "${QUARRY_MODEL_CONFIG_SECONDARY}"
+    assert model.endpoint == values["QUARRY_MODEL_CONFIG_ENDPOINT"]
+    assert model.aws_profile == values["QUARRY_MODEL_CONFIG_PROFILE"]
+    assert model.region == values["QUARRY_MODEL_CONFIG_REGION"]
+    assert model.tokens is not None
+    assert model.tokens.endpoint == values["QUARRY_MODEL_CONFIG_ENDPOINT"]
+    assert model.tokens.model == values["QUARRY_MODEL_CONFIG_TOKEN_MODEL"]
+    assert model.score is not None
+    assert model.score.calibration == values["QUARRY_MODEL_CONFIG_CALIBRATION"]
+    assert calls == {name: 1 for name in values if name != "QUARRY_MODEL_CONFIG_SECONDARY"}
+
+
+def test_inherited_missing_environment_reference_fails_without_its_value(tmp_path, monkeypatch):
+    monkeypatch.delenv("QUARRY_MODEL_CONFIG_MISSING_MODEL", raising=False)
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            "Model template 'base' references unset environment variable "
+            "'QUARRY_MODEL_CONFIG_MISSING_MODEL'"
+        ),
+    ):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"model": "${QUARRY_MODEL_CONFIG_MISSING_MODEL}"}},
+                "models": {"judge": {"extends": "base"}},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+def test_model_template_nesting_and_aggregate_size_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "MAX_MODEL_CONFIG_NESTING_DEPTH", 4)
+    too_deep = {"leaf": "value"}
+    for _ in range(4):
+        too_deep = {"nested": too_deep}
+
+    with pytest.raises(ConfigurationError, match="nesting limit of 4"):
+        QuarryConfig.from_mapping(
+            {"model_templates": {"base": {"complete": {"response_schema": too_deep}}}},
+            tmp_path,
+            require_rules=False,
+        )
+
+    monkeypatch.setattr(config_module, "MAX_MODEL_CONFIG_NESTING_DEPTH", 16)
+    monkeypatch.setattr(config_module, "MAX_MODEL_CONFIG_VALUES", 4)
+    with pytest.raises(ConfigurationError, match="aggregate limit of 4 values"):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {
+                    "base": {"complete": {"response_schema": {"enum": ["a", "b", "c", "d", "e"]}}}
+                }
+            },
+            tmp_path,
+            require_rules=False,
+        )
 
 
 def test_an_inference_model_carries_its_category_and_span_class_index(tmp_path):
