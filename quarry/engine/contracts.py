@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-23 tracks parameter use across public calls and
-# removes child artifacts that no executable automaton reads after lowering.
-COMPILER_VERSION = "compiler-23"
+# previously produced artifacts. Compiler-24 admits span-list composition and forward-scoped aliases while
+# retaining called-parameter accounting, live-child projection and guarded source views.
+COMPILER_VERSION = "compiler-24"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64

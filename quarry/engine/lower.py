@@ -216,7 +216,9 @@ class _Tables:
                     current,
                     (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension),
                 )
-                and current.variable == var
+                # A called rule owns every name in its body; only its selected input
+                # reads caller aliases. Ordinary comprehensions bind their one variable.
+                and (current.variable == var or current.variable.startswith(COMPOSED_CHECK))
             )
             for field_name in condition_child_fields(current):
                 if rebinds and field_name != "collection":

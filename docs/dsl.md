@@ -39,6 +39,15 @@ expression.
 
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
+A value alias such as `(user_messages as messages)` applies to subsequent clauses in its `and` chain. Earlier clauses keep their original meaning, and a later alias cannot change the value named by an earlier alias. Called rules keep their own alias scope. Compiler 24 enforces these rules on the guarded runtime; saved compiler-23 policies require recompilation from rule source.
+
+Every clause is validated when a rule loads, including clauses after `false`. Runtime
+short-circuiting still skips model inputs and calls that cannot affect the verdict.
+
+Alias expansion is limited to 100,000 condition-node occurrences per rule and shares the
+rule's compile-work budget. Reusing a value counts each occurrence. Exceeding either limit
+rejects the rule before another expansion.
+
 ```text
 rule "Repeated shell requests"
 condition:
