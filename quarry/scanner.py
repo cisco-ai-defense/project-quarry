@@ -1201,6 +1201,10 @@ class DSLScanner:
                         reason = f"{key!r} must be an object of its sections"
                         input_faults.update(dict.fromkeys(sections_of, reason))
                         continue
+                    if any(type(section_key) is not str for section_key in dict.__iter__(value)):
+                        reason = f"{key!r} section keys must be exact built-in strings"
+                        input_faults.update(dict.fromkeys(sections_of, reason))
+                        continue
                     for section in read:
                         namespace, _, name = section.partition(".")
                         if namespace == key and name in value:

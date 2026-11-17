@@ -96,6 +96,21 @@ async def test_plugin_digest_ignores_unread_declared_input():
     assert bad_root["completion_state"] == "invalid"
     assert bad_root["decision_path"]["conversation_sha256"] is None
 
+    class HostileKey:
+        def __hash__(self):
+            return hash("writes")
+
+        def __eq__(self, other):
+            raise AssertionError("untrusted key comparison must not run")
+
+    bad_keys = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": {HostileKey(): []}},
+        explore_rate=1.0,
+    )
+    assert bad_keys["completion_state"] == "incomplete"
+    assert bad_keys["decision_path"]["conversation_sha256"] is None
+
 
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
