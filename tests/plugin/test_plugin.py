@@ -718,7 +718,7 @@ VISUALIZATION_CASES = [
         [0],
         {
             "nodes": {
-                '{(content contains "x")}': [{"state": "unknown", "causal": True}],
+                '{content contains "x"}': [{"state": "unknown", "causal": True}],
                 '(content contains "x")': [{"state": "evaluated_true", "causal": True}],
             }
         },

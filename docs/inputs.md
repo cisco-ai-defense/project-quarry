@@ -74,7 +74,7 @@ filters, quantifiers and outermost inputs use the same bound. Exceeding it fails
 evaluation without truncating results. These operations also honor the scan deadline;
 disabling size limits does not disable that deadline.
 
-Compiler identity is 25 with compiled-policy format 10. Recompile older artifacts
+Compiler identity is 26 with compiled-policy format 10. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 
 ## Timeline and clocks

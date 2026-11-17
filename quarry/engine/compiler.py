@@ -5078,6 +5078,17 @@ def compile_rule(
             SourceRef(rule_name=rule_name),
         )
         return CompileResult(rule_name, None, diagnostics)
+    condition = getattr(rule, "condition", None)
+    composition_issue = _composition_verdict_issue(condition)
+    if composition_issue is not None:
+        diagnostics = Diagnostics()
+        rule_name = str(getattr(rule, "name", ""))
+        diagnostics.error(
+            composition_issue,
+            ErrorCategory.TYPE,
+            SourceRef(rule_name=rule_name),
+        )
+        return CompileResult(rule_name, None, diagnostics)
     return compile_core(
         rule,
         max_work=max_work,
@@ -5085,6 +5096,585 @@ def compile_rule(
         response_schemas=response_schemas,
         transforms=transforms,
     )
+
+
+_COMPOSITION_DIAGNOSTIC_WORK = 200_000
+_COMPOSITION_DIAGNOSTIC_DEPTH = 256
+_VALUE_VERDICT_MESSAGE = (
+    "a message selection or composed value cannot be used as a Boolean verdict; "
+    "pass the value to an operation that returns a condition, or compare a scalar value"
+)
+_COMPOSITION_LIMIT_MESSAGE = (
+    "condition composition is too complex to validate safely; simplify the condition"
+)
+
+
+class _CompositionLimit(Exception):
+    """The optional composition diagnostic exhausted its bounded analysis."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ValueClassification:
+    """A symbolic composed-value classification resolved in a lexical environment."""
+
+    direct: bool = False
+    name: str | None = None
+    alternatives: tuple[_ValueClassification, ...] = ()
+
+    def merge(self, other: _ValueClassification) -> _ValueClassification:
+        if self.direct or other.direct:
+            return _ValueClassification(direct=True)
+        if self.name is None and not self.alternatives:
+            return other
+        if other.name is None and not other.alternatives:
+            return self
+        if self is other:
+            return self
+        return _ValueClassification(alternatives=(self, other))
+
+
+@dataclass
+class _CompositionFrame:
+    """One iterative classification frame."""
+
+    node: ConditionNode
+    children: Iterator[ConditionNode]
+    incoming_depth: int
+    path_depth: int
+    height: int = 0
+
+
+class _CompositionAnalysis:
+    """Linear, bounded classification and lexical verdict traversal."""
+
+    def __init__(self, stats: dict[str, int] | None):
+        self.empty = _ValueClassification()
+        self.classes: dict[int, _ValueClassification] = {}
+        self.alias_chains: set[int] = set()
+        # Environments hold (bound-name bits, composed-value bits). An explicit scalar
+        # binding differs from an unbound name, which may denote a built-in surface.
+        self.match_cache: dict[tuple[int, tuple[int, int]], bool] = {}
+        self.environments: set[tuple[int, int]] = set()
+        self.nodes: dict[int, ConditionNode] = {}
+        self.binding_bits: dict[str, int] = {}
+        self.dependencies: dict[int, int] = {}
+        self.work = 0
+        self.stats = stats
+
+    def charge(self, kind: str, amount: int = 1) -> None:
+        self.work += amount
+        if self.stats is not None:
+            self.stats["work"] = self.work
+            self.stats[kind] = self.stats.get(kind, 0) + amount
+        if self.work > _COMPOSITION_DIAGNOSTIC_WORK:
+            raise _CompositionLimit
+
+    def _class(self, node: ConditionNode | None) -> _ValueClassification:
+        return self.empty if node is None else self.classes[id(node)]
+
+    def _classify_node(self, node: ConditionNode) -> _ValueClassification:
+        if isinstance(node, Identifier):
+            return (
+                _ValueClassification(name=node.name) if isinstance(node.name, str) else self.empty
+            )
+        if isinstance(node, FilterComprehension | MapComprehension):
+            return _ValueClassification(direct=True)
+        if (
+            isinstance(node, ModelCall)
+            and isinstance(node.result_type, str)
+            and node.result_type in _MESSAGE_VALUE_TYPES
+        ):
+            return _ValueClassification(direct=True)
+        if isinstance(node, FunctionCall):
+            if isinstance(node.name, str) and node.name in {
+                "conversation",
+                "message",
+                "add_message",
+                "_transform",
+            }:
+                return _ValueClassification(direct=True)
+            if isinstance(node.name, str) and node.name in {"_index", "_slice"} and node.args:
+                return self._class(node.args[0])
+            return self.empty
+        if isinstance(node, FieldAccess):
+            from_conversation = (
+                isinstance(node.base, FunctionCall)
+                and node.base.name == "conversation"
+                and not node.base.args
+            )
+            fields = (
+                node.fields[1:]
+                if from_conversation and node.fields[:1] == ["messages"]
+                else node.fields
+            )
+            if node.base is not None and all(
+                isinstance(field, str) and field in _ROLE_VIEW_SURFACES for field in fields
+            ):
+                return self._class(node.base)
+            return self.empty
+        if isinstance(node, Assignment):
+            return self._class(node.expression)
+        if isinstance(node, ConditionalValue):
+            return self._class(node.chosen).merge(self._class(node.fallback))
+        if (
+            isinstance(node, BinaryOp)
+            and not isinstance(node, FlowOp)
+            and isinstance(node.operator, str)
+            and node.operator == "+"
+        ):
+            return self._class(node.left).merge(self._class(node.right))
+        return self.empty
+
+    @staticmethod
+    def _edge_depth(parent: ConditionNode, child: ConditionNode) -> int:
+        """Treat homogeneous flat Boolean/value spines as one structural grammar level."""
+
+        if (
+            isinstance(parent, BinaryOp)
+            and not isinstance(parent, FlowOp)
+            and isinstance(parent.operator, str)
+            and parent.operator in {"and", "or", "+"}
+            and isinstance(child, BinaryOp)
+            and not isinstance(child, FlowOp)
+            and child.operator == parent.operator
+        ):
+            return 0
+        return 1
+
+    def classify(self, root: ConditionNode) -> None:
+        active = {id(root)}
+        heights: dict[int, int] = {}
+        try:
+            children = iter_condition_children(root)
+        except (TypeError, ValueError) as exc:
+            raise _CompositionLimit from exc
+        stack = [_CompositionFrame(root, children, 0, 0)]
+        self.charge("classification_nodes")
+        while stack:
+            frame = stack[-1]
+            try:
+                child = next(frame.children)
+            except StopIteration:
+                child = None
+            except (TypeError, ValueError) as exc:
+                raise _CompositionLimit from exc
+
+            if child is None:
+                if frame.height > _COMPOSITION_DIAGNOSTIC_DEPTH:
+                    raise _CompositionLimit
+                node = frame.node
+                identity = id(node)
+                self.classes[identity] = self._classify_node(node)
+                if (
+                    isinstance(node, BinaryOp)
+                    and node.operator == "and"
+                    and (
+                        self._is_scalar_alias(node.left)
+                        or self._is_scalar_alias(node.right)
+                        or id(node.left) in self.alias_chains
+                    )
+                ):
+                    self.alias_chains.add(identity)
+                self.nodes[identity] = node
+                heights[identity] = frame.height
+                active.remove(identity)
+                stack.pop()
+                if stack:
+                    parent = stack[-1]
+                    parent.height = max(parent.height, frame.height + frame.incoming_depth)
+                continue
+
+            self.charge("classification_edges")
+            identity = id(child)
+            if identity in active:
+                raise _CompositionLimit
+            edge_depth = self._edge_depth(frame.node, child)
+            if identity in self.classes:
+                frame.height = max(frame.height, heights[identity] + edge_depth)
+                continue
+            path_depth = frame.path_depth + edge_depth
+            if path_depth > _COMPOSITION_DIAGNOSTIC_DEPTH:
+                raise _CompositionLimit
+            active.add(identity)
+            self.charge("classification_nodes")
+            try:
+                children = iter_condition_children(child)
+            except (TypeError, ValueError) as exc:
+                raise _CompositionLimit from exc
+            stack.append(_CompositionFrame(child, children, edge_depth, path_depth))
+
+        self._index_dependencies()
+
+    def _index_dependencies(self) -> None:
+        """Index referenced alias names in postorder, charging bitset storage/work."""
+
+        referenced = {
+            node.name
+            for node in self.nodes.values()
+            if isinstance(node, Identifier) and isinstance(node.name, str)
+        }
+        bound = {
+            node.variable
+            for node in self.nodes.values()
+            if isinstance(
+                node,
+                Assignment
+                | AnyComprehension
+                | AllComprehension
+                | FilterComprehension
+                | MapComprehension,
+            )
+            and isinstance(node.variable, str)
+        }
+        for index, name in enumerate(sorted(bound & referenced)):
+            self.charge("binding_words", index // 64 + 1)
+            self.binding_bits[name] = 1 << index
+        if not self.binding_bits:
+            return
+        for identity, node in self.nodes.items():
+            mask = self.binding_bits.get(node.name, 0) if isinstance(node, Identifier) else 0
+            for child in iter_condition_children(node):
+                child_mask = self.dependencies[id(child)]
+                self.charge(
+                    "dependency_words",
+                    max(1, (max(mask.bit_length(), child_mask.bit_length()) + 63) // 64),
+                )
+                mask |= child_mask
+            # Bindings inside a subtree shadow the caller's value only in their body.
+            # Keep collection/initializer dependencies in the enclosing environment.
+            if isinstance(
+                node, AnyComprehension | AllComprehension | FilterComprehension | MapComprehension
+            ):
+                bit = self.binding_bits.get(node.variable, 0)
+                collection = self.dependencies[id(node.collection)]
+                body = (
+                    self.dependencies[id(node.expression)]
+                    if isinstance(node, MapComprehension)
+                    else self.dependencies[id(node.condition)]
+                )
+                if isinstance(node, MapComprehension) and node.condition is not None:
+                    body |= self.dependencies[id(node.condition)]
+                mask = collection | (body & ~bit)
+            elif (
+                isinstance(node, BinaryOp)
+                and node.operator == "and"
+                and isinstance(node.left, Assignment)
+            ):
+                bit = self.binding_bits.get(node.left.variable, 0)
+                mask = self.dependencies[id(node.left.expression)] | (
+                    self.dependencies[id(node.right)] & ~bit
+                )
+            self.dependencies[identity] = mask
+
+    def matches(
+        self,
+        classification: _ValueClassification,
+        environment: tuple[int, int],
+    ) -> bool:
+        """Resolve one symbolic classification once in the current lexical scope."""
+
+        root_key = (id(classification), environment)
+        cached = self.match_cache.get(root_key)
+        if cached is not None:
+            return cached
+
+        stack: list[tuple[_ValueClassification, bool]] = [(classification, False)]
+        while stack:
+            current, expanded = stack[-1]
+            key = (id(current), environment)
+            cached = self.match_cache.get(key)
+            if cached is not None:
+                stack.pop()
+                continue
+            if current.direct:
+                self.match_cache[key] = True
+                stack.pop()
+                continue
+            if current.name is not None:
+                self.charge("classification_matches")
+                bit = self.binding_bits.get(current.name, 0)
+                self.match_cache[key] = (
+                    bool(environment[1] & bit)
+                    if environment[0] & bit
+                    else current.name in _MODEL_INPUT_SURFACES
+                )
+                stack.pop()
+                continue
+            if not current.alternatives:
+                self.match_cache[key] = False
+                stack.pop()
+                continue
+            if not expanded:
+                self.charge("classification_matches")
+                stack[-1] = (current, True)
+                for alternative in current.alternatives:
+                    alternative_key = (id(alternative), environment)
+                    if alternative_key not in self.match_cache:
+                        stack.append((alternative, False))
+                continue
+            self.match_cache[key] = any(
+                self.match_cache[(id(alternative), environment)]
+                for alternative in current.alternatives
+            )
+            stack.pop()
+        return self.match_cache[root_key]
+
+    def bind(
+        self,
+        environment: tuple[int, int],
+        name: str,
+        value_kind: bool,
+    ) -> tuple[int, int]:
+        """Return the canonical visible binding classifications after one shadow."""
+
+        bit = self.binding_bits.get(name, 0)
+        if not bit:
+            return environment
+        bound, values = environment
+        self.charge(
+            "environment_words", max(1, (max(bound.bit_length(), bit.bit_length()) + 63) // 64)
+        )
+        result = (bound | bit, values | bit if value_kind else values & ~bit)
+        if result == environment:
+            return environment
+        self.note_environment(result)
+        return result
+
+    def note_environment(self, environment: tuple[int, int]) -> None:
+        """Record one canonical environment for deterministic complexity tests."""
+
+        self.environments.add(environment)
+        if self.stats is not None:
+            self.stats["distinct_environments"] = len(self.environments)
+
+    @staticmethod
+    def _is_scalar_alias(node: ConditionNode) -> bool:
+        return isinstance(node, Assignment) and not (
+            isinstance(node.expression, BinaryOp) and node.expression.operator == "in"
+        )
+
+    @staticmethod
+    def _where_message(keyword: str) -> str:
+        return (
+            f"the trailing value group is inside the unparenthesized `{keyword} ... "
+            f"where ...` clause; end that clause first with `({keyword} item in "
+            "collection where condition)`, then join it to a Boolean condition"
+        )
+
+    def find_issue(self, root: ConditionNode) -> str | None:
+        # Modes 1/2 are an any-clause root/trailing group and 3/4 are the
+        # corresponding all-clause states. The immutable environment is the complete
+        # classification of visible aliases. Each visit projects it onto the names
+        # referenced by that subtree, so unrelated bindings never duplicate DAG work.
+        empty_environment: tuple[int, int] = (0, 0)
+        self.note_environment(empty_environment)
+        pending: list[tuple] = [("visit", root, True, 0, empty_environment)]
+        seen: set[tuple[int, bool, int, tuple[int, int]]] = set()
+        while pending:
+            event = pending.pop()
+            _, node, verdict_position, where_mode, environment = event
+            if environment[0]:
+                mask = self.dependencies.get(id(node), 0)
+                self.charge("environment_words", max(1, (environment[0].bit_length() + 63) // 64))
+                environment = (environment[0] & mask, environment[1] & mask)
+            state = (id(node), verdict_position, where_mode, environment)
+            if state in seen:
+                continue
+            seen.add(state)
+            self.charge("analysis_nodes")
+
+            if verdict_position and self.matches(self.classes[id(node)], environment):
+                if where_mode in {2, 4}:
+                    return self._where_message("any" if where_mode == 2 else "all")
+                return _VALUE_VERDICT_MESSAGE
+
+            if isinstance(node, AnyComprehension | AllComprehension):
+                value_kind = self.matches(self._class(node.collection), environment)
+                body_environment = self.bind(environment, node.variable, value_kind)
+                pending.append(("visit", node.collection, False, 0, environment))
+                pending.append(
+                    (
+                        "visit",
+                        node.condition,
+                        True,
+                        1 if isinstance(node, AnyComprehension) else 3,
+                        body_environment,
+                    )
+                )
+                continue
+            if isinstance(node, FilterComprehension):
+                value_kind = self.matches(self._class(node.collection), environment)
+                body_environment = self.bind(environment, node.variable, value_kind)
+                pending.append(("visit", node.collection, False, 0, environment))
+                pending.append(("visit", node.condition, True, 0, body_environment))
+                continue
+            if isinstance(node, MapComprehension):
+                value_kind = self.matches(self._class(node.collection), environment)
+                body_environment = self.bind(environment, node.variable, value_kind)
+                pending.append(("visit", node.collection, False, 0, environment))
+                pending.append(("visit", node.expression, False, 0, body_environment))
+                if node.condition is not None:
+                    pending.append(("visit", node.condition, True, 0, body_environment))
+                continue
+            if isinstance(node, ConditionalValue):
+                pending.append(("visit", node.predicate, True, 0, environment))
+                pending.append(
+                    (
+                        "visit",
+                        node.chosen,
+                        verdict_position,
+                        where_mode,
+                        environment,
+                    )
+                )
+                pending.append(
+                    (
+                        "visit",
+                        node.fallback,
+                        verdict_position,
+                        where_mode,
+                        environment,
+                    )
+                )
+                continue
+            if isinstance(node, UnaryOp):
+                pending.append(
+                    (
+                        "visit",
+                        node.operand,
+                        node.operator == "not",
+                        where_mode,
+                        environment,
+                    )
+                )
+                continue
+            if isinstance(node, FlowOp):
+                pending.append(("visit", node.left, True, 0, environment))
+                pending.append(("visit", node.right, True, where_mode, environment))
+                continue
+            if id(node) in self.alias_chains:
+                terms, remaining = [], [node]
+                while remaining:
+                    part = remaining.pop()
+                    self.charge("alias_chain_nodes")
+                    if isinstance(part, BinaryOp) and part.operator == "and":
+                        terms.append(part.right)
+                        remaining.append(part.left)
+                    else:
+                        terms.append(part)
+                terms.reverse()
+                if any(self._is_scalar_alias(part) for part in terms):
+                    current_environment = environment
+                    visits = []
+                    for index, part in enumerate(terms):
+                        if self._is_scalar_alias(part):
+                            visits.append(("visit", part.expression, False, 0, current_environment))
+                            value_kind = self.matches(
+                                self._class(part.expression), current_environment
+                            )
+                            current_environment = self.bind(
+                                current_environment, part.variable, value_kind
+                            )
+                        else:
+                            mode = 0 if index == 0 else {1: 2, 2: 2, 3: 4, 4: 4}.get(where_mode, 0)
+                            visits.append(("visit", part, True, mode, current_environment))
+                    pending.extend(reversed(visits))
+                    continue
+            if isinstance(node, BinaryOp):
+                child_is_verdict = isinstance(node.operator, str) and node.operator in {"and", "or"}
+                right_where_mode = (
+                    {1: 2, 2: 2, 3: 4, 4: 4}.get(where_mode, 0) if child_is_verdict else 0
+                )
+                if (
+                    node.operator == "and"
+                    and isinstance(node.left, Assignment)
+                    and self._is_scalar_alias(node.left)
+                ):
+                    value_kind = self.matches(self._class(node.left.expression), environment)
+                    right_environment = self.bind(environment, node.left.variable, value_kind)
+                    pending.append(
+                        (
+                            "visit",
+                            node.left.expression,
+                            False,
+                            0,
+                            environment,
+                        )
+                    )
+                    pending.append(
+                        (
+                            "visit",
+                            node.right,
+                            True,
+                            right_where_mode,
+                            right_environment,
+                        )
+                    )
+                else:
+                    pending.append(
+                        (
+                            "visit",
+                            node.left,
+                            child_is_verdict,
+                            0,
+                            environment,
+                        )
+                    )
+                    right_environment = environment
+                    if node.operator == "and" and isinstance(node.left, Assignment):
+                        value_kind = self.matches(self._class(node.left.expression), environment)
+                        right_environment = self.bind(environment, node.left.variable, value_kind)
+                    pending.append(
+                        (
+                            "visit",
+                            node.right,
+                            child_is_verdict,
+                            right_where_mode,
+                            right_environment,
+                        )
+                    )
+                continue
+            if isinstance(node, Assignment):
+                pending.append(
+                    (
+                        "visit",
+                        node.expression,
+                        verdict_position,
+                        where_mode,
+                        environment,
+                    )
+                )
+                continue
+            if isinstance(node, ContainsAnyOp):
+                pending.append(("visit", node.left, False, 0, environment))
+                continue
+            if isinstance(node, FieldAccess):
+                if node.base is not None:
+                    pending.append(("visit", node.base, False, 0, environment))
+                continue
+            if isinstance(node, FunctionCall | ModelCall):
+                for argument in reversed(node.args):
+                    pending.append(("visit", argument, False, 0, environment))
+                continue
+            if isinstance(node, PatternMatch):
+                for pattern in reversed(node.patterns):
+                    pending.append(("visit", pattern, False, 0, environment))
+        return None
+
+
+def _composition_verdict_issue(
+    condition: ConditionNode | None, *, _stats: dict[str, int] | None = None
+) -> str | None:
+    """Recognize composed values in verdict positions with bounded lexical analysis."""
+
+    if condition is None:
+        return None
+    analysis = _CompositionAnalysis(_stats)
+    try:
+        analysis.classify(condition)
+        return analysis.find_issue(condition)
+    except _CompositionLimit:
+        return _COMPOSITION_LIMIT_MESSAGE
 
 
 class _NodeAliases:

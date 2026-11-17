@@ -887,7 +887,7 @@ class DSLTransformer(Transformer):
     def in_op(self, left, right):
         """Test whether a value or text pattern occurs in another value."""
         if isinstance(right, list):
-            right = Literal(right)
+            right = Literal(self._decoded_array_values(right))
         return BinaryOp("in", left, right)
 
     @dsl_construct(name="inside")
@@ -906,7 +906,7 @@ class DSLTransformer(Transformer):
         if str(var) == "params":
             raise ValueError("'params' is reserved for declared rule parameters")
         if isinstance(right, list):
-            right = Literal(right)
+            right = Literal(self._decoded_array_values(right))
         return Assignment(BinaryOp("in", left, right), str(var))
 
     @dsl_construct(name="pattern-match")
@@ -1018,7 +1018,8 @@ class DSLTransformer(Transformer):
     @dsl_construct(name="array-literal")
     def array(self, *items):
         """Write an ordered literal list between brackets."""
-        values = [self._literal_value(item) for item in items]
+        # Lark uses None for the missing optional element in [], unlike Literal(None).
+        values = [self._literal_value(item) for item in items if item is not None]
         return values
 
     def _literal_value(self, item):
@@ -1038,6 +1039,15 @@ class DSLTransformer(Transformer):
         if not isinstance(value, list):
             return 1
         return sum(self._array_size(item) for item in value)
+
+    def _decoded_array_values(self, value):
+        """Strip private raw-spelling markers from executable condition arrays."""
+
+        if type(value) is list:
+            return [self._decoded_array_values(item) for item in value]
+        if type(value) is _RawString:
+            return str.__str__(value)
+        return value
 
     @dsl_construct(name="filter-comprehension")
     def filter_comp(self, output_var, var, collection, condition=None):
@@ -1170,7 +1180,7 @@ class DSLTransformer(Transformer):
                 "Use a string variable instead."
             )
 
-        return ContainsAnyOp(left, array_values)
+        return ContainsAnyOp(left, self._decoded_array_values(array_values))
 
     @dsl_construct(name="metadata")
     def metadata_block(self, *items):
