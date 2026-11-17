@@ -61,13 +61,12 @@ def _limit_error(violations: dict[str, str]) -> ConversationValidationError:
 def _timeline_items(msg: dict[str, Any]) -> int:
     """Count the timeline events one raw message will materialize.
 
-    One per message, plus one per assistant tool call. A tool result is one canonical
+    One per message, plus one per preserved tool call, including cross-role calls. A tool
+    result is one canonical
     ``ToolMessage`` occupying a single position (it belongs to both the ``messages`` and
     ``tool_responses`` surfaces there), so it is not counted twice."""
 
-    if msg.get("role") == "assistant":
-        return 1 + len(msg.get("tool_calls") or [])
-    return 1
+    return 1 + len(msg.get("tool_calls") or [])
 
 
 def _bounded_deep_size(value: Any, limit: int, seen: set[int] | None = None) -> int:
@@ -262,24 +261,23 @@ class ScanContext:
                 f"({_summarize(oversized_content)})"
             )
 
-        # Count only assistant calls — the OpenAI contract does not assign tool-call semantics to
-        # other roles, so they must not consume the assistant budget.
-        assistant_calls = [
+        # Every preserved call consumes preparation and timeline work, including calls on
+        # unreadable cross-role senders. Apply call and argument limits before materialization.
+        materialized_calls = [
             (message_index, call_index, call)
             for message_index, msg in enumerate(messages)
-            if msg.get("role") == "assistant"
             for call_index, call in enumerate(msg.get("tool_calls") or [])
         ]
-        if len(assistant_calls) > self.limits.max_tool_calls:
+        if len(materialized_calls) > self.limits.max_tool_calls:
             violations["max_tool_calls"] = (
-                f"conversation has {len(assistant_calls)} assistant tool calls; limit is "
+                f"conversation has {len(materialized_calls)} tool calls; limit is "
                 f"{self.limits.max_tool_calls}"
             )
 
         # Bound each raw argument blob BEFORE ``Conversation`` parses any JSON,
         # so an oversized payload is never materialized to be measured.
         oversized_arguments: list[str] = []
-        for message_index, call_index, tool_call in assistant_calls:
+        for message_index, call_index, tool_call in materialized_calls:
             function = tool_call.get("function") if isinstance(tool_call, dict) else None
             arguments = function.get("arguments") if isinstance(function, dict) else None
             argument_size = (
@@ -293,7 +291,7 @@ class ScanContext:
                 )
         if oversized_arguments:
             violations["max_tool_argument_size"] = (
-                f"{len(oversized_arguments)} of {len(assistant_calls)} tool calls exceed the "
+                f"{len(oversized_arguments)} of {len(materialized_calls)} tool calls exceed the "
                 f"{self.limits.max_tool_argument_size}-byte argument limit "
                 f"({_summarize(oversized_arguments)})"
             )
@@ -339,14 +337,14 @@ class ScanContext:
 
     def _build_timeline(self) -> list[tuple[int, Message | ToolCall]]:
         """Construct the evaluation timeline: one event per canonical message plus one per
-        assistant tool call, in transcript order.
+        preserved tool call, in transcript order.
 
         A tool result is the canonical ``ToolMessage`` itself — it occupies a single position
         and is later tagged (by ``engine/events.py``) as belonging to BOTH the ``messages`` and
         ``tool_responses`` surfaces. There is no separate synthesized tool-response event, so a
         ``read_file`` result is: AssistantMessage → ToolCall → ToolMessage (one position each).
 
-        Complexity: O(messages + tool_calls). Tool calls attach to their owning assistant turn
+        Complexity: O(messages + tool_calls). Tool calls attach to their owning message
         by root ``message_index`` so an accepted-but-earlier role (a leading system message,
         etc.) can never shift the attachment.
         """
@@ -362,7 +360,7 @@ class ScanContext:
             timeline.append((position, msg))
             position += 1
 
-            # A tool call is emitted right after its owning assistant message.
+            # A tool call is emitted right after its owning message.
             if raw_idx in tool_calls_by_msg:
                 for tc in tool_calls_by_msg[raw_idx]:
                     timeline.append((position, tc))

@@ -77,6 +77,9 @@ Plain slices retain the canonical transcript's links and uncertainty, including 
 outside the slice. Text transforms retain separate call positions and never relink reused IDs
 to a different exchange. Models require usable, unique IDs and exact selected call/result links;
 sequential ID reuse is therefore readable by rules but refused as a whole model request.
+Safety limits count every preserved call, including calls on unreadable cross-role senders.
+`max_timeline_items` counts each message and call once; `max_tool_calls` and
+`max_tool_argument_size` apply before those calls are materialized.
 
 Offered tools must have a string `type` and a `function` object with a string `name`.
 Unknown string types, empty names and duplicate names are preserved in raw serialization.
