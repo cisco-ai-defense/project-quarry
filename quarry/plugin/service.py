@@ -434,6 +434,7 @@ class QuarryPlugin:
             config = self._runtime_config
             response["runtime_config_version"] = config.config_version if config is not None else 1
             response["model_aliases"] = self._model_aliases()
+        response["inputs"] = self._inputs()
         # The table is the same on every call and is what an author reads once, before writing
         # anything, so it rides along with the browsing action and is asked for explicitly
         # anywhere else. Repeating it on every search and every get charged the caller for it
@@ -1283,6 +1284,26 @@ class QuarryPlugin:
                 entry["description"] = config.model_descriptions[alias]
             aliases[alias] = entry
         return aliases
+
+    def _inputs(self) -> dict[str, dict[str, Any]]:
+        """Describe configured sections and the adapters that fill them."""
+
+        from quarry.inputs import load_input_adapters
+
+        config = self._runtime_config
+        if config is None:
+            return {}
+        adapters, declarations = load_input_adapters(config.adapters, config.inputs)
+        filled_by = {
+            section: key for key, adapter in adapters.items() for section in adapter.sections
+        }
+        listed = {}
+        for section, declaration in sorted(declarations.items()):
+            entry = declaration.describe()
+            if section in filled_by:
+                entry["adapter"] = filled_by[section]
+            listed[section] = entry
+        return listed
 
     def _deprecation_warnings_from_text(self, rule_text: str) -> list[dict[str, Any]]:
         warnings = []

@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import base64 as _base64
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 
@@ -301,7 +301,7 @@ def field_access(obj, path: str):
         if seg == "*":
             if i != len(segments) - 1:
                 return _MISSING
-            if isinstance(cur, dict):
+            if isinstance(cur, Mapping):
                 return list(cur.values())
             if isinstance(cur, (list, tuple)):
                 return list(cur)
@@ -315,7 +315,7 @@ def field_access(obj, path: str):
 
 
 def _step(obj, seg: str):
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         return obj.get(seg, _MISSING)
     if isinstance(obj, (list, tuple)):
         try:
@@ -327,6 +327,9 @@ def _step(obj, seg: str):
     guard = getattr(type(obj), "guard_read", None)
     if callable(guard):
         guard(obj, seg)
+    allowed = getattr(obj, "_allowed_fields", None)
+    if allowed is not None and seg not in allowed:
+        return _MISSING
     attr = getattr(obj, seg, _MISSING)
     return attr
 
