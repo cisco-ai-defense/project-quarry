@@ -173,6 +173,33 @@ def _sampled_values(
     return sampled
 
 
+def _validated_sample(
+    conversation: Any,
+    read: frozenset[str],
+    adapter_keys: Iterable[str],
+    ordered: bool,
+    limits: SafetyLimits,
+    registry: InputRegistry,
+) -> dict[str, Any] | None:
+    """Return only JSON-safe rule inputs for best-effort hashing and exploration."""
+
+    try:
+        sampled = _sampled_values(conversation, read, adapter_keys, ordered, registry)
+    except Exception:
+        return None
+    if sampled is None:
+        return None
+    most = limits.max_total_size if limits.enforce_limits else None
+    for key, value in sampled.items():
+        try:
+            _validate_json_tree(value, key, limits.max_nesting_depth)
+        except ConversationValidationError:
+            return None
+        if most is not None and json_size(value, most) > most:
+            return None
+    return sampled
+
+
 def _sampled(
     conversation: Any,
     read: frozenset[str],
@@ -182,18 +209,8 @@ def _sampled(
     limits: SafetyLimits,
     registry: InputRegistry,
 ) -> bool:
-    sampled = _sampled_values(conversation, read, adapter_keys, ordered, registry)
-    if sampled is None:
-        return False
-    most = limits.max_total_size if limits.enforce_limits else None
-    for key, value in sampled.items():
-        if most is not None and json_size(value, most) > most:
-            return False
-        try:
-            _validate_json_tree(value, key, limits.max_nesting_depth)
-        except ConversationValidationError:
-            return False
-    return explores(conversation_sha256(sampled), rate)
+    sampled = _validated_sample(conversation, read, adapter_keys, ordered, limits, registry)
+    return sampled is not None and explores(conversation_sha256(sampled), rate)
 
 
 @dataclass(frozen=True, slots=True)
