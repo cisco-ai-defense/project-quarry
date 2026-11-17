@@ -131,6 +131,37 @@ def test_malformed_json_container_faults_only_its_declared_input():
     assert "Read" in result.evaluation_errors
 
 
+def test_chat_tool_arguments_keep_string_subclass_support_with_declared_inputs():
+    class Argument(str):
+        __hash__ = None
+
+        def __str__(self):
+            raise AssertionError("overridden string method must not run")
+
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=('rule "Chat" condition: called_tool("lookup")',),
+            inputs=INPUTS,
+        )
+    )
+    data = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": Argument("{}")},
+                    }
+                ],
+            }
+        ]
+    }
+    assert scanner.scan_data(data).rule_matches == ["Chat"]
+
+
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
     policy = compile_policy(RULE, runtime_config=config)
