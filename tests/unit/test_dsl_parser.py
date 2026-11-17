@@ -174,9 +174,7 @@ invalid rule syntax here
 
     def test_argument_name_terminal_has_a_syntax_label(self):
         parser = Lark(
-            'start: ARG_NAME "=" VALUE\n'
-            'ARG_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/\n'
-            'VALUE: "value"',
+            'start: ARG_NAME "=" VALUE\nARG_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/\nVALUE: "value"',
             parser="lalr",
         )
         validate_terminal_labels(parser)
