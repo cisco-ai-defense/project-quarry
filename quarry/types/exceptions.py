@@ -139,6 +139,7 @@ class IncompleteScanError(EvaluationError):
         issues = scan_result.completion_issues
         details: dict[str, Any] = {
             "completion_state": scan_result.completion_state,
+            "failures": [failure.to_dict() for failure in scan_result.failures],
             "error": scan_result.error,
             "partial_matches": list(scan_result.rule_matches),
             "timed_out_rules": list(scan_result.timed_out_rules or []),
@@ -212,6 +213,7 @@ class ConversationValidationError(ValidationError):
             error_details.update(
                 {
                     "completion_state": scan_result.completion_state,
+                    "failures": [failure.to_dict() for failure in scan_result.failures],
                     "validation_error": scan_result.validation_error,
                 }
             )

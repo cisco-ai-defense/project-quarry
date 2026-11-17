@@ -144,3 +144,34 @@ Each scan has a deadline, model-call budget, and scan-local cache. Adapters must
 ## Data egress
 
 A model operation can send selected messages, tools, and policy text to the configured endpoint. Review provider retention, logging, TLS, redirects, and credentials before enabling model rules. Keep conversation content and text parameters out of logs and errors.
+
+## Optional judge explanations
+
+A score alias can request a brief, user-facing explanation separately from private model reasoning:
+
+```yaml
+models:
+  judge:
+    adapter: litellm
+    model: your-provider/your-model
+    score:
+      message_builder: constitution
+      boundary_seed: 7
+      tokens:
+        negative: "0"
+        positive: "1"
+      explanation:
+        max_tokens: 256
+```
+
+`explanation.max_tokens` is an integer from 16 through 4096. It cannot be combined with `score.reasoning`. The built-in LiteLLM adapter asks for one `REASON: ...` line followed by a final `ANSWER: ...` line, reads only the public message content, and never reads provider reasoning fields. LF and CRLF separators are accepted. The answer must exactly match a configured verdict string, either directly or as a valid JSON string; malformed quoting is rejected unless it is itself the exact configured text. A JSON-decoded configured verdict takes precedence when its quoted spelling also equals another verdict's raw text. A valid answer without a reason is allowed and returns `reason=None`. Malformed reasons, invalid answers, refusals and truncated replies fail closed. Reasons are limited to 1024 characters and exclude control characters, Unicode formatting controls, surrogate code points and line/paragraph separators. Reply processing is bounded before splitting: the reply may use up to the reason limit plus the longest configured verdict spelling (including JSON escapes) and 64 formatting characters. System One does not support explanation generation.
+
+The existing `model("judge").score(...)` rule expression and numeric Python score methods continue to return numbers. With explain enabled, score evidence includes a bounded `judge_reasons` list, each carrying a call ordinal, configured model alias, text and `untrusted: true`. At most eight reasons per model atom are retained; `omitted_judge_reasons` reports additional reasons. Evidence applies the existing redaction and excerpt limits. Split score reasons use call ordinals in chunk order, after the split call. CLI explanation output renders reasons as literal text and shows a dimmed omission count after the retained reasons when additional reasons were omitted. The plugin's explain evidence uses the same JSON representation. Reasons are excluded from decision-path score entries and telemetry.
+
+Generated explanations are untrusted answer text. They may be inaccurate, include instructions or repeat sensitive conversation content. They are not proofs of the decision, should not be executed or inserted into trusted instructions, and need application-specific access and display controls. Generic evidence redaction is not a guarantee that every secret is removed. Ordinary scans without explain do not expose explanations in their results. Enabling explanation generation changes the model request and its cache and policy identity; it may change the model's answer compared with a separately generated token-only request.
+
+When probability extraction is configured, explanation-mode probabilities are used only when the provider's token metadata reconstructs the reply and identifies the final answer token. Partial, misaligned, oversized or invalid probability metadata falls back to the validated emitted verdict; text in the reason cannot supply decision probabilities. Quoted, escaped or compound configured labels also use the emitted verdict because one token's alternatives cannot establish odds for those whole labels.
+
+For the same validated provider response, calibration and numeric comparisons depend only on the score. Requesting explain evidence does not make another inference request. Custom score adapters may return a `JudgeResult(score, reason)` or keep returning a float, which yields no reason. Quarry validates the structured result and retains its reason only when the alias explicitly enables explanations. A custom backend's overridden numeric score method remains authoritative in explain mode.
+
+Verification includes property tests for bounded, finite result scores and JSON round trips, plus an exhaustive finite score/threshold/operator matrix comparing explained and ordinary scans. These checks establish the stated invariants over their tested domains; they are not a formal proof over arbitrary programs or provider behavior.
