@@ -207,6 +207,15 @@ class _Tables:
         authored node it copies."""
         aliases = self._f._node_aliases
 
+        def binds_in_chain(current):
+            while isinstance(current, BinaryOp) and current.operator == "and":
+                charge(1)
+                if isinstance(current.right, Assignment) and current.right.variable == var:
+                    return True
+                current = current.left
+            charge(1)
+            return isinstance(current, Assignment) and current.variable == var
+
         def substitute(current):
             if isinstance(current, Identifier) and current.name == var:
                 return expr
@@ -220,8 +229,17 @@ class _Tables:
                 # reads caller aliases. Ordinary comprehensions bind their one variable.
                 and (current.variable == var or current.variable.startswith(COMPOSED_CHECK))
             )
+            shadows_right = (
+                isinstance(current, BinaryOp)
+                and current.operator == "and"
+                and binds_in_chain(current.left)
+            )
             for field_name in condition_child_fields(current):
                 if rebinds and field_name != "collection":
+                    continue
+                # The initializer can read the outer alias; later uses in this
+                # nested chain belong to its own declaration.
+                if shadows_right and field_name == "right":
                     continue
                 value = getattr(current, field_name)
                 if isinstance(value, ConditionNode):

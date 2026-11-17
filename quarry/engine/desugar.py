@@ -53,7 +53,6 @@ from quarry.types.dsl import (
     StringPosition,
     StringSetQuantifier,
     UnaryOp,
-    walk_condition_nodes,
 )
 from quarry.types.dsl.operators.flow import FlowOp
 from quarry.types.dsl.traversal import condition_child_fields, iter_condition_children
@@ -295,9 +294,11 @@ class Desugarer:
         while pending:
             current = pending.pop()
             if isinstance(current, BinaryOp) and current.operator == "and":
-                pending.extend((current.right, current.left))
+                parts.append(current.right)
+                pending.append(current.left)
             else:
                 parts.append(current)
+        parts.reverse()
         if not any(self._t.scalar_alias(part) is not None for part in parts):
             return None
         _check_alias_expansion(parts)
@@ -311,11 +312,7 @@ class Desugarer:
                 continue
             var, expr = alias
             del parts[index]
-            if any(
-                isinstance(child, Assignment) and child.variable == var
-                for part in parts
-                for child in walk_condition_nodes(_without_check_bodies(part))
-            ):
+            if any(isinstance(part, Assignment) and part.variable == var for part in parts):
                 raise UnsupportedConstruct(
                     f"`as {var}` names two values in one `and`; give each its own name"
                 )

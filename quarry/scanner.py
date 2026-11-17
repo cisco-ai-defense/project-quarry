@@ -528,6 +528,12 @@ class DSLScanner:
         self._link_candidate_functions(rules, active_sources)
         resource_requirements = self._prepare_candidate_resources(rules, resource_manager)
         compiled_rules = self._compile_candidate_rules(rules)
+        for name, artifact in tuple(compiled_rules.items()):
+            declared = ResourceManager(self.config).analyze_rules({name: rules[name]})
+            compiled_rules[name] = replace(
+                artifact,
+                declared_resources={key: frozenset(values) for key, values in declared.items()},
+            )
         compiled_rules = {
             name: label_called_rule_artifact(artifact, rules[name])
             for name, artifact in compiled_rules.items()
@@ -1552,6 +1558,16 @@ class DSLScanner:
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
                 _total_size_preflight=total_size_preflight,
+            )
+        except QuarryTimeoutError as exc:
+            if self.limits.fail_on_timeout:
+                raise
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=f"Input preparation timed out: {exc}",
+                error_category=ScanFailureCategory.TIMEOUT,
             )
         except ConversationValidationError as exc:
             message = str(exc)

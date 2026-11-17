@@ -39,7 +39,15 @@ expression.
 
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
-A value alias such as `(user_messages as messages)` applies to subsequent clauses in its `and` chain. Earlier clauses keep their original meaning, and a later alias cannot change the value named by an earlier alias. Called rules keep their own alias scope. Compiler 24 enforces these rules on the guarded runtime; saved compiler-23 policies require recompilation from rule source.
+A value alias such as `(user_messages as messages)` applies to subsequent clauses in its
+`and` chain. A nested parenthesized chain keeps its own declarations, which can shadow
+outer names inside that chain. Earlier clauses and earlier alias values keep their
+original meaning; an inner initializer can read an outer alias without capturing its
+later local uses. Called rules keep their own alias scope. Compiler 25 records these
+rules; saved compiler-24 policies require recompilation from rule source. Compiled-policy
+format 10 also retains declared resource requirements when constant folding removes an
+expression. Reload validates the same model configuration and capabilities as source
+compilation, without dispatching a model for an expression skipped at runtime.
 
 Every clause is validated when a rule loads, including clauses after `false`. Runtime
 short-circuiting still skips model inputs and calls that cannot affect the verdict.
