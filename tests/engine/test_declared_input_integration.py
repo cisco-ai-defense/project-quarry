@@ -175,6 +175,61 @@ def test_chat_tool_arguments_keep_string_subclass_support_with_declared_inputs()
     assert scanner.scan_data(data).rule_matches == ["Chat"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("role",),
+        ("tool_calls", 0, "id"),
+        ("tool_calls", 0, "function", "name"),
+    ],
+)
+def test_chat_identifiers_cannot_stop_independent_inputs(path):
+    class Hostile(str):
+        def __hash__(self):
+            raise AssertionError("string hash hook ran")
+
+        def __eq__(self, other):
+            raise AssertionError("string equality hook ran")
+
+        def __len__(self):
+            raise AssertionError("string length hook ran")
+
+        def __str__(self):
+            raise AssertionError("string conversion hook ran")
+
+    data = {
+        **DATA,
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    }
+    target = data["messages"][0]
+    for step in path[:-1]:
+        target = target[step]
+    target[path[-1]] = Hostile(target[path[-1]])
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            inputs=INPUTS,
+            safety_limits=SafetyLimits(enforce_limits=False),
+            quarry_rule_texts=(RULE, 'rule "Chat" condition: called_tool("lookup")'),
+        )
+    )
+    result = scanner.scan_data(data)
+    assert result.error is None
+    assert "Read" in result.rule_matches
+    assert result.evaluation_errors
+
+
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
     policy = compile_policy(RULE, runtime_config=config)
