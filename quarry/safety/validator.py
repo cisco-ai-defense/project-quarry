@@ -361,13 +361,13 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
         if exiting:
             active_containers.remove(id(current))
             continue
-        if current is None or isinstance(current, str | bool | int):
+        if current is None or type(current) in (str, bool, int):
             continue
-        if isinstance(current, float):
+        if type(current) is float:
             if isfinite(current):
                 continue
             raise ConversationValidationError(f"{path} contains a non-finite number")
-        if isinstance(current, list):
+        if type(current) is list:
             current_id = id(current)
             if current_id in active_containers:
                 raise ConversationValidationError(f"{path} contains a cyclic reference")
@@ -379,8 +379,8 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
             stack.append((current, depth, True))
             stack.extend((child, depth + 1, False) for child in current)
             continue
-        if isinstance(current, dict):
-            if not all(isinstance(key, str) for key in current):
+        if type(current) is dict:
+            if not all(type(key) is str for key in current):
                 raise ConversationValidationError(f"{path} contains a non-string object key")
             current_id = id(current)
             if current_id in active_containers:

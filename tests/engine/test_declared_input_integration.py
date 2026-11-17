@@ -112,6 +112,25 @@ async def test_plugin_digest_ignores_unread_declared_input():
     assert bad_keys["decision_path"]["conversation_sha256"] is None
 
 
+def test_malformed_json_container_faults_only_its_declared_input():
+    class HostileList(list):
+        def __iter__(self):
+            raise AssertionError("untrusted iterator must not run")
+
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(RULE, 'rule "Chat" condition: user_said("go")'),
+            inputs=INPUTS,
+        )
+    )
+    result = scanner.scan_data(
+        {"messages": [{"role": "user", "content": "go"}], "memory": {"writes": HostileList()}}
+    )
+    assert result.rule_matches == ["Chat"]
+    assert "Read" in result.evaluation_errors
+
+
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
     policy = compile_policy(RULE, runtime_config=config)
