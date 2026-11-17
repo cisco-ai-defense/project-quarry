@@ -184,7 +184,15 @@ def match_contains(
     Empty text or an empty pattern is a non-match, a fullword/regex/base64 pattern
     goes through the regex path, else a substring search (case-folded if ``nocase``).
     """
-    return find_position(text, pattern, mods, regex=regex) is not None
+    if not text or not pattern:
+        return False
+    effective, use_regex = apply_modifiers(pattern, mods)
+    if use_regex:
+        return regex.search_match(effective, text, _regex_flags(mods)) is not None
+    # A boolean check needs no offsets, so skip mapping them back to ``text``.
+    if mods.nocase:
+        return effective.lower() in text.lower()
+    return effective in text
 
 
 def match_contains_any(
@@ -210,20 +218,51 @@ def match_regex(
     )
 
 
+def _literal_span(text: str, literal: str, nocase: bool) -> tuple[int, int] | None:
+    """Span of the first occurrence of ``literal`` in ``text``, as indices into ``text``.
+
+    ``nocase`` searches ``text.lower()`` for ``literal.lower()``. Lower-casing can turn one
+    character into several (``"İ".lower()`` is two code points), so an index into the
+    lowered text is mapped back to the original character that produced it.
+    """
+    if not nocase:
+        pos = text.find(literal)
+        return (pos, pos + len(literal)) if pos != -1 else None
+    lowered = text.lower()
+    needle = literal.lower()
+    pos = lowered.find(needle)
+    if pos == -1:
+        return None
+    end = pos + len(needle)
+    if len(lowered) == len(text):
+        return pos, end
+    # Walk ``text`` while tracking where each character's lowered form starts in
+    # ``lowered``, and stop as soon as the match end is mapped, so nothing past
+    # the match is visited or stored.
+    start = 0
+    offset = 0
+    for index, char in enumerate(text):
+        if offset >= end:
+            return start, index
+        width = len(char.lower())
+        if offset <= pos < offset + width:
+            start = index
+        offset += width
+    return start, len(text)
+
+
 def find_position(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> int | None:
-    """First match position, or ``None``."""
+    """First match position (an index into ``text``), or ``None``."""
     if not text or not pattern:
         return None
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))
         return m.start() if m else None
-    search_text = text.lower() if mods.nocase else text
-    search_pat = effective.lower() if mods.nocase else effective
-    pos = search_text.find(search_pat)
-    return pos if pos != -1 else None
+    span = _literal_span(text, effective, mods.nocase)
+    return span[0] if span else None
 
 
 def count_occurrences(
@@ -265,12 +304,8 @@ def extract_match(
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))
         return m.group(0) if m else None
-    search_text = text.lower() if mods.nocase else text
-    search_pat = effective.lower() if mods.nocase else effective
-    pos = search_text.find(search_pat)
-    if pos == -1:
-        return None
-    return text[pos : pos + len(effective)]
+    span = _literal_span(text, effective, mods.nocase)
+    return text[span[0] : span[1]] if span else None
 
 
 _CMP = {
