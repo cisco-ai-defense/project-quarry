@@ -174,7 +174,7 @@ def test_total_size_counts_shared_python_objects_once_but_distinct_copies_separa
     assert "max_total_size" in copies_result.validation_error
 
 
-def test_malformed_tool_arguments_invalidate_the_whole_scan() -> None:
+def test_argument_failures_only_invalidate_the_rule_reading_the_bad_value() -> None:
     scanner = _scanner(
         'rule "Names"\ncondition: called_tool("nonobject") and called_tool("nonfinite") and called_tool("good")',
         'rule "Nonobject"\ncondition: any c in get_tool_calls("nonobject") where c.arguments.value == 1',
@@ -193,8 +193,10 @@ def test_malformed_tool_arguments_invalidate_the_whole_scan() -> None:
 
     result = scanner.scan_data({"messages": [{"role": "assistant", "tool_calls": calls}]})
 
-    assert (result.rule_matches, result.completion_state) == ([], "invalid")
-    assert "tool_calls[0].function.arguments" in result.validation_error
+    assert (result.rule_matches, result.completion_state) == (["Names", "Good"], "incomplete")
+    assert result.validation_error is None
+    assert set(result.evaluation_errors) == {"Nonfinite"}
+    assert "tool_calls[1].function.arguments" in result.evaluation_errors["Nonfinite"]
 
 
 def test_a_flow_rejected_over_the_timeline_limit_matches_once_the_limit_allows_it() -> None:
@@ -297,7 +299,9 @@ def test_a_known_rule_subset_still_evaluates_normally() -> None:
         ),
     ],
 )
-def test_invalid_tool_arguments_reject_even_a_name_only_rule(arguments: str, reason: str) -> None:
+def test_argument_decode_failures_do_not_affect_name_only_rules(
+    arguments: str, reason: str
+) -> None:
     conversation = {
         "messages": [
             {
@@ -314,8 +318,15 @@ def test_invalid_tool_arguments_reject_even_a_name_only_rule(arguments: str, rea
     }
     result = _scanner('rule "Name"\ncondition: called_tool("lookup")\n').scan_data(conversation)
 
-    assert (result.rule_matches, result.completion_state) == ([], "invalid")
-    assert reason in result.validation_error
+    assert (result.rule_matches, result.completion_state) == (["Name"], "complete")
+    reader = _scanner(
+        'rule "Read" condition: any c in tool_calls where c.arguments.value == 1'
+    ).scan_data(conversation)
+    if reason in {"malformed JSON", "must decode to a JSON object"}:
+        assert reader.is_complete and reader.rule_matches == []
+    else:
+        assert reader.completion_state == "incomplete"
+        assert reason in reader.evaluation_errors["Read"]
 
 
 def test_argument_size_limit_runs_before_json_validation() -> None:
@@ -401,9 +412,13 @@ def test_tool_integer_digit_limit_is_explicit_not_malformed(
             _ = call.arguments
         assert f"active limit is {limit}" in str(error.value)
         result = scanner.scan_data(conversation)
-        assert (result.rule_matches, result.completion_state) == ([], "invalid")
-        assert f"active limit is {limit}" in result.validation_error
-        assert "malformed JSON" not in result.validation_error
+        assert (result.rule_matches, result.completion_state) == (["Name"], "complete")
+        reader = _scanner(
+            'rule "Read" condition: any c in tool_calls where c.arguments.value != null'
+        ).scan_data(conversation)
+        assert reader.completion_state == "incomplete"
+        assert f"active limit is {limit}" in reader.evaluation_errors["Read"]
+        assert "malformed JSON" not in reader.evaluation_errors["Read"]
     else:
         assert call.arguments["value"] == int(integer_text)
         result = scanner.scan_data(conversation)
@@ -445,8 +460,8 @@ def test_identical_tool_arguments_are_validated_once_per_scan(monkeypatch) -> No
 
     assert (first.rule_matches, first.completion_state) == (["Name"], "complete")
     assert (second.rule_matches, second.completion_state) == (["Name"], "complete")
-    # Each scan decodes once for preflight, then lazily for the rule read.
-    assert calls == [arguments] * 4
+    # The deciding call is decoded once in each scan; names and preparation decode none.
+    assert calls == [arguments] * 2
 
 
 def test_argument_preflight_does_not_retain_decoded_trees(monkeypatch) -> None:
@@ -484,11 +499,10 @@ def test_argument_preflight_does_not_retain_decoded_trees(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("fail_on_timeout", [False, True])
-def test_distinct_argument_preflight_stops_at_the_inspection_deadline(
+def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     monkeypatch, fail_on_timeout: bool
 ) -> None:
-    # A name-only rule still validates every argument. Distinct values defeat
-    # the per-scan cache, so deadline checks must bound this eager pass.
+    # A rule requiring every decoded value must respect the shared inspection deadline.
     arguments = [f'{{"nonce": {index}}}' for index in range(100)]
     conversation = {
         "messages": [
@@ -516,7 +530,7 @@ def test_distinct_argument_preflight_stops_at_the_inspection_deadline(
 
     monkeypatch.setattr(canonical_messages.json, "loads", slow_decode)
     scanner = _scanner(
-        'rule "Name"\ncondition: called_tool("lookup")\n',
+        'rule "Read"\ncondition: all c in tool_calls where c.arguments.nonce != null\n',
         limits=SafetyLimits(fail_on_timeout=fail_on_timeout),
     )
 
@@ -528,13 +542,13 @@ def test_distinct_argument_preflight_stops_at_the_inspection_deadline(
     assert 0 < len(decoded) < len(arguments)
     if not fail_on_timeout:
         assert (result.rule_matches, result.completion_state) == ([], "incomplete")
-        assert "Tool argument validation timed out: Scan deadline exceeded" in result.error
+        assert result.validation_error is None
         with pytest.raises(IncompleteScanError):
             result.raise_for_status()
 
 
 def test_invalid_argument_keeps_its_call_location_across_scans() -> None:
-    scanner = _scanner('rule "Name"\ncondition: called_tool("lookup")\n')
+    scanner = _scanner('rule "Read"\ncondition: any c in tool_calls where c.arguments.value == 1\n')
     for bad_index in (1, 2):
         conversation = {
             "messages": [
@@ -546,7 +560,7 @@ def test_invalid_argument_keeps_its_call_location_across_scans() -> None:
                             "type": "function",
                             "function": {
                                 "name": "lookup",
-                                "arguments": "{not json" if index == bad_index else "{}",
+                                "arguments": '{"value": NaN}' if index == bad_index else "{}",
                             },
                         }
                         for index in range(3)
@@ -557,9 +571,9 @@ def test_invalid_argument_keeps_its_call_location_across_scans() -> None:
 
         result = scanner.scan_data(conversation)
 
-        assert result.completion_state == "invalid"
-        assert result.validation_error is not None
-        assert f"tool_calls[{bad_index}].function.arguments" in result.validation_error
+        assert result.completion_state == "incomplete"
+        assert result.validation_error is None
+        assert f"tool_calls[{bad_index}].function.arguments" in result.evaluation_errors["Read"]
 
 
 def test_argument_cache_does_not_require_hashable_string_subclasses() -> None:

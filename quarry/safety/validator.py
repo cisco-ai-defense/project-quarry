@@ -57,7 +57,7 @@ from quarry.types.dsl import (
 )
 from quarry.types.dsl.string_ops import StringModifiers
 from quarry.types.exceptions import ConversationValidationError, EvaluationError
-from quarry.types.messages import Messages
+from quarry.types.messages import Messages, load_tool_arguments
 from quarry.types.rules import DSLRule
 from quarry.types.text_resources import TEXT_REF_FUNCTION
 
@@ -463,11 +463,10 @@ def _validate_message_content(
 
 
 def validate_conversation_arguments(messages: Messages) -> None:
-    """Validate every canonical tool call after the scanner's raw-size preflight.
+    """Explicitly validate every canonical call using the strict object contract.
 
-    Touching ``ToolCall.arguments`` uses the same decoder as rule evaluation.
-    Remember raw strings to skip repeated validation, then discard decoded
-    trees so a large name-only scan does not retain them until rule evaluation.
+    The scanner leaves named arguments lazy. Direct callers can opt into this eager
+    check, which shares the numeric/depth decoder and drops temporary decoded values.
     """
 
     validated: set[str] = set()
@@ -486,8 +485,22 @@ def validate_conversation_arguments(messages: Messages) -> None:
                 raise_if_evaluation_expired()
                 continue
             try:
-                decoded = call.arguments
+                decoded = load_tool_arguments(
+                    arguments,
+                    messages.max_nesting_depth,
+                    f"messages[{call.message_index}].tool_calls[{call_index}].function.arguments",
+                )
+                if not isinstance(decoded, dict):
+                    raise ConversationValidationError(
+                        f"Assistant message at index {call.message_index} has non-object JSON in "
+                        f"tool_calls[{call_index}].function.arguments; expected a JSON object"
+                    )
                 del decoded
+            except ValueError as exc:
+                raise ConversationValidationError(
+                    f"Assistant message at index {call.message_index} has malformed JSON in "
+                    f"tool_calls[{call_index}].function.arguments"
+                ) from exc
             except EvaluationError as exc:
                 raise_if_evaluation_expired()
                 raise ConversationValidationError(
@@ -512,8 +525,9 @@ def validate_conversation(
 
     ``parse_arguments=False`` is used by the scanner before safety-limit
     preflight. It validates the argument field's wire type without parsing a
-    potentially oversized blob; the scanner validates every argument object
-    after limits have been applied. ``max_nesting_depth`` bounds the JSON
+    potentially oversized blob; named arguments are decoded only when a rule reads
+    them. The explicit ``parse_arguments=True`` validator remains strict.
+    ``max_nesting_depth`` bounds the JSON
     nesting of message content (and, when ``parse_arguments`` is set, tool-call
     arguments) — the same limit the lazy ``ToolCall.arguments`` decoder enforces.
     """

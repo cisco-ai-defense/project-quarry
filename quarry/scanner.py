@@ -84,7 +84,6 @@ from quarry.safety.validator import (
     RuleValidator,
     Severity,
     validate_conversation,
-    validate_conversation_arguments,
 )
 from quarry.types.context import ScanContext
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
@@ -1122,30 +1121,8 @@ class DSLScanner:
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
-        # Size limits run before decoding argument JSON. Validate every call before
-        # evaluating any rule, including rules that only inspect tool names, so bad
-        # arguments cannot contribute to an authoritative verdict.
-        try:
-            validate_conversation_arguments(context.conversation.messages)
-        except QuarryTimeoutError as e:
-            if self.limits.fail_on_timeout:
-                raise
-            return ScanResult(
-                file_path=file_path,
-                rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
-                error=f"Tool argument validation timed out: {e}",
-                error_category=ScanFailureCategory.TIMEOUT,
-            )
-        except ConversationValidationError as e:
-            message = str(e)
-            return ScanResult(
-                file_path=file_path,
-                rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
-                error=f"Conversation validation error: {message}",
-                validation_error=message,
-            )
+        # Argument JSON is decoded by a rule that reads named arguments. Raw wire types
+        # and request-size limits have already been checked above.
 
         # No post-construction limit handling. ``ScanContext`` raises on any breach and the
         # handler above turns that into an INVALID result naming the limit, so there is no

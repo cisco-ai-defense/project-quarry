@@ -39,7 +39,7 @@ from quarry.language.metadata import (
     dsl_function,
     dsl_surface,
 )
-from quarry.types.exceptions import ConversationValidationError, EvaluationError
+from quarry.types.exceptions import ConversationValidationError, EvaluationError, InvalidInputError
 from quarry.types.results import Span
 from quarry.types.transforms import (
     ContentSourcePart,
@@ -213,7 +213,11 @@ def _validate_depth(value: Any, max_depth: int) -> None:
     """Reject a decoded JSON container whose nesting exceeds ``max_depth``."""
 
     stack: list[tuple[Any, int]] = [(value, 1)]
+    visits = 0
     while stack:
+        visits += 1
+        if visits % 256 == 0:
+            _raise_if_combine_expired()
         current, depth = stack.pop()
         if isinstance(current, Mapping):
             if depth > max_depth:
@@ -223,6 +227,54 @@ def _validate_depth(value: Any, max_depth: int) -> None:
             if depth > max_depth:
                 raise EvaluationError(f"Tool arguments exceed max_nesting_depth {max_depth}")
             stack.extend((child, depth + 1) for child in current)
+
+
+def load_tool_arguments(raw: str, max_depth: int, owner: str) -> Any:
+    """Decode JSON with finite numbers, exact integers and a bounded container depth.
+
+    JSON syntax errors remain JSONDecodeError so callers can treat freeform argument
+    text as having no named fields. Resource/numeric failures are rule-local input errors.
+    """
+
+    def invalid(reason: str) -> InvalidInputError:
+        return InvalidInputError(f"{owner}: {reason}", {"field": owner})
+
+    def number(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise invalid("arguments contain a non-finite number")
+        return value
+
+    def constant(_text: str) -> None:
+        raise invalid("arguments contain a non-finite number")
+
+    _raise_if_combine_expired()
+    try:
+        value = json.loads(
+            raw, parse_int=_parse_tool_integer, parse_float=number, parse_constant=constant
+        )
+    except _ToolIntegerLimitError as exc:
+        raise invalid(f"arguments exceed the JSON integer digit limit: {exc}") from None
+    except RecursionError:
+        raise invalid(f"arguments exceed max_nesting_depth {max_depth}") from None
+    _raise_if_combine_expired()
+    try:
+        _validate_depth(value, max_depth)
+    except EvaluationError as exc:
+        raise invalid(str(exc)) from None
+    _raise_if_combine_expired()
+    return value
+
+
+def decode_tool_arguments(raw: str, max_depth: int, owner: str) -> _FrozenDict:
+    """Return named JSON arguments; freeform text and other JSON shapes name none."""
+
+    try:
+        value = load_tool_arguments(raw, max_depth, owner)
+    except json.JSONDecodeError:
+        _raise_if_combine_expired()
+        value = {}
+    return _freeze_json(value if isinstance(value, dict) else {})
 
 
 class OpenAIObject(BaseModel):
@@ -713,6 +765,8 @@ class ToolCall(OpenAIObject):
     function: ToolCallFunction
 
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
+    _arguments_error: str | None = PrivateAttr(default=None)
+    _call_index: int = PrivateAttr(default=-1)
 
     def _readable_for_rewrite(self) -> bool:
         """Whether a containing message may be handed to a whole-message adapter."""
@@ -741,30 +795,19 @@ class ToolCall(OpenAIObject):
 
         JSON integers retain exact Python ``int`` values up to the interpreter's
         active decimal-digit limit; larger integers report that limit explicitly.
+        Freeform text and non-object JSON have no named arguments. Numeric and depth
+        limit failures affect the rule reading this property.
         """
 
+        owner = f"messages[{self.message_index}].tool_calls[{self._call_index}].function.arguments"
+        if self._arguments_error is not None:
+            raise InvalidInputError(self._arguments_error, {"field": owner})
         if self._arguments_cache is None:
             try:
-                parsed = json.loads(self.raw_arguments, parse_int=_parse_tool_integer)
-            except _ToolIntegerLimitError as exc:
-                raise EvaluationError(
-                    f"Tool call '{self.id}' arguments exceed the JSON integer digit limit: {exc}"
-                ) from exc
-            except (json.JSONDecodeError, ValueError, RecursionError) as exc:
-                raise EvaluationError(
-                    f"Tool call '{self.id}' has malformed JSON arguments: {exc}"
-                ) from exc
-            if not isinstance(parsed, dict):
-                raise EvaluationError(
-                    f"Tool call '{self.id}' arguments must decode to a JSON object"
-                )
-            _validate_depth(parsed, self._max_nesting_depth)
-            try:
-                frozen = _freeze_json(parsed)
-            except ValueError as exc:
-                raise EvaluationError(
-                    f"Tool call '{self.id}' arguments contain invalid JSON data: {exc}"
-                ) from exc
+                frozen = decode_tool_arguments(self.raw_arguments, self._max_nesting_depth, owner)
+            except InvalidInputError as exc:
+                object.__setattr__(self, "_arguments_error", exc.message)
+                raise
             object.__setattr__(self, "_arguments_cache", frozen)
         return _project_json(self._arguments_cache)
 
@@ -772,6 +815,7 @@ class ToolCall(OpenAIObject):
         """Drop a tree decoded only for input preflight; rule reads stay lazy."""
 
         object.__setattr__(self, "_arguments_cache", None)
+        object.__setattr__(self, "_arguments_error", None)
 
     @property
     def message_index(self) -> int:
@@ -1512,8 +1556,9 @@ class Messages(Sequence[MessageType]):
         response_by_id: dict[str, ToolMessage] = {}
         for message in root._items:
             if isinstance(message, AssistantMessage):
-                for call in message.tool_calls:
+                for call_index, call in enumerate(message.tool_calls):
                     object.__setattr__(call, "_message_index", message.message_index)
+                    object.__setattr__(call, "_call_index", call_index)
                     object.__setattr__(call, "_max_nesting_depth", max_nesting_depth)
                     call_by_id[call.id] = call
             elif isinstance(message, ToolMessage):

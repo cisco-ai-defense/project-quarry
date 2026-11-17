@@ -462,19 +462,20 @@ _TWO_CALLS = {
 
 
 @pytest.mark.parametrize(
-    "condition",
+    ("condition", "matched"),
     [
-        'called_tool("lookup") and called_tool("search")',
-        'any call in get_tool_calls("lookup") where call.arguments.q contains "x"',
-        'any call in get_tool_calls("search") where call.arguments.q contains "hi"',
+        ('called_tool("lookup") and called_tool("search")', True),
+        ('any call in get_tool_calls("lookup") where call.arguments.q contains "x"', False),
+        ('any call in get_tool_calls("search") where call.arguments.q contains "hi"', True),
     ],
-    ids=["names-only", "reads-malformed", "reads-sibling"],
+    ids=["names-only", "reads-freeform", "reads-sibling"],
 )
-def test_malformed_tool_arguments_invalidate_every_rule_path(condition: str) -> None:
+def test_freeform_tool_arguments_do_not_invalidate_other_reads(
+    condition: str, matched: bool
+) -> None:
     result = _scanner(f'rule "R"\ncondition: {condition}\n').scan_data(_TWO_CALLS)
-
-    assert (result.rule_matches, result.completion_state) == ([], "invalid")
-    assert "malformed JSON" in result.validation_error
+    assert (result.rule_matches, result.completion_state) == (["R"] if matched else [], "complete")
+    assert result.validation_error is None
 
 
 @pytest.mark.parametrize(
@@ -544,7 +545,7 @@ def test_a_tool_result_exposes_its_call_id_as_id(call_id, matched) -> None:
     assert (result.rule_matches, result.is_complete) == ((["R"] if matched else []), True)
 
 
-@pytest.mark.parametrize(("depth", "outcome"), [(2, ([], "invalid")), (10, (["R"], "complete"))])
+@pytest.mark.parametrize(("depth", "outcome"), [(2, ([], "incomplete")), (10, (["R"], "complete"))])
 def test_reading_tool_arguments_deeper_than_the_nesting_limit_fails_closed(depth, outcome) -> None:
     rule = 'rule "R"\ncondition: any call in tool_calls where call.arguments.a.b.c.d == 1\n'
     deep = {
