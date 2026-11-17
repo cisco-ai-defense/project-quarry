@@ -152,7 +152,7 @@ def _sampled_values(
     ordered: bool,
     registry: InputRegistry,
 ) -> dict[str, Any] | None:
-    if not isinstance(conversation, dict):
+    if type(conversation) is not dict:
         return None
     chat_read = bool(read & (surface_names() - {"tools"}))
     keys = (
@@ -168,8 +168,11 @@ def _sampled_values(
     for surface in sorted(read):
         namespace, _, name = surface.partition(".")
         holder = conversation.get(namespace)
-        if name and isinstance(holder, dict) and name in holder:
-            sampled[surface] = holder[name]
+        if name and namespace in conversation:
+            if type(holder) is not dict:
+                return None
+            if name in holder:
+                sampled[surface] = holder[name]
     return sampled
 
 

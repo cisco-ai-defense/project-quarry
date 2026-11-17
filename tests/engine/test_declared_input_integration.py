@@ -77,6 +77,25 @@ async def test_plugin_digest_ignores_unread_declared_input():
     assert invalid["completion_state"] == "incomplete"
     assert invalid["decision_path"]["conversation_sha256"] is None
 
+    class Hostile(dict):
+        def items(self):
+            raise AssertionError("overridden items must not run")
+
+        def __contains__(self, key):
+            raise AssertionError("overridden membership must not run")
+
+    bad_namespace = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": Hostile(DATA["memory"])},
+        explore_rate=1.0,
+    )
+    assert bad_namespace["completion_state"] == "incomplete"
+    assert bad_namespace["decision_path"]["conversation_sha256"] is None
+
+    bad_root = await plugin.scan(rule_text=RULE, conversation=Hostile(DATA), explore_rate=1.0)
+    assert bad_root["completion_state"] == "invalid"
+    assert bad_root["decision_path"]["conversation_sha256"] is None
+
 
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
@@ -101,19 +120,6 @@ def test_chat_size_limit_only_blocks_rules_that_read_chat():
     assert result.rule_matches == ["Read"]
     assert result.completion_state == "incomplete"
     assert "max_total_size" in result.evaluation_errors["Chat"]
-
-
-def test_declared_input_scan_rejects_container_overrides_without_calling_them():
-    class Hostile(dict):
-        def items(self):
-            raise AssertionError("overridden items must not run")
-
-        def __contains__(self, key):
-            raise AssertionError("overridden membership must not run")
-
-    scanner = DSLScanner(QuarryConfig(config_version=2, quarry_rule_texts=(RULE,), inputs=INPUTS))
-    assert "exact built-in" in scanner.scan_data(Hostile(DATA)).validation_error
-    assert scanner.scan_data({"memory": Hostile(DATA["memory"])}).completion_state == "incomplete"
 
 
 @pytest.mark.parametrize("declared", [False, True])
