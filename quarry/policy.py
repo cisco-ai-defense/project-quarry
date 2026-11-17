@@ -154,6 +154,8 @@ def _sampled_values(
 ) -> dict[str, Any] | None:
     if type(conversation) is not dict:
         return None
+    if any(type(key) is not str for key in dict.__iter__(conversation)):
+        return None
     chat_read = bool(read & (surface_names() - {"tools"}))
     keys = (
         *(("messages",) if chat_read else ()),
@@ -170,6 +172,8 @@ def _sampled_values(
         holder = conversation.get(namespace)
         if name and namespace in conversation:
             if type(holder) is not dict:
+                return None
+            if any(type(key) is not str for key in dict.__iter__(holder)):
                 return None
             if name in holder:
                 sampled[surface] = holder[name]
