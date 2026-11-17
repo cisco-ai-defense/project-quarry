@@ -20,11 +20,20 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MethodType
 from typing import Any, cast
 
-from quarry.engine.atoms import ModelExpression
+from quarry.cache.keys import input_key
+from quarry.cache.message_values import BindingIdentity
+from quarry.engine.atoms import (
+    MAX_CONSTRUCTED_MESSAGES,
+    MAX_CONSTRUCTED_TEXT_CHARACTERS,
+    MAX_MESSAGE_MAP_CHARACTERS,
+    MAX_MESSAGE_MAP_ITEMS,
+    ModelExpression,
+)
 from quarry.engine.matchers import (
     MISSING,
     PURE_REGEX,
@@ -40,13 +49,19 @@ from quarry.engine.matchers import (
 )
 from quarry.engine.pacing import Pacer
 from quarry.engine.witness import MAX_JUDGE_REASONS, ModelResultEvidence
+from quarry.integrations.adapter_message_transforms import apply_adapter_transform
 from quarry.integrations.content_transforms import (
     apply_content_transform,
     compiled_content_transform,
 )
 from quarry.safety.timer import raise_if_evaluation_expired
+from quarry.types.adapter_transforms import (
+    adapter_transform_reference,
+    adapter_transform_reference_parts,
+)
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
-from quarry.types.messages import Message, Messages
+from quarry.types.media import require_readable_media
+from quarry.types.messages import Message, Messages, _synthetic_key
 from quarry.types.text_resources import TextRef
 
 # The operator that keeps a comparison's meaning when its operands swap sides.
@@ -57,6 +72,8 @@ REFUSABLE_OPERATIONS = frozenset({"score", "complete"})
 
 # The binding that holds the field texts one map comprehension item has read.
 _ITEM_TEXTS = "\x00item_texts"
+_CONSTRUCTION_SCOPE = "\x00construction_scope"
+_BINDING_SCOPES = "\x00binding_scopes"
 
 
 @dataclass
@@ -114,6 +131,41 @@ class _BoundMessage:
 
     message: Message
     view: Messages
+
+
+def _message_value_key(expression: ModelExpression, bindings: dict[str, Any], event) -> tuple:
+    """Name a source expression and the live bindings it actually reads, within this rule.
+
+    The digest preserves scalar types (unlike Python's True == 1), while binding wrappers
+    compare by identity and keep their objects alive only as long as this rule's memo.
+    """
+
+    names = set()
+    pending = [(expression, frozenset())]
+    while pending:
+        node, local_names = pending.pop()
+        if node.kind == "binding" and node.value not in local_names:
+            names.add(str(node.value))
+        for index, child in enumerate(node.children):
+            child_names = local_names
+            if node.kind in {"map", "message_map", "message_select", "split_any"} and index:
+                child_names = local_names | {str(node.value)}
+            pending.append((child, child_names))
+    identities = []
+    for name in sorted(names):
+        value = bindings.get(name, event.source if event is not None else None)
+        if isinstance(value, _BoundMessage):
+            identities.append((name, BindingIdentity(value.message)))
+            identities.append((name, BindingIdentity(value.view)))
+        else:
+            identities.append((name, BindingIdentity(value)))
+    scopes = bindings.get(_BINDING_SCOPES, {})
+    value_scope = max((scopes.get(name, ()) for name in names), key=len, default=())
+    return (
+        input_key(expression.content_key()),
+        tuple(identities),
+        value_scope,
+    )
 
 
 async def _evaluate_owned_value(expression, context, *, event, bindings, trace, regex_backend):
@@ -221,7 +273,7 @@ async def evaluate_model_expression(
             return value is MISSING or value is None
         return value is not MISSING and value is not None and str(value) == expression.value
 
-    if kind == "transform":
+    if kind in {"transform", "local_transform", "model_transform"}:
         source = await evaluate_model_expression(
             expression.children[0],
             context,
@@ -234,7 +286,41 @@ async def evaluate_model_expression(
             raise TypeError("content transform source must be Messages")
         if not isinstance(expression.value, str):
             raise TypeError("compiled content transform identity must be a string")
-        return await apply_content_transform(source, compiled_content_transform(expression.value))
+        if kind == "transform":
+            return await apply_content_transform(
+                source, compiled_content_transform(expression.value)
+            )
+        name, alias = adapter_transform_reference_parts(expression.value, kind == "model_transform")
+        backend = context.resource_manager.inference_backend
+        if backend is None:
+            raise RuntimeError("transform backend is not initialized")
+        definition = backend.config.transforms.get(name)
+        if adapter_transform_reference(name, definition) != expression.value:
+            raise ValueError("transform configuration differs from its compiled reference")
+        part_count = 0
+
+        def record_part() -> None:
+            nonlocal part_count
+            part_count += 1
+
+        async def transform() -> Messages:
+            return await apply_adapter_transform(
+                source, backend, name, _on_part=record_part, _message_value=True
+            )
+
+        memo = getattr(context, "message_value_memo", None)
+        if kind == "local_transform" and memo is not None:
+            key = _message_value_key(expression, environment, event)
+            result = await memo.evaluate(key, transform, scope=key[-1])
+        else:
+            result = await transform()
+        if kind == "model_transform" and trace is not None and part_count:
+            # Evidence records logical reads, including cache hits, as other model calls do.
+            # Neither the source parts nor generated text leave this evaluation trace.
+            trace.calls.append(
+                (alias, "transform", (("transform", name), ("parts", part_count)), len(result))
+            )
+        return result
 
     if kind == "conditional":
         predicate = await evaluate_model_expression(
@@ -283,7 +369,7 @@ async def evaluate_model_expression(
         raise_if_evaluation_expired()
         return await Messages._combine_async(cast(list[Messages], parts))
 
-    if kind == "message_select":
+    if kind in {"message_select", "message_map"}:
         source = await evaluate_model_expression(
             expression.children[0],
             context,
@@ -292,34 +378,26 @@ async def evaluate_model_expression(
             trace=trace,
             regex_backend=regex_backend,
         )
-        if not isinstance(source, Messages):
-            raise TypeError("message selection source must be Messages")
-        limit = context.limits.max_comprehension_size
-        if context.limits.enforce_limits and len(source) > limit:
-            raise ValueError(
-                f"message selection source has {len(source)} items, exceeding "
-                f"max_comprehension_size={limit}"
+        projection_trace = ModelExpressionTrace()
+
+        async def project() -> Messages:
+            return await _evaluate_message_selection(
+                expression, source, context, event, environment, projection_trace, regex_backend
             )
-        variable = str(expression.value)
-        positions: list[int] = []
-        pacer = Pacer()
-        for position, item in enumerate(source):
-            raise_if_evaluation_expired()
-            if pacer.due():
-                await asyncio.sleep(0)
-            predicate = await evaluate_model_expression(
-                expression.children[1],
-                context,
-                event=event,
-                bindings={**environment, variable: _BoundMessage(item, source)},
-                trace=trace,
-                regex_backend=regex_backend,
+
+        memo = getattr(context, "message_value_memo", None)
+        if memo is None:
+            result = await project()
+        else:
+            key = _message_value_key(expression, environment, event)
+            result = await memo.evaluate(
+                key, project, reads=projection_trace.parameters, scope=key[-1]
             )
-            if predicate is not MISSING and not isinstance(predicate, bool):
-                raise TypeError("message selection predicate must be boolean")
-            if predicate is True:
-                positions.append(position)
-        return source._select_positions(positions)
+        if trace is not None:
+            for name, parameter in projection_trace.parameters:
+                if all(existing != name for existing, _ in trace.parameters):
+                    trace.parameters.append((name, parameter))
+        return result
 
     if kind == "field":
         base = await evaluate_model_expression(
@@ -433,14 +511,21 @@ async def evaluate_model_expression(
                 _record_pieces(trace, context, [(owner, content)], content_expression)
                 if isinstance(owner, Message) and content_expression.value == "content":
                     provenance = owner._content_provenance()
-                    if any(segment.sources for segment in provenance):
+                    if any(segment.sources or segment.parts for segment in provenance):
                         candidate = None if owner_view is None else owner_view._root._source_root
                         if candidate is None:
                             raise ValueError("copied content must retain its owning source")
                         if construction_source is not None and candidate is not construction_source:
                             raise ValueError("copied content must share one canonical source")
                         construction_source = candidate
-            specifications.append((str(role), content, (id(constructor), 0), provenance))
+            specifications.append(
+                (
+                    str(role),
+                    content,
+                    (id(constructor), *environment.get(_CONSTRUCTION_SCOPE, (0,))),
+                    provenance,
+                )
+            )
         raise_if_evaluation_expired()
         base = (
             Messages()
@@ -648,12 +733,119 @@ async def evaluate_model_expression(
     raise ValueError(f"unknown model expression operation {kind!r}")
 
 
-def _trace_operand(expression: ModelExpression, value: Any, context) -> Any:
-    """Project a comparison operand without exposing a text parameter."""
+async def _evaluate_message_selection(
+    expression, source, context, event, environment, trace, regex_backend
+):
+    """Compute one bounded map value with scoped callbacks and source ownership."""
 
-    if expression.kind != "parameter":
-        return value
-    return _parameter_trace_value(context, str(expression.value), value)
+    kind = expression.kind
+    if kind == "message_select" and not isinstance(source, Messages):
+        raise TypeError("message selection source must be Messages")
+    if source is MISSING or source is None:
+        return context.conversation.messages[:0]
+    if not isinstance(source, Sequence) or isinstance(source, str | bytes | bytearray):
+        raise TypeError("message map source must be a structured collection")
+    if kind == "message_map" and len(source) > MAX_MESSAGE_MAP_ITEMS:
+        raise ValueError(f"message map source exceeds {MAX_MESSAGE_MAP_ITEMS} items")
+    limit = context.limits.max_comprehension_size
+    if context.limits.enforce_limits and len(source) > limit:
+        raise ValueError(
+            f"message selection source has {len(source)} items, exceeding "
+            f"max_comprehension_size={limit}"
+        )
+    variable = str(expression.value)
+    positions: list[int] = []
+    parts: list[Messages] = []
+    output_count = output_characters = 0
+    constructed_keys: set[tuple[str, object]] = set()
+    constructed_characters = 0
+    pacer = Pacer()
+    for position, item in enumerate(source):
+        raise_if_evaluation_expired()
+        if pacer.due():
+            await asyncio.sleep(0)
+        item_environment = {
+            **environment,
+            variable: _BoundMessage(item, source) if isinstance(source, Messages) else item,
+        }
+        item_scope = (*environment.get(_CONSTRUCTION_SCOPE, ()), id(expression), position)
+        item_environment[_BINDING_SCOPES] = {
+            **environment.get(_BINDING_SCOPES, {}),
+            variable: item_scope,
+        }
+        item_environment[_CONSTRUCTION_SCOPE] = item_scope
+        memo = getattr(context, "message_value_memo", None)
+        try:
+            predicate = await evaluate_model_expression(
+                expression.children[1],
+                context,
+                event=event,
+                bindings=item_environment,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+            if predicate is not MISSING and not isinstance(predicate, bool):
+                raise TypeError("message selection predicate must be boolean")
+            if predicate is True:
+                if kind == "message_select":
+                    positions.append(position)
+                    continue
+                part = await evaluate_model_expression(
+                    expression.children[2],
+                    context,
+                    event=event,
+                    bindings=item_environment,
+                    trace=trace,
+                    regex_backend=regex_backend,
+                )
+                if not isinstance(part, Messages):
+                    raise TypeError("message map values must be Messages")
+                output_count += len(part)
+                if output_count > MAX_MESSAGE_MAP_ITEMS:
+                    raise ValueError(f"message map output exceeds {MAX_MESSAGE_MAP_ITEMS} items")
+                if context.limits.enforce_limits and output_count > limit:
+                    raise ValueError(f"message map output exceeds max_comprehension_size={limit}")
+                for selected in part:
+                    raise_if_evaluation_expired()
+                    if pacer.due():
+                        await asyncio.sleep(0)
+                    output_characters += len(selected.content)
+                    if output_characters > MAX_MESSAGE_MAP_CHARACTERS:
+                        raise ValueError(
+                            f"message map output exceeds {MAX_MESSAGE_MAP_CHARACTERS} characters"
+                        )
+                    key = _synthetic_key(selected)
+                    if key is not None and key not in constructed_keys:
+                        constructed_keys.add(key)
+                        constructed_characters += len(selected.content)
+                        if len(constructed_keys) > MAX_CONSTRUCTED_MESSAGES:
+                            raise ValueError(
+                                f"message map exceeds {MAX_CONSTRUCTED_MESSAGES} constructed messages"
+                            )
+                        if constructed_characters > MAX_CONSTRUCTED_TEXT_CHARACTERS:
+                            raise ValueError(
+                                "message map constructed text exceeds "
+                                f"{MAX_CONSTRUCTED_TEXT_CHARACTERS} characters"
+                            )
+                parts.append(part)
+        finally:
+            if memo is not None:
+                memo.release_scope(item_scope)
+    if kind == "message_select":
+        return source._select_positions(positions)
+    return await Messages._combine_async(parts, _mapped=True)
+
+
+def _trace_operand(expression: ModelExpression, value: Any, context) -> Any:
+    """Keep numeric operands and authored literals, omitting computed text from evidence."""
+
+    if type(value) is int and not -(2**63) <= value < 2**63:
+        return str(value)
+    if expression.kind == "parameter":
+        return _parameter_trace_value(context, str(expression.value), value)
+    if isinstance(value, str) and expression.kind not in {"literal", "integer"}:
+        return "«redacted»"
+    return value
 
 
 def _parameter_trace_value(context, name: str, value: Any) -> Any:
@@ -716,7 +908,7 @@ def _chunk_spans(
 
 
 def _contains_model_call(expression: ModelExpression) -> bool:
-    return expression.kind == "model_call" or any(
+    return expression.kind in {"model_call", "model_transform"} or any(
         _contains_model_call(child) for child in expression.children
     )
 
@@ -792,6 +984,12 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     backend = context.resource_manager.inference_backend
     if backend is None:
         raise RuntimeError("model inference backend is not initialized")
+
+    # Custom backends receive canonical selections too. Guard every selection, including
+    # split context, before handing control to host code.
+    for argument in arguments:
+        if isinstance(argument, Messages):
+            await require_readable_media(argument)
 
     if operation == "score":
         messages, constitution, *optional = arguments

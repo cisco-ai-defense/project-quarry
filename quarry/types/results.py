@@ -23,7 +23,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Generic, Protocol, TypeVar
 
-from quarry.types.transforms import ContentSourceRange
+from quarry.types.transforms import ContentSourcePart, ContentSourceRange
 
 
 class ResultValue(Protocol):
@@ -99,7 +99,8 @@ class Span:
     inside one message. A message without text has the single offset ``0``. ``score`` is set when
     a model scored the span. ``source_ranges`` lists exact original ranges for mapped characters;
     ``source_unmapped`` is true when any covered character was explicitly constructed and has no
-    source position.
+    source position. ``source_parts`` identifies original input parts for derived text such
+    as an image's extracted text without claiming character positions in encoded media.
     """
 
     message_index: int
@@ -109,6 +110,7 @@ class Span:
     end_message_index: int | None = None
     source_ranges: tuple[ContentSourceRange, ...] = ()
     source_unmapped: bool = False
+    source_parts: tuple[ContentSourcePart, ...] = ()
     _message: object | None = field(default=None, repr=False, compare=False)
     _view: object | None = field(default=None, repr=False, compare=False)
     _view_start: int | None = field(default=None, repr=False, compare=False)
@@ -146,6 +148,10 @@ class Span:
             raise TypeError("span source_ranges must be ContentSourceRange values")
         if type(self.source_unmapped) is not bool:
             raise TypeError("span source_unmapped must be a Boolean")
+        if not isinstance(self.source_parts, tuple) or any(
+            type(part) is not ContentSourcePart for part in self.source_parts
+        ):
+            raise TypeError("span source_parts must be ContentSourcePart values")
 
     @property
     def within_one_message(self) -> bool:
@@ -164,6 +170,8 @@ class Span:
             data["source_ranges"] = [source.to_dict() for source in self.source_ranges]
         if self.source_unmapped:
             data["source_unmapped"] = True
+        if self.source_parts:
+            data["source_parts"] = [part.to_dict() for part in self.source_parts]
         return data
 
     def _bind_to_message(self, message: object) -> Span:

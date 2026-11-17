@@ -15,7 +15,7 @@ a public function, surface, or grammar form.
 | `len(value: collection \| string) -> integer` | Return the size of a supported collection or the length of text. |
 | `llm_split_conversation(model: string, input: model_input, max_input_tokens: integer) -> collection<model_input>` | Split model input into chunks no larger than `max_input_tokens`. |
 | `message(role: string, content: string) -> model_input` | Build a one-message model input from a role and literal or field-backed content. |
-| `messages.transform(name: string) -> model_input` | Apply one reviewed configured transform to message text. |
+| `messages.transform(name: string) -> model_input` | Apply one configured transform to message content. |
 | `model(alias: string) -> model_reference` | Select a configured model by its literal alias for a following method call. |
 | `model.classify(messages: model_input, tools: collection<tool_definition> = null) -> number` | Return the configured classifier head's probability for these messages. |
 | `model.complete(messages: model_input, tools: collection<tool_definition> = null) -> message` | Generate one assistant message from the supplied messages. |
@@ -163,10 +163,13 @@ Examples: [examples/model-inference.rule](examples/model-inference.rule) (requir
 
 Rule syntax: `messages.transform("name")`
 
-Apply one reviewed configured transform to message text.
+Apply one configured transform to message content.
 
 The result keeps message roles, tool links, and source provenance. Transforms may be
 chained, filtered, sliced, composed, or passed directly to a model operation.
+Local adapters run without model-call charges; model-backed adapters use their
+configured alias's call budget. Media-derived text keeps part-only source context.
+A local whole-message adapter may instead rewrite fields while preserving text.
 
 - `name`: must be written directly in the rule
 
@@ -887,7 +890,7 @@ In `[msg for msg in user_messages if msg.content contains "sudo"]`, the result
 contains only user messages whose content contains `sudo`. Use the same item name
 before and after `for`.
 
-Grammar: `filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr "if" or_expr "]"`
+Grammar: `filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr ["if" or_expr] "]"`
 
 Examples: [examples/filter-count.rule](examples/filter-count.rule), [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend)
 
@@ -1002,14 +1005,19 @@ Examples: [examples/string-operations.rule](examples/string-operations.rule)
 
 ### map-comprehension
 
-Project each selected item for use as the first argument of `join()`.
+Project selected items into messages or text values in written order.
 
-The map is supported in `message()` content of a version 2 model input.
-Its value and optional filter cannot call a model.
+A message-valued map can be used as typed model input. A text-valued map is
+supported as the first argument of `join()` in `message()` content.
+The projection and optional filter cannot call a model. Message maps keep
+source provenance, flatten each projected message sequence in order, and
+apply `max_comprehension_size` to both source and output. Structural limits
+always cap each map at 10,000 source/output items and 2,000,000 output text
+characters; the existing constructed-message limits also apply.
 
 Grammar: `map_comp: "[" expr "for" IDENTIFIER "in" or_expr "]" | "[" expr "for" IDENTIFIER "in" or_expr "if" or_expr "]"`
 
-Examples: [examples/joined-tool-commands.rule](examples/joined-tool-commands.rule) (requires a configured backend)
+Examples: [examples/joined-tool-commands.rule](examples/joined-tool-commands.rule) (requires a configured backend), [examples/message-map.rule](examples/message-map.rule) (requires a configured backend)
 
 ### membership
 

@@ -26,6 +26,12 @@ from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.language.runtime import functions_in_resource_group, inference_functions
 from quarry.probers import CapabilityClassifier, TopicProber
+from quarry.types.adapter_transforms import (
+    LocalTransformConfig,
+    ModelTransformConfig,
+    adapter_transform_reference,
+    adapter_transform_reference_parts,
+)
 from quarry.types.dsl import FunctionCall, Literal, ModelCall, walk_condition_nodes
 from quarry.types.rules import DSLRule
 from quarry.types.text_resources import TEXT_REF_FUNCTION, TextRef
@@ -61,6 +67,7 @@ def _record_model_requirement(
         "split": ("llm_token_models",),
         "classify": ("model_classification_models",),
         "spans": ("model_classification_models", "model_span_models"),
+        "transform": (),
     }.get(operation)
     if not alias or operation_keys is None:
         raise ValueError(f"unsupported model operation {operation!r}")
@@ -100,6 +107,12 @@ def _expression_collector(requirements: dict[str, set[Any]]):
             alias, operation = value.split("\x1f", 1)
             _record_model_requirement(requirements, alias, operation)
             requirements["model_operations"].add((alias, operation))
+        elif expression.kind in {"local_transform", "model_transform"}:
+            is_model = expression.kind == "model_transform"
+            _name, alias = adapter_transform_reference_parts(expression.value, is_model)
+            requirements["transforms"].add((is_model, expression.value))
+            if is_model:
+                _record_model_requirement(requirements, alias, "transform")
         for child in expression.children:
             collect_expression(child)
 
@@ -120,6 +133,7 @@ def requirements_from_specs(specs) -> dict[str, set[Any]]:
         "model_classification_models": set(),
         "model_span_models": set(),
         "text_resources": set(),
+        "transforms": set(),
         "functions": set(),
         "model_operations": set(),
     }
@@ -242,6 +256,7 @@ class ResourceManager:
             "model_classification_models": set(),
             "model_span_models": set(),
             "text_resources": set(),
+            "transforms": set(),
             # Every function name called by any rule (diagnostics + the prober fail-closed
             # gate in _validate_required_resources).
             "functions": set(),
@@ -253,6 +268,23 @@ class ResourceManager:
         for _, rule in rules.items():
             function_calls = tuple(self._iter_function_calls(rule))
             model_calls = tuple(self._iter_model_calls(rule))
+            for call in function_calls:
+                if (
+                    call.name == "_transform"
+                    and len(call.args) == 2
+                    and isinstance(call.args[1], Literal)
+                    and isinstance(call.args[1].value, str)
+                ):
+                    name = call.args[1].value
+                    definition = self.config.transforms.get(name)
+                    if type(definition) in {LocalTransformConfig, ModelTransformConfig}:
+                        is_model = type(definition) is ModelTransformConfig
+                        requirements["transforms"].add(
+                            (is_model, adapter_transform_reference(name, definition))
+                        )
+                        self.requires_model_inference = True
+                        if is_model:
+                            _record_model_requirement(requirements, definition.model, "transform")
             requirements["functions"].update(call.name for call in function_calls)
             requirements["model_operations"].update(
                 (call.alias, call.operation) for call in model_calls
@@ -314,6 +346,20 @@ class ResourceManager:
             ResourcePreparationError: If required resources are missing or unavailable
         """
         errors = []
+        for is_model, reference in requirements.get("transforms", set()):
+            name, _alias = adapter_transform_reference_parts(reference, is_model)
+            registries = [self.config.transforms]
+            if self.model_inference_backend is not None:
+                registries.append(self.model_inference_backend.config.transforms)
+            for registry in registries:
+                definition = registry.get(name)
+                expected_type = ModelTransformConfig if is_model else LocalTransformConfig
+                if type(definition) is not expected_type or (
+                    adapter_transform_reference(name, definition) != reference
+                ):
+                    errors.append(
+                        f"Transform {name!r} configuration differs from the compiled reference"
+                    )
         all_functions = requirements.get("functions", set())
         model_operations = requirements.get("model_operations", set())
         if model_operations and self.config.config_version != 2:
@@ -455,10 +501,11 @@ class ResourceManager:
         """
         self._validate_required_resources(requirements)
 
-        if not self.requires_model_inference:
+        if not self.requires_model_inference and not requirements.get("transforms"):
             return
 
         if self.model_inference_backend is not None:
+            self._require_transforms(requirements)
             self.model_inference_backend.require_completion_models(
                 requirements.get("llm_complete_models", set())
             )
@@ -488,7 +535,23 @@ class ResourceManager:
             span_models_to_load=requirements.get("model_span_models", set()),
             rate_limiter=self.llm_rate_limiter,
         )
+        self._require_transforms(requirements)
         self.model_inference_backend.require_credentials(requirements.get("llm_models", set()))
+
+    def _require_transforms(self, requirements: dict[str, set[Any]]) -> None:
+        bindings = requirements.get("transforms", set())
+        if not bindings:
+            return
+        names = {
+            adapter_transform_reference_parts(reference, is_model)[0]
+            for is_model, reference in bindings
+        }
+        require = getattr(self.model_inference_backend, "require_transforms", None)
+        if not callable(require):
+            raise ResourcePreparationError(
+                "Injected backend cannot provide transforms", requirements
+            )
+        require(names)
 
     def _extract_function_calls(self, rule) -> set[str]:
         """Extract function names called in a rule."""

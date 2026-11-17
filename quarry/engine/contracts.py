@@ -40,9 +40,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-10 adds bounded message composition and literal
-# transforms, including aggregate expression validation and source-backed span projection.
-COMPILER_VERSION = "compiler-10"
+# previously produced artifacts. Compiler-11 binds registered adapter transforms, their
+# resource requirements, model budgets and local-purity validation.
+COMPILER_VERSION = "compiler-11"
 
 
 @dataclass(frozen=True, slots=True)

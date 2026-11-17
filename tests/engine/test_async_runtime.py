@@ -438,6 +438,7 @@ _DATA_TYPES = (
     "quarry.types.response_schema",
     # Pure immutable values; the import-purity test below guards this boundary.
     "quarry.types.transforms",
+    "quarry.types.adapter_transforms",
 )
 _AST_TYPES = ("quarry.types.dsl", "quarry.language.metadata", "quarry.rule_versioning")
 
@@ -474,3 +475,8 @@ def test_the_approved_transform_contract_boundary_remains_pure():
     contract = _ENGINE.parent / "types" / "transforms.py"
 
     assert _quarry_imports(contract) == set()
+
+
+def test_adapter_transform_contracts_import_only_data_and_exception_types():
+    contract = _ENGINE.parent / "types" / "adapter_transforms.py"
+    assert _quarry_imports(contract) == {"quarry.types.transforms", "quarry.types.exceptions"}

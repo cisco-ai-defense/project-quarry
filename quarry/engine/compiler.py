@@ -76,6 +76,13 @@ from quarry.language.runtime import (
     surface_names,
 )
 from quarry.rule_versioning import check_rule_compatibility
+from quarry.types.adapter_transforms import (
+    LocalTransformConfig,
+    ModelTransformConfig,
+    TransformConfig,
+    adapter_transform_reference,
+    adapter_transform_reference_parts,
+)
 
 # Adapter/compiler tier: importing the rule AST is allowed and expected here.
 from quarry.types.dsl import (
@@ -243,6 +250,7 @@ _MODEL_FIELD_TYPES: dict[str, dict[str, str]] = {
         "tool_calls": "ToolCall[]",
     },
     "Score": {"value": "float"},
+    "Tool": {"type": "string", "name": "string", "description": "string", "parameters": "object"},
     "Span": {
         "message_index": "int",
         "start": "int",
@@ -279,7 +287,7 @@ _JOIN_FORM = (
     "join() is supported only as message() or add_message() content in a model input, e.g. "
     'message("user", join([c.name for c in messages[-1].tool_calls], "\\n"))'
 )
-_MAP_COMPREHENSION_FORM = "a map comprehension is supported only as the first argument of join()"
+_MAP_COMPREHENSION_FORM = "a map comprehension outside join() must produce message values"
 _LEGACY_COMPUTED_CONTENT = (
     "message() content computed with join() is supported only in a version 2 model expression, "
     'such as model("alias").score(...) or model("alias").complete(...), with config_version: 2'
@@ -396,7 +404,7 @@ class _Compiler:
         self,
         rule,
         response_schemas: Mapping[str, str] | None = None,
-        transforms: Mapping[str, ContentTransform] | None = None,
+        transforms: Mapping[str, TransformConfig] | None = None,
     ):
         self.rule = rule
         self.rule_name = getattr(rule, "name", "")
@@ -1477,9 +1485,8 @@ class _Compiler:
                 raise UnsupportedConstruct(_JOIN_FORM)
             pending.extend(iter_condition_children(current))
 
-    @staticmethod
-    def _contains_model_call(node) -> bool:
-        """Return whether ``node`` contains a typed model operation.
+    def _contains_model_call(self, node, *, service_only: bool = False) -> bool:
+        """Find typed expression forms, or only service calls for local-purity checks.
 
         A refusal guard counts as one: it must read a model call, so lowering it as a model
         expression reports a misplaced argument instead of an unsupported condition.
@@ -1487,7 +1494,23 @@ class _Compiler:
 
         return any(
             isinstance(current, ModelCall)
-            or (isinstance(current, FunctionCall) and current.name in _REFUSAL_GUARDS)
+            or (
+                isinstance(current, FunctionCall)
+                and (
+                    current.name in _REFUSAL_GUARDS
+                    or (
+                        current.name == "_transform"
+                        and len(current.args) == 2
+                        and isinstance(current.args[1], Literal)
+                        and isinstance(current.args[1].value, str)
+                        and (
+                            not service_only
+                            or type(self._transforms.get(current.args[1].value))
+                            is ModelTransformConfig
+                        )
+                    )
+                )
+            )
             for current in walk_condition_nodes(node)
         )
 
@@ -1685,7 +1708,7 @@ class _Compiler:
             expression,
             surface,
             event_bound=event_bound,
-            cost=Cost.LLM if model_calls else Cost.PURE,
+            cost=Cost.LLM if self._contains_model_call(node, service_only=True) else Cost.PURE,
         )
 
     def _mint_model_expression(
@@ -1705,6 +1728,7 @@ class _Compiler:
                 expression,
                 maximum=MAX_TRANSFORM_CHAIN,
                 validate_plan=ContentTransform.from_canonical_json,
+                validate_reference=adapter_transform_reference_parts,
             )
         except (TypeError, ValueError) as exc:
             raise UnsupportedConstruct(str(exc)) from exc
@@ -1760,10 +1784,13 @@ class _Compiler:
         self,
         name: Annotated[object, DSLParameter(accepted_types=("string",), literal_only=True)],
     ) -> object:
-        """Apply one reviewed configured transform to message text.
+        """Apply one configured transform to message content.
 
         The result keeps message roles, tool links, and source provenance. Transforms may be
         chained, filtered, sliced, composed, or passed directly to a model operation.
+        Local adapters run without model-call charges; model-backed adapters use their
+        configured alias's call budget. Media-derived text keeps part-only source context.
+        A local whole-message adapter may instead rewrite fields while preserving text.
         """
 
         return name
@@ -1866,6 +1893,17 @@ class _Compiler:
                 transform = self._transforms.get(name)
                 if transform is None:
                     raise UnsupportedConstruct(f"content transform {name!r} is not configured")
+                if type(transform) in {LocalTransformConfig, ModelTransformConfig}:
+                    return (
+                        ModelExpression(
+                            "model_transform"
+                            if type(transform) is ModelTransformConfig
+                            else "local_transform",
+                            adapter_transform_reference(name, transform),
+                            (messages,),
+                        ),
+                        "Messages",
+                    )
                 if type(transform) is not ContentTransform:
                     raise UnsupportedConstruct(
                         f"content transform {name!r} must use the immutable transform contract"
@@ -2056,8 +2094,39 @@ class _Compiler:
             raise UnsupportedConstruct(f"operator {node.operator!r} is not supported for models")
 
         if isinstance(node, MapComprehension):
-            raise UnsupportedConstruct(_MAP_COMPREHENSION_FORM)
+            return self._lower_message_map(node, scope)
         raise UnsupportedConstruct(f"unsupported model expression {type(node).__name__}")
+
+    def _lower_message_map(
+        self, node: MapComprehension, scope: Scope
+    ) -> tuple[ModelExpression, str]:
+        """Map structured items to ordered message selections without per-item model calls."""
+
+        for part in (node.expression, node.condition):
+            if part is not None:
+                if self._contains_model_call(part, service_only=True):
+                    raise UnsupportedConstruct("a message map cannot call a model")
+                self._reject_provenance_selectors(part)
+        source, source_type = self._lower_model_expression(node.collection, scope)
+        source, source_type = _convert(source, source_type, {"Messages"})
+        item_type = {"Messages": "Message", "Tools": "Tool"}.get(source_type)
+        if item_type is None and source_type is not None and source_type.endswith("[]"):
+            candidate = source_type[:-2]
+            if candidate in self._field_types:
+                item_type = candidate
+        if item_type is None:
+            raise UnsupportedConstruct("a message map needs a collection of structured items")
+        item_scope = scope.bind(node.variable, _MAP_ITEM_SURFACE, item_type)
+        predicate = ModelExpression("literal", True)
+        if node.condition is not None:
+            predicate, predicate_type = self._lower_model_expression(node.condition, item_scope)
+            if predicate_type != "bool":
+                raise UnsupportedConstruct("a message map filter must be Boolean")
+        value, value_type = self._lower_model_expression(node.expression, item_scope)
+        value, value_type = _convert(value, value_type, {"Messages"})
+        if value_type != "Messages":
+            raise UnsupportedConstruct(_MAP_COMPREHENSION_FORM)
+        return ModelExpression("message_map", node.variable, (source, predicate, value)), "Messages"
 
     def _lower_message_selection(
         self, node: FilterComprehension, scope: Scope
@@ -2068,7 +2137,7 @@ class _Compiler:
             raise UnsupportedConstruct(
                 "a message selection must keep its loop variable before `for`"
             )
-        if self._contains_model_call(node.condition):
+        if self._contains_model_call(node.condition, service_only=True):
             raise UnsupportedConstruct("a message selection predicate cannot call a model")
         self._reject_provenance_selectors(node.condition)
         source, source_type = self._lower_model_expression(node.collection, scope)
@@ -2086,7 +2155,7 @@ class _Compiler:
     ) -> tuple[ModelExpression, str]:
         """Lower a lazy conditional whose branches have one statically known type."""
 
-        if self._contains_model_call(node.predicate):
+        if self._contains_model_call(node.predicate, service_only=True):
             raise UnsupportedConstruct("a conditional value predicate cannot call a model")
         self._reject_provenance_selectors(node.predicate)
         predicate, predicate_type = self._lower_model_expression(node.predicate, scope)
@@ -2177,7 +2246,7 @@ class _Compiler:
         local_terms: list[ModelExpression] = []
         model_terms: list[ModelExpression] = []
         for term in self._collect_conjuncts(node.condition):
-            has_model_call = self._contains_model_call(term)
+            has_model_call = self._contains_model_call(term, service_only=True)
             if has_model_call and any(
                 (isinstance(current, UnaryOp) and current.operator == "not")
                 or (isinstance(current, BinaryOp) and current.operator == "or")
@@ -2207,6 +2276,7 @@ class _Compiler:
                 source,
                 maximum=MAX_TRANSFORM_CHAIN,
                 validate_plan=ContentTransform.from_canonical_json,
+                validate_reference=adapter_transform_reference_parts,
                 additional_roots=additional_roots,
             )
         except (TypeError, ValueError) as exc:
@@ -2217,7 +2287,7 @@ class _Compiler:
             source=source,
             local_predicate=local_predicate,
             model_predicate=model_predicate,
-            has_external_work=self._contains_model_call(node),
+            has_external_work=self._contains_model_call(node, service_only=True),
         )
 
     @staticmethod
@@ -3672,7 +3742,7 @@ class _Compiler:
         if not (isinstance(separator, Literal) and isinstance(separator.value, str)):
             raise UnsupportedConstruct("join() separator must be a string literal")
         for part in (values.expression, values.condition):
-            if part is not None and self._contains_model_call(part):
+            if part is not None and self._contains_model_call(part, service_only=True):
                 # One model input holds every value, so a value cannot need its own model call.
                 raise UnsupportedConstruct("a map comprehension cannot call a model")
         source, source_type = self._lower_model_expression(values.collection, scope)
@@ -4444,7 +4514,7 @@ def compile_rule(
     max_work: int | None = DEFAULT_MAX_WORK,
     decompose: bool = True,
     response_schemas: Mapping[str, str] | None = None,
-    transforms: Mapping[str, ContentTransform] | None = None,
+    transforms: Mapping[str, TransformConfig] | None = None,
 ) -> CompileResult:
     """Compile a parsed ``DSLRule`` into a :class:`CompiledRuleArtifact` through the core
     calculus (``quarry.engine.lower``). On any unsupported construct or construction limit,

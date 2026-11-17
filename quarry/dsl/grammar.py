@@ -113,7 +113,7 @@ DSL_GRAMMAR = r"""
     comprehension: any_comp | all_comp | filter_comp | map_comp
     any_comp: "any" IDENTIFIER "in" expr "where" expr
     all_comp: "all" IDENTIFIER "in" expr "where" expr
-    filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr "if" or_expr "]"
+    filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr ["if" or_expr] "]"
     map_comp: "[" expr "for" IDENTIFIER "in" or_expr "]" | "[" expr "for" IDENTIFIER "in" or_expr "if" or_expr "]"
     pattern_block: "{" pattern_expr ("or" pattern_expr)* "}"
     pattern_expr: atom PATTERN_OPERATOR value | IDENTIFIER PATTERN_OPERATOR value

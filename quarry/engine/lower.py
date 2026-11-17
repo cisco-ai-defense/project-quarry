@@ -61,6 +61,7 @@ from quarry.engine.desugar import (
 )
 from quarry.engine.diagnostics import Diagnostics, ErrorCategory, SourceRef, UnsupportedConstruct
 from quarry.engine.symbolic_dfa import DFA, PAST_PREFIX, PastDef, compile_dfa
+from quarry.types.adapter_transforms import TransformConfig
 from quarry.types.dsl import (
     AllComprehension,
     AnyComprehension,
@@ -80,7 +81,6 @@ from quarry.types.dsl import (
 )
 from quarry.types.dsl.render import render_condition
 from quarry.types.dsl.traversal import walk_condition_nodes
-from quarry.types.transforms import ContentTransform
 
 
 class _Tables:
@@ -100,7 +100,7 @@ class _Tables:
 
     def contains_model_call(self, node) -> bool:
         """Return whether the node contains a model call."""
-        return self._k._Compiler._contains_model_call(node)
+        return self._f._contains_model_call(node)
 
     def model_calls(self, node):
         """Return the model calls in the node."""
@@ -1225,7 +1225,7 @@ def compile_core(
     max_work: int | None = DEFAULT_MAX_WORK,
     decompose: bool = True,
     response_schemas: Mapping[str, str] | None = None,
-    transforms: Mapping[str, ContentTransform] | None = None,
+    transforms: Mapping[str, TransformConfig] | None = None,
 ):
     """Compile a parsed rule through the core calculus into a :class:`CompileResult`.
 
@@ -1263,7 +1263,7 @@ def _compile(
     bind: str | None,
     decompose: bool,
     response_schemas: Mapping[str, str] | None,
-    transforms: Mapping[str, ContentTransform] | None,
+    transforms: Mapping[str, TransformConfig] | None,
 ):
     """:func:`_attempt` spending ``budget``, with a rule nested deeper than the recursive
     walkers allow failing to load with a named reason. It is not a construction limit: a retry
@@ -1290,7 +1290,7 @@ def _attempt(
     bind: str | None,
     decompose: bool,
     response_schemas: Mapping[str, str] | None,
-    transforms: Mapping[str, ContentTransform] | None,
+    transforms: Mapping[str, TransformConfig] | None,
 ):
     """One compilation, with ``bind`` decided per candidate when given. Returns the result,
     whether it failed at a construction limit, and the elements a retry may decide per

@@ -32,6 +32,7 @@ import string
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, is_dataclass, replace
 from types import SimpleNamespace
@@ -45,10 +46,27 @@ from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
 from quarry.config import InferenceModelConfig, QuarryConfig, ScoreConfig
 from quarry.core.conversation import Conversation
-from quarry.integrations.model_usage import ModelUsage
+from quarry.integrations.adapter_transforms import (
+    keep_transform,
+    read_transform,
+    transform_error,
+    transform_unit_snapshot,
+)
+from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.safety.limits import SafetyLimits
-from quarry.safety.timer import QuarryTimeoutError, clamp_to_evaluation_deadline
+from quarry.safety.timer import (
+    QuarryTimeoutError,
+    clamp_to_evaluation_deadline,
+    raise_if_evaluation_expired,
+)
+from quarry.types.adapter_transforms import (
+    DecodeLimitError,
+    LocalTransformConfig,
+    ModelTransformConfig,
+    TransformResult,
+    checked_transform_parts,
+)
 from quarry.types.exceptions import (
     MODEL_REFUSED,
     ConfigurationError,
@@ -57,6 +75,7 @@ from quarry.types.exceptions import (
     ModelError,
     QuarryError,
 )
+from quarry.types.media import require_media_part, require_message_media, require_readable_media
 from quarry.types.messages import (
     AssistantMessage,
     Messages,
@@ -73,6 +92,8 @@ from quarry.types.results import (
     ResultItem,
     Span,
 )
+
+_MESSAGE_TRANSFORM_PART = ContextVar("quarry_message_transform_part", default=False)
 
 MessageBuilderV1 = Callable[[str, Conversation, str, ScoreConfig], list[dict[str, Any]]]
 MessageBuilderV2 = Callable[
@@ -187,6 +208,8 @@ def _message_dicts(messages: Messages) -> list[dict[str, Any]]:
         messages.assert_self_contained()
     except ValueError as exc:
         raise ModelError(str(exc)) from exc
+    for message in messages:
+        require_message_media(message)
     return messages.to_openai_messages()
 
 
@@ -1715,6 +1738,25 @@ async def _read(response: Any, read: Callable[[Any], Any] | None) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
+async def _invoke_transform_adapter(name: str, operation: Callable[[], Any]) -> Any:
+    """Keep host exception payloads out of transform diagnostics and retry metadata."""
+
+    try:
+        raw = operation()
+        return await raw if inspect.isawaitable(raw) else raw
+    except (DecodeLimitError, QuarryTimeoutError, TimeoutError):
+        raise
+    except LLMError as exc:
+        raw_code = dict.get(exc.details, "code") if type(exc.details) is dict else None
+        allowed = RETRYABLE_ERROR_CODES | {MODEL_REFUSED}
+        code = raw_code if type(raw_code) is str and raw_code in allowed else "adapter_error"
+        raise LLMError("Transform adapter request failed", {"code": code}) from exc
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Transform adapter failed") from exc
+    except Exception as exc:
+        raise transform_error(name, "adapter_error", "adapter failed") from exc
+
+
 class ModelInferenceBackend:
     """Resolve configured remote models without coupling them to request objects."""
 
@@ -2005,6 +2047,242 @@ class ModelInferenceBackend:
             raise ConfigurationError(f"Inference model '{model_id}' was not loaded")
         return model
 
+    def _transform_adapter(self, name: str) -> tuple[Any, Any, tuple[str, ...]]:
+        definition = self.config.transforms.get(name)
+        if type(definition) is LocalTransformConfig:
+            adapter_name, settings = definition.adapter, definition
+        elif type(definition) is ModelTransformConfig:
+            settings = self._model(definition.model)
+            adapter_name = settings.adapter
+        else:
+            raise ConfigurationError(f"Adapter transform {name!r} is not configured")
+        adapter = self.adapters.get(adapter_name)
+        local = getattr(adapter, "local", None)
+        if type(local) is not bool:
+            raise ConfigurationError(
+                f"Transform {name!r} adapter must declare a boolean local flag"
+            )
+        if local != (type(definition) is LocalTransformConfig):
+            raise ConfigurationError(
+                f"Transform {name!r} adapter locality does not match its configuration; "
+                "use adapter for local work and model for model-backed work"
+            )
+        if callable(getattr(adapter, "transform_messages", None)):
+            if not local or type(definition) is not LocalTransformConfig:
+                raise ConfigurationError(
+                    f"Transform {name!r} whole-message adapter must run locally"
+                )
+            if definition.parts is not None:
+                raise ConfigurationError(
+                    f"Transform {name!r} whole-message adapter cannot select parts"
+                )
+            return adapter, settings, ()
+        if not callable(getattr(adapter, "transform", None)):
+            raise ConfigurationError(f"Transform {name!r} requires an adapter with transform()")
+        try:
+            declared = getattr(adapter, "transform_parts", None)
+            if type(declared) is frozenset:
+                declared = tuple(declared)
+            supported = checked_transform_parts(declared)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"Transform {name!r} adapter has invalid transform_parts"
+            ) from exc
+        if supported is None:
+            raise ConfigurationError(f"Transform {name!r} adapter must declare transform_parts")
+        parts = definition.parts if definition.parts is not None else supported
+        if not set(parts) <= set(supported):
+            raise ConfigurationError(f"Transform {name!r} selects parts its adapter cannot read")
+        return adapter, settings, parts
+
+    def require_transforms(self, names: Collection[str]) -> None:
+        """Validate host registration, model loading and part capabilities before use."""
+
+        for name in sorted(names):
+            self._transform_adapter(name)
+
+    def transform_parts(self, name: str) -> tuple[str, ...]:
+        """The selected supported wire part types; other part types pass through unchanged."""
+
+        return self._transform_adapter(name)[2]
+
+    async def transform_messages(self, name: str, messages: Messages) -> Messages:
+        """Apply one local uncached, text-preserving rewrite of an ordered message selection."""
+
+        if not isinstance(messages, Messages):
+            raise TypeError("whole-message transform input must be Messages")
+        raise_if_evaluation_expired()
+        adapter, settings, parts = self._transform_adapter(name)
+        if parts:
+            raise ConfigurationError(f"Transform {name!r} is a part transform")
+        positions = tuple(
+            index for index, message in enumerate(messages) if message._readable_for_rewrite()
+        )
+        if not positions:
+            return messages
+        await require_readable_media(messages, rewritable_only=True)
+        try:
+            async with asyncio.timeout(clamp_to_evaluation_deadline(None)):
+                raw = await _invoke_transform_adapter(
+                    name,
+                    lambda: adapter.transform_messages(
+                        settings, [messages[index].to_openai_dict() for index in positions]
+                    ),
+                )
+            raise_if_evaluation_expired()
+            return await messages._rewritten_async(raw, positions=positions)
+        except (TypeError, ValueError, ConversationValidationError) as exc:
+            raise transform_error(
+                name, "invalid_output", "invalid text-preserving message rewrite"
+            ) from exc
+        except DecodeLimitError as exc:
+            raise transform_error(name, "decode_limit", "decoder limit reached") from exc
+        except TimeoutError as exc:
+            raise_if_evaluation_expired()
+            raise transform_error(name, "timeout", "message adapter timed out") from exc
+        except LLMError as exc:
+            if exc.details.get("code") == MODEL_REFUSED:
+                raise transform_error(
+                    name, "invalid_output", "adapter returned no rewrite"
+                ) from exc
+            raise
+        except (QuarryError, QuarryTimeoutError):
+            raise
+        except Exception as exc:
+            raise transform_error(name, "adapter_error", "message adapter failed") from exc
+
+    async def transform_unit(
+        self, name: str, unit: dict[str, Any], *, timeout: float | None = None
+    ) -> TransformResult:
+        """Transform one part, validating before caching and charging only model adapters.
+
+        A host adapter declares ``transform_parts`` and implements
+        ``transform(config, part, *, timeout=None)``. It may return text or TransformResult,
+        synchronously or asynchronously. Synchronous local adapters must check deadlines
+        cooperatively during long work. No user-selected module is imported.
+        """
+
+        return await self._transform_unit(
+            name, unit, timeout=timeout, cache_local=not _MESSAGE_TRANSFORM_PART.get()
+        )
+
+    async def transform_message_unit(
+        self, name: str, unit: dict[str, Any], *, timeout: float | None = None
+    ) -> TransformResult:
+        """Compute a message value's part, keeping only model-backed request caching.
+
+        Local adapter results belong to their enclosing transformed message expression.
+        Equal raw parts in separate messages must still be processed separately.
+        """
+
+        # Keep the existing injected/subclassed transform_unit hook in the dispatch path.
+        # The task-local flag only changes this backend's local raw-part cache policy.
+        token = _MESSAGE_TRANSFORM_PART.set(True)
+        try:
+            if timeout is None:
+                return await self.transform_unit(name, unit)
+            return await self.transform_unit(name, unit, timeout=timeout)
+        finally:
+            _MESSAGE_TRANSFORM_PART.reset(token)
+
+    async def _transform_unit(
+        self,
+        name: str,
+        unit: dict[str, Any],
+        *,
+        timeout: float | None,
+        cache_local: bool,
+    ) -> TransformResult:
+        raise_if_evaluation_expired()
+        adapter, settings, parts = self._transform_adapter(name)
+        try:
+            snapshot = transform_unit_snapshot(unit)
+        except (TypeError, ValueError) as exc:
+            raise transform_error(name, "invalid_input", str(exc)) from exc
+        if snapshot["type"] not in parts:
+            raise transform_error(name, "invalid_input", "part is outside the selected part types")
+        require_media_part(None, snapshot)
+        definition = self.config.transforms[name]
+
+        async def local_request(*, timeout):
+            try:
+                async with asyncio.timeout(timeout):
+                    raw = await _invoke_transform_adapter(
+                        name,
+                        lambda: adapter.transform(settings, deepcopy(snapshot), timeout=timeout),
+                    )
+                    raise_if_evaluation_expired()
+                    return keep_transform(raw, snapshot, name)
+            except (QuarryError, QuarryTimeoutError, TimeoutError):
+                raise
+            except Exception as exc:
+                raise transform_error(name, "adapter_error", "adapter failed") from exc
+
+        try:
+            if type(definition) is ModelTransformConfig:
+                return await self._call(
+                    definition.model,
+                    settings.model,
+                    adapter,
+                    "transform",
+                    settings,
+                    lambda: (deepcopy(snapshot),),
+                    key=("adapter-transform-v1", input_key(snapshot)),
+                    timeout=timeout,
+                    prepare=lambda raw: keep_transform(raw, snapshot, name),
+                    read=lambda kept: read_transform(kept, snapshot),
+                    dispatch=lambda config, part, *, timeout: _invoke_transform_adapter(
+                        name, lambda: adapter.transform(config, part, timeout=timeout)
+                    ),
+                )
+            wait_timeout = timeout
+            if timeout is not None:
+                if not math.isfinite(timeout):
+                    raise ValueError("Timeout must be finite or None")
+                if timeout <= 0:
+                    wait_timeout = None
+            provider_timeout = (
+                wait_timeout if wait_timeout is not None else clamp_to_evaluation_deadline(None)
+            )
+            if not cache_local:
+                async with asyncio.timeout(wait_timeout):
+                    return read_transform(await local_request(timeout=provider_timeout), snapshot)
+            key = input_key("local-transform-v1", object_identity(adapter), settings, snapshot)
+            async with asyncio.timeout(wait_timeout):
+                kept = await result_cache.call(
+                    key,
+                    local_request,
+                    alone=True,
+                    retry_on=_starters_limit,
+                    timeout=provider_timeout,
+                )
+                return read_transform(kept, snapshot)
+        except DecodeLimitError as exc:
+            raise transform_error(name, "decode_limit", "decoder limit reached") from exc
+        except TimeoutError as exc:
+            raise transform_error(name, "timeout", "adapter timed out") from exc
+        except LLMError as exc:
+            if exc.details.get("code") == "timeout":
+                raise transform_error(name, "timeout", "adapter timed out") from exc
+            if exc.details.get("code") == MODEL_REFUSED:
+                raise transform_error(
+                    name, "invalid_output", "adapter returned no transform"
+                ) from exc
+            if type(definition) is ModelTransformConfig:
+                other = exc.details.get("model")
+                if isinstance(other, str) and other != definition.model:
+                    raise LLMError(
+                        exc.message.replace(other, definition.model),
+                        {**exc.details, "model": definition.model},
+                    ) from exc
+            raise
+        except ModelError as exc:
+            if exc.details.get("transform") not in {None, name}:
+                raise transform_error(
+                    name, exc.details.get("code", "adapter_error"), "adapter failed"
+                ) from exc
+            raise
+
     async def _call(
         self,
         model_id: str,
@@ -2017,6 +2295,8 @@ class ModelInferenceBackend:
         key: tuple[Any, ...],
         timeout: float | None,
         read: Callable[[Any], Any] | None = None,
+        prepare: Callable[[Any], Any] | None = None,
+        dispatch: Callable[..., Any] | None = None,
         refusals: bool = False,
     ) -> Any:
         """Send one adapter request, ``adapter.<method>(model, *payload())``, or reuse the
@@ -2037,18 +2317,23 @@ class ModelInferenceBackend:
         ``read`` is what the caller makes of the response, such as a validated score. A
         response it rejects is dropped from the cache, so the next caller asks again. With
         ``refusals``, a provider's refusal is the response: it is kept and returned as a
-        ``_Refused``, which ``read`` never sees.
+        ``_Refused``, which ``read`` never sees. ``prepare`` validates and compacts a
+        transform reply before cache admission; its version is part of the caller's key.
         """
 
-        send = getattr(adapter, method)
+        send = getattr(adapter, method) if dispatch is None else dispatch
 
         async def request(*, timeout: float | None) -> Any:
-            arguments = payload()
+            async def invoke(attempt_timeout):
+                # Construct a fresh payload for each retry. A host adapter may mutate it.
+                response = send(model, *payload(), timeout=attempt_timeout)
+                return await response if inspect.isawaitable(response) else response
+
             try:
-                return await self._send(
+                response = await self._send(
                     model_id,
                     rate_limit_model,
-                    lambda attempt_timeout: send(model, *arguments, timeout=attempt_timeout),
+                    invoke,
                     timeout=timeout,
                 )
             except LLMError as exc:
@@ -2056,6 +2341,7 @@ class ModelInferenceBackend:
                 if reason is None:
                     raise
                 return _Refused(reason, _REFUSAL_MESSAGES[reason])
+            return response if prepare is None else prepare(response)
 
         # An adapter's configuration is not visible in its class, so each instance names its
         # own results.
@@ -2123,6 +2409,12 @@ class ModelInferenceBackend:
         # A request is shaped by the provider settings and its own operation's section; a
         # category, class index, span head or score calibration only reads the response, and
         # a score's builder and boundary only shape the messages its key names.
+        if method == "transform":
+            # A host transform receives the whole model configuration and may read every
+            # field, so none of its operation sections can be omitted from request identity.
+            digest = input_key(model)
+            self._settings_digests[(method, id(model))] = (model, digest)
+            return digest
         section = _REQUEST_SECTIONS.get(method)
         sections: dict[str, Any] = {name: None for name in _OPERATION_SECTIONS}
         if section == "score" and model.score is not None:
@@ -2317,6 +2609,7 @@ class ModelInferenceBackend:
     ) -> JudgeResult | _Refused:
         """Send one score request, or reuse the response to the same request."""
 
+        await require_readable_media(messages)
         tool_dicts = _tool_dicts(tools)
         if self.config.config_version == 2:
             # A version 2 builder reads only its arguments, so the request is named by them,
@@ -2452,6 +2745,7 @@ class ModelInferenceBackend:
     ) -> Any:
         """Return ``read`` of one opaque message-classification response."""
 
+        await require_readable_media(messages)
         tool_dicts = _tool_dicts(tools)
 
         def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2656,6 +2950,7 @@ class ModelInferenceBackend:
                 )
             return message, value
 
+        await require_readable_media(messages)
         tool_dicts = _tool_dicts(tools)
         outcome = await self._complete_message_wire(
             model_id,
@@ -2802,6 +3097,7 @@ class ModelInferenceBackend:
     ) -> int:
         """Count completion-shaped input tokens for canonical messages and tools."""
 
+        await require_readable_media(messages)
         tool_dicts = _tool_dicts(tools)
         return await self._count_messages(
             model_id,
@@ -2931,6 +3227,10 @@ class ModelInferenceBackend:
         timeout: float | None,
     ) -> tuple[Messages, ...]:
         """Build the chunks after public argument validation."""
+
+        await require_readable_media(messages)
+        if context is not None:
+            await require_readable_media(context)
 
         async def count(selection: Messages) -> int:
             return await self._count_messages(

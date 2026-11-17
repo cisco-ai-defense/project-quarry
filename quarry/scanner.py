@@ -93,6 +93,7 @@ from quarry.types.exceptions import (
     ConversationValidationError,
     EvaluationError,
     EvaluationTimeoutError,
+    InvalidInputError,
     LLMError,
     ModelError,
     ResourceError,
@@ -142,7 +143,7 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
     error_type = type(error)
     if issubclass(error_type, QuarryTimeoutError | TimeoutError | EvaluationTimeoutError):
         return ScanFailureCategory.TIMEOUT
-    if issubclass(error_type, ConversationValidationError):
+    if issubclass(error_type, ConversationValidationError | InvalidInputError):
         return ScanFailureCategory.INVALID_INPUT
     if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL

@@ -931,7 +931,7 @@ class DSLTransformer(Transformer):
         return sum(self._array_size(item) for item in value)
 
     @dsl_construct(name="filter-comprehension")
-    def filter_comp(self, output_var, var, collection, condition):
+    def filter_comp(self, output_var, var, collection, condition=None):
         """Keep collection items that satisfy a condition.
 
         In ``[msg for msg in user_messages if msg.content contains "sudo"]``, the result
@@ -948,14 +948,21 @@ class DSLTransformer(Transformer):
         """
         if "params" in {str(output_var), str(var)}:
             raise ValueError("'params' is reserved for declared rule parameters")
+        if condition is None:
+            return self.map_comp(Identifier(str(output_var)), var, collection)
         return FilterComprehension(str(var), collection, condition, output_variable=str(output_var))
 
     @dsl_construct(name="map-comprehension")
     def map_comp(self, expression, var, collection, condition=None):
-        """Project each selected item for use as the first argument of ``join()``.
+        """Project selected items into messages or text values in written order.
 
-        The map is supported in ``message()`` content of a version 2 model input.
-        Its value and optional filter cannot call a model.
+        A message-valued map can be used as typed model input. A text-valued map is
+        supported as the first argument of ``join()`` in ``message()`` content.
+        The projection and optional filter cannot call a model. Message maps keep
+        source provenance, flatten each projected message sequence in order, and
+        apply ``max_comprehension_size`` to both source and output. Structural limits
+        always cap each map at 10,000 source/output items and 2,000,000 output text
+        characters; the existing constructed-message limits also apply.
         """
         if str(var) == "params":
             raise ValueError("'params' is reserved for declared rule parameters")

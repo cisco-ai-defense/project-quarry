@@ -42,6 +42,7 @@ from quarry.engine.atoms import (
     Cost,
     ModelExpression,
     StringSemantics,
+    model_expression_requires_model,
     validate_constructed_message_graph,
     validate_model_expression,
     validate_transform_expression_graph,
@@ -63,6 +64,7 @@ from quarry.language.runtime import surface_names
 from quarry.policy import CompiledPolicy, _canonical_sha256
 from quarry.rule_versioning import check_rule_compatibility
 from quarry.scanner import DSLScanner
+from quarry.types.adapter_transforms import adapter_transform_reference_parts
 from quarry.types.exceptions import RuleCompatibilityError
 from quarry.types.parameters import ParameterSpec, validate_parameter_values
 from quarry.types.rules import DSLRule
@@ -72,7 +74,7 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 FORMAT_KIND = "quarry.compiled-policy"
-FORMAT_VERSION = 6
+FORMAT_VERSION = 9
 _WIRE_SCHEMAS: list[tuple[type[DataclassInstance], set[str]]] = []
 _RESOURCE_REQUIREMENT_KEYS = frozenset(
     {
@@ -84,6 +86,7 @@ _RESOURCE_REQUIREMENT_KEYS = frozenset(
         "model_span_models",
         "text_resources",
         "model_operations",
+        "transforms",
     }
 )
 
@@ -481,6 +484,7 @@ def _model_expression_from_wire(raw: object, name: str) -> ModelExpression | Non
             expression,
             maximum=MAX_TRANSFORM_CHAIN,
             validate_plan=ContentTransform.from_canonical_json,
+            validate_reference=adapter_transform_reference_parts,
         )
     except (TypeError, ValueError) as exc:
         raise _fail(f"{name} is invalid: {exc}") from exc
@@ -508,6 +512,12 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
     try:
         kwargs["domain"] = AtomDomain(value["domain"])
         kwargs["cost"] = Cost(value["cost"])
+        if (
+            model_expression is not None
+            and model_expression_requires_model(model_expression)
+            and kwargs["cost"] is not Cost.LLM
+        ):
+            raise ValueError("model expressions that call a model require LLM cost")
         kwargs["string_semantics"] = StringSemantics(**semantics)
         for field_name in ("patterns", "parameter_names", "constructed_field_paths"):
             kwargs[field_name] = tuple(_list(value[field_name], f"{name}.{field_name}"))
@@ -641,19 +651,27 @@ def _collect_from_wire(raw: object) -> CollectPlan | None:
             source,
             maximum=MAX_TRANSFORM_CHAIN,
             validate_plan=ContentTransform.from_canonical_json,
+            validate_reference=adapter_transform_reference_parts,
             additional_roots=additional_roots,
         )
     except (TypeError, ValueError) as exc:
         raise _fail(f"rule.artifact.collect_plan is invalid: {exc}") from exc
+    if model_expression_requires_model(local_predicate):
+        raise _fail("rule.artifact.collect_plan local predicate cannot call a model")
+    has_external_work = _boolean(
+        value["has_external_work"], "rule.artifact.collect_plan.has_external_work"
+    )
+    if not has_external_work and any(
+        model_expression_requires_model(root) for root in (source, *additional_roots)
+    ):
+        raise _fail("rule.artifact.collect_plan model work requires has_external_work")
     return CollectPlan(
         variable=_string(value["variable"], "rule.artifact.collect_plan.variable"),
         item_type=_string(value["item_type"], "rule.artifact.collect_plan.item_type"),
         source=source,
         local_predicate=local_predicate,
         model_predicate=model_predicate,
-        has_external_work=_boolean(
-            value["has_external_work"], "rule.artifact.collect_plan.has_external_work"
-        ),
+        has_external_work=has_external_work,
     )
 
 
