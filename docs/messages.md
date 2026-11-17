@@ -247,6 +247,11 @@ transforms, resources, deadlines and model-call limits. Each call has its own lo
 two calls over different selections cannot reuse one another's transformed value. Local content
 transforms remain local work when used as call arguments.
 
+Parameters used by a called rule count as uses in its callers, including through nested
+calls. Each child receives the declarations it references; parameters used only by its
+caller or a sibling stay outside that child's schema. Same-named declarations must agree
+on type and binding. Unused, undeclared or conflicting parameters still reject the generation.
+
 Calls may nest, but imports cannot form a cycle. A rule can import at most 128 names, each
 containing at most 256 characters. Linking checks the complete imported generation against a
 100,000-item budget for expanded condition nodes and copied string entries before cloning it.

@@ -1667,6 +1667,7 @@ def _attempt(
         notes.append(f"value capture `{capture_plan.var}` (run DFA per candidate value)")
     tool_body_atoms = {a for plan in c.tool_quantifiers.values() for a in T.atoms_of(plan.body)}
     closed_atoms = {a for plan in closed_conditions.values() for a in plan.dfa.atoms}
+    retained_atoms = set(dfa.atoms) | tool_body_atoms | closed_atoms
     # A candidate or captured value is run once per binding, so its proof keeps the whole
     # domain of a negated event check.
     full_trace_proof = _needs_full_trace_proof(
@@ -1681,7 +1682,7 @@ def _attempt(
             },
         },
     )
-    node_atom_ids = c.final_node_atom_ids(set(dfa.atoms) | tool_body_atoms | closed_atoms)
+    node_atom_ids = c.final_node_atom_ids(retained_atoms)
     assert lowerer is not None
     flow_requirements = _flow_requirements(c, flow_probes, node_atom_ids, lowerer)
     if any(_live(c, source, node_atom_ids) for source in ordering_sources):
@@ -1719,7 +1720,9 @@ def _attempt(
         collect_plan=collect_plan,
         tool_quantifiers=c.tool_quantifiers,
         closed_conditions=closed_conditions,
-        split_checks=c.split_checks,
+        split_checks={
+            atom_id: check for atom_id, check in c.split_checks.items() if atom_id in retained_atoms
+        },
         full_trace_proof=full_trace_proof,
         decision_tree=decision_tree,
     )

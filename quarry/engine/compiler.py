@@ -1960,12 +1960,17 @@ class _Compiler:
             )
         except (TypeError, ValueError) as exc:
             raise UnsupportedConstruct(str(exc)) from exc
+        called_parameters = {
+            item.name
+            for item in walk_condition_nodes(node.condition)
+            if isinstance(item, ParameterRef)
+        }
         nested = compile_core(
             _ComposedCheck(
                 self.rule_name,
                 node.condition,
                 self.strings,
-                tuple(self.parameters.values()),
+                tuple(spec for name, spec in self.parameters.items() if name in called_parameters),
             ),
             response_schemas=self._response_schemas,
             transforms=self._transforms,
@@ -1977,6 +1982,7 @@ class _Compiler:
             )
         check = nested.artifact
         assert check is not None
+        self.used_parameters.update(spec.name for spec in check.parameter_schema)
         cost = max(
             (spec.cost for spec in check.atom_specs.values()),
             key=lambda item: item.rank,
