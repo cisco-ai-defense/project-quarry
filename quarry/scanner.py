@@ -95,8 +95,9 @@ from quarry.safety.validator import (
     Severity,
     _validate_json_tree,
     validate_conversation,
+    validate_conversation_top_level,
 )
-from quarry.types.context import ScanContext
+from quarry.types.context import ScanContext, preflight_conversation_total_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -1067,6 +1068,7 @@ class DSLScanner:
         rules_subset: set[str] | None = None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute parameters already validated by ``CompiledPolicy``."""
@@ -1081,6 +1083,7 @@ class DSLScanner:
                 parameters=parameters,
                 decision_paths=decision_paths,
                 explore=explore,
+                explore_selector=explore_selector,
                 deferred_evidence=deferred_evidence,
             )
 
@@ -1095,6 +1098,7 @@ class DSLScanner:
         parameters: dict[str, ParameterValue] | None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
@@ -1131,9 +1135,15 @@ class DSLScanner:
                 validation_error=message,
             )
         bound_parameters = parameters or {}
+        total_size_preflight = None
         legacy_chat = not self.input_registry.declarations and not self.input_adapters
         if legacy_chat:
             try:
+                raw_messages, raw_tools = validate_conversation_top_level(data)
+                if self.limits.enforce_limits:
+                    total_size_preflight = preflight_conversation_total_size(
+                        raw_messages, raw_tools, self.limits.max_total_size
+                    )
                 validate_conversation(
                     data,
                     parse_arguments=False,
@@ -1188,8 +1198,12 @@ class DSLScanner:
             return all(artifact.read_surfaces & surfaces for artifact in selected_artifacts)
 
         try:
-            if not isinstance(data, dict):
+            if type(data) is not dict:
                 raise ConversationValidationError("A conversation must be an object")
+            if any(type(key) is not str for key in data):
+                raise ConversationValidationError(
+                    "Conversation keys must be exact built-in strings"
+                )
             carried = {"messages", "tools", "timeline", *self.input_registry.definitions}
             carried |= set(self.input_adapters)
             if not data:
@@ -1219,7 +1233,7 @@ class DSLScanner:
                     ]
                     if not any(section in read for section in sections_of):
                         continue
-                    if not isinstance(value, dict):
+                    if type(value) is not dict:
                         reason = f"{key!r} must be an object of its sections"
                         input_faults.update(dict.fromkeys(sections_of, reason))
                         continue
@@ -1316,6 +1330,7 @@ class DSLScanner:
                 tool_call_types=self.tool_call_types,
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
+                _total_size_preflight=total_size_preflight,
             )
         except ConversationValidationError as exc:
             message = str(exc)
@@ -1411,6 +1426,9 @@ class DSLScanner:
                 evaluation_error_categories={"input_preparation": _failure_category(exc)},
                 evaluation_errors={"input_preparation": diagnostic},
             )
+
+        if explore_selector is not None:
+            explore = explore_selector(data)
 
         # Inputs exceeding a limit have been refused before any rule runs.
 

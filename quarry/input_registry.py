@@ -949,23 +949,23 @@ class InputRegistry:
         them as steps. Each entry's section is looked up in the conversation, which is never
         listed. A timeline that is not a list is left as it is, for its check to refuse."""
 
-        if not isinstance(entries, list):
+        if type(entries) is not list:
             return entries
 
         def unread(entry: dict[str, Any]) -> bool:
             section = entry.get("input")
-            if isinstance(section, str):
+            if type(section) is str:
                 if section in read:
                     return False
                 namespace, _, name = section.partition(".")
                 holder = conversation.get(namespace)
                 return section in self.event_surfaces or (
-                    namespace in self.definitions and isinstance(holder, dict) and name in holder
+                    namespace in self.definitions and type(holder) is dict and name in holder
                 )
             # The chat no rule reads: every entry that names a chat item, whatever else it holds.
             return not chat_read and ("message_index" in entry or "tool_call_id" in entry)
 
-        return [entry for entry in entries if not (isinstance(entry, dict) and unread(entry))]
+        return [entry for entry in entries if not (type(entry) is dict and unread(entry))]
 
     def order_timeline(
         self,
@@ -981,7 +981,7 @@ class InputRegistry:
         every item of a supplied list section once, so an omitted item cannot silently change
         a temporal result; it may reorder a section's items.
         """
-        if not isinstance(order, list):
+        if type(order) is not list:
             raise ConversationValidationError("The timeline must be a list")
         if limits.enforce_limits and (
             json_size(order, limits.max_total_size) > limits.max_total_size
@@ -1015,15 +1015,15 @@ class InputRegistry:
         conversation_order: list[tuple[Any, ...]] = []
         result: list[tuple[int, Any]] = []
         for position, entry in enumerate(order):
-            if not isinstance(entry, dict):
+            if type(entry) is not dict:
                 raise ConversationValidationError(f"Timeline entry {position} must be an object")
             if set(entry) == {"input", ITEM_ID}:
                 surface, item_id = entry["input"], entry[ITEM_ID]
-                if not isinstance(surface, str) or surface not in self.event_surfaces:
+                if type(surface) is not str or surface not in self.event_surfaces:
                     raise ConversationValidationError(
                         f"Timeline entry {position} names {surface!r}, not a list input"
                     )
-                if not isinstance(item_id, str) or not item_id:
+                if type(item_id) is not str or not item_id:
                     raise ConversationValidationError(f"Timeline entry {position} has invalid id")
                 key = ("input", surface, item_id)
             elif len(entry) == 1 and "message_index" in entry:

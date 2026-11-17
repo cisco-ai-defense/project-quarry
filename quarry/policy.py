@@ -42,7 +42,7 @@ from quarry.safety.timer import (
     remaining_evaluation_time,
     scan_deadline,
 )
-from quarry.safety.validator import _validate_json_tree
+from quarry.safety.validator import _validate_json_tree, _validate_raw_json_container_types
 from quarry.scanner import DSLScanner, _DeferredEvidence
 from quarry.types.exceptions import ConversationValidationError
 from quarry.types.parameters import (
@@ -152,7 +152,7 @@ def _sampled_values(
     ordered: bool,
     registry: InputRegistry,
 ) -> dict[str, Any] | None:
-    if not isinstance(conversation, dict):
+    if type(conversation) is not dict or any(type(key) is not str for key in conversation):
         return None
     chat_read = bool(read & (surface_names() - {"tools"}))
     keys = (
@@ -168,7 +168,7 @@ def _sampled_values(
     for surface in sorted(read):
         namespace, _, name = surface.partition(".")
         holder = conversation.get(namespace)
-        if name and isinstance(holder, dict) and name in holder:
+        if name and type(holder) is dict and name in holder:
             sampled[surface] = holder[name]
     return sampled
 
@@ -187,9 +187,10 @@ def _sampled(
         return False
     most = limits.max_total_size if limits.enforce_limits else None
     for key, value in sampled.items():
-        if most is not None and json_size(value, most) > most:
-            return False
         try:
+            _validate_raw_json_container_types(value)
+            if most is not None and json_size(value, most) > most:
+                return False
             _validate_json_tree(value, key, limits.max_nesting_depth)
         except ConversationValidationError:
             return False
@@ -427,8 +428,8 @@ class CompiledPolicy:
                         record_traces=record_traces,
                         rules_subset={self._rule_name},
                         decision_paths=decision_paths,
-                        explore=_sampled(
-                            conversation,
+                        explore_selector=lambda value: _sampled(
+                            value,
                             self._scanner.compiled_rules[self._rule_name].read_surfaces,
                             self._adapter_hashes,
                             self._scanner.compiled_rules[self._rule_name].orders_input_items,

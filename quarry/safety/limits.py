@@ -19,7 +19,7 @@
 from dataclasses import dataclass
 from json.encoder import encode_basestring
 from math import isfinite
-from typing import Any
+from typing import Any, cast
 
 _END = object()
 _MAX_JSON_DEPTH = 1_000
@@ -54,10 +54,12 @@ class SafetyLimits:
     max_message_size: int = 10_000_000
     max_tool_argument_size: int = 1_000_000
     max_tool_calls: int = 1_000
-    # Maximum JSON nesting depth for a tool-call argument object. Bounds both the
-    # scanner's post-size-preflight validation and the lazy rule-local decoder
-    # (``ToolCall.arguments``).
+    # Maximum JSON nesting depth for message content, offered tool definitions, and tool-call
+    # argument objects. Tool definitions are checked after total-size preflight; arguments are
+    # checked both after preflight and by the lazy rule-local decoder (``ToolCall.arguments``).
     max_nesting_depth: int = 100
+    # Aggregate object/materialization budget. Reused containers are charged per occurrence
+    # because validation and canonicalization materialize every occurrence independently.
     max_total_size: int = 50_000_000  # 50MB
     max_timeline_items: int = 10_000
     max_comprehension_size: int = 10_000
@@ -164,27 +166,27 @@ def json_size(value: Any, limit: int) -> int:
             # A colon before a dict's value, a comma before any other item but the first.
             total += 1
         frame[2] += 1
-        if isinstance(current, str):
+        if issubclass(type(current), str):
             # A string's UTF-8 bytes are at least its length; skip encoding one that is over.
-            if len(current) > limit - total:
+            if str.__len__(cast(str, current)) > limit - total:
                 return limit + 1
-            total += json_string_size(current)
+            total += json_string_size(str.__str__(current))
         elif current is True or current is None:
             total += 4
         elif current is False:
             total += 5
-        elif isinstance(current, int):
+        elif type(current) is int:
             # Its digits and sign; a number too long to print is over any budget.
             digits = abs(current).bit_length() * 30103 // 100000
             total += len(str(current)) if digits < 4000 else limit + 1
-        elif isinstance(current, float):
+        elif type(current) is float:
             total += len(_json_float(current))
-        elif isinstance(current, dict):
+        elif type(current) is dict:
             total += 2
             stack.append([(item for pair in current.items() for item in pair), True, 0])
-        elif isinstance(current, list | tuple):
+        elif type(current) in {list, tuple}:
             total += 2
-            stack.append([iter(current), False, 0])
+            stack.append([iter(cast(list[Any] | tuple[Any, ...], current)), False, 0])
         if total > limit or len(stack) > _MAX_JSON_DEPTH:
             return limit + 1
     return total
