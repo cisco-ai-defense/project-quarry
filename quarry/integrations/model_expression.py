@@ -54,13 +54,13 @@ from quarry.integrations.content_transforms import (
     apply_content_transform,
     compiled_content_transform,
 )
+from quarry.integrations.message_readability import require_model_messages
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.adapter_transforms import (
     adapter_transform_reference,
     adapter_transform_reference_parts,
 )
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
-from quarry.types.media import require_readable_media
 from quarry.types.messages import Message, Messages, _synthetic_key
 from quarry.types.text_resources import TextRef
 
@@ -989,7 +989,7 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     # split context, before handing control to host code.
     for argument in arguments:
         if isinstance(argument, Messages):
-            await require_readable_media(argument)
+            await require_model_messages(argument)
 
     if operation == "score":
         messages, constitution, *optional = arguments
