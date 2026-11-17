@@ -578,15 +578,31 @@ class _Answer:
     value: float | None
 
 
+def _answered_steps(path: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return every answered path and exploration step in report order."""
+
+    return [*path["path"], *path.get("exploration", {}).get("off_path", ())]
+
+
+def decision_scores(path: Mapping[str, Any]) -> dict[str, float | None]:
+    """Project the score values needed for threshold analysis from a decision path."""
+
+    return {
+        entry["node"]: entry["score"]["value"]
+        for entry in _answered_steps(path)
+        if "score" in entry
+    }
+
+
 def _answers(path: Mapping[str, Any]) -> dict[str, _Answer]:
     """The checks a path answered, by node ID: its steps and the checks exploration scored."""
 
-    entries = [*path["path"], *path.get("exploration", {}).get("off_path", ())]
     answers: dict[str, _Answer] = {}
-    for entry in entries:
+    for entry in _answered_steps(path):
+        node_id = entry["node"].split("~", 1)[0]
         measured = entry.get("score") or entry.get("number")
         value = None if measured is None else measured["value"]
-        answers[entry["node"].split("~", 1)[0]] = _Answer(entry["outcome"], value)
+        answers[node_id] = _Answer(entry["outcome"], value)
     return answers
 
 
