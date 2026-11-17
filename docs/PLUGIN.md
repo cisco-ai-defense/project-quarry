@@ -188,7 +188,12 @@ model_cache:
 ```
 
 The cache lives in the server process, so a host keeps one server running across scans to
-benefit from it. The byte estimate and its exclusions are documented in
+benefit from its default process reuse. To release completed entries after their last active
+scan or deferred-evidence owner finishes, set `model_cache.retention: scan`. An optional
+`model_cache.reusable_categories` list keeps selected `model_responses`, `token_counts`,
+`local_transforms` or `probes` results under normal process reuse. Process and scan modes use
+separate result namespaces within the same bounds. Accepted model replies remain stable during
+their owning scan even after table eviction. See the lifecycle contract, byte estimate and exclusions in
 [Configuration](configuration.md#process-result-cache). A result larger than the byte bound is
 returned but not cached; a running call remains shared and is never evicted. A shared call is made
 under the model-call budget and deadline of the scan

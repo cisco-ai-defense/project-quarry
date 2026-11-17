@@ -20,8 +20,15 @@ from __future__ import annotations
 
 import os
 import threading
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from quarry.config import ModelCacheConfig
+
+_SCOPES: weakref.WeakValueDictionary[int, ScanResponses] = weakref.WeakValueDictionary()
 
 
 @dataclass(eq=False)
@@ -43,7 +50,7 @@ class ScanResponses:
     Merely retaining this identity token in a completed task does not retain its replies.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cache_policy: ModelCacheConfig | None = None) -> None:
         self.pid = os.getpid()
         self._lock = threading.Lock()
         self._leases = 0
@@ -51,6 +58,10 @@ class ScanResponses:
         self._replies: dict[tuple[int, bytes], _Reply] = {}
         # Revisions invalidate outstanding offers without retaining rejected raw replies.
         self._revisions: dict[tuple[int, bytes], int] = {}
+        self._retention_owner = object()
+        self._release_callbacks: dict[object, Callable[[object], None]] = {}
+        self.cache_policy = cache_policy
+        _SCOPES[id(self)] = self
 
     def retain(self) -> bool:
         if self.pid != os.getpid():
@@ -58,24 +69,63 @@ class ScanResponses:
         with self._lock:
             if not self._leases:
                 self._generation += 1
+                self._retention_owner = object()
             self._leases += 1
         return True
 
     def release(self) -> None:
         if self.pid != os.getpid():
             return
-        removed = revisions = None
+        removed = revisions = callbacks = None
+        owner = None
         with self._lock:
             self._leases -= 1
             assert self._leases >= 0
             if not self._leases:
                 removed, self._replies = self._replies, {}
                 revisions, self._revisions = self._revisions, {}
+                callbacks, self._release_callbacks = self._release_callbacks, {}
+                owner = self._retention_owner
+        if callbacks is not None:
+            for callback in callbacks.values():
+                callback(owner)
+            callbacks.clear()
         # Dropping a user reply can run its destructor. Never do so under our lock.
         if removed is not None:
             removed.clear()
         if revisions is not None:
             revisions.clear()
+
+    def retention_owner(self, generation: int | None) -> object | None:
+        """A process-local generation token, without retaining this scope in a cache."""
+        if self.pid != os.getpid():
+            return None
+        with self._lock:
+            return (
+                self._retention_owner if self._leases and generation == self._generation else None
+            )
+
+    def on_release(
+        self, generation: int | None, namespace: object, callback: Callable[[object], None]
+    ) -> object | None:
+        """Register one internal cleanup per cache and scan generation."""
+        if self.pid != os.getpid():
+            return None
+        with self._lock:
+            if not self._leases or generation != self._generation:
+                return None
+            self._release_callbacks.setdefault(namespace, callback)
+            return self._retention_owner
+
+    def _reset_after_fork(self) -> None:
+        self._lock = threading.Lock()
+        self._leases = 0
+        self._generation += 1
+        self._retention_owner = object()
+        self._replies = {}
+        self._revisions = {}
+        self._release_callbacks = {}
+        self.pid = os.getpid()
 
     def generation(self) -> int | None:
         if self.pid != os.getpid():
@@ -143,6 +193,17 @@ class ScanResponses:
                 identity = (id(entry.namespace), entry.key)
                 if self._replies.get(identity) is entry:
                     del self._replies[identity]
+
+
+def _reset_scopes_after_fork() -> None:
+    scopes = tuple(_SCOPES.values())
+    removed = [(scope._replies, scope._revisions, scope._release_callbacks) for scope in scopes]
+    for scope in scopes:
+        scope._lock = threading.Lock()
+    for scope in scopes:
+        ScanResponses._reset_after_fork(scope)
+    # Every scope and cache is fresh before a raw reply's destructor can re-enter one.
+    removed.clear()
 
 
 class ScanLease:
