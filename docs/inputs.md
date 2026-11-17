@@ -61,6 +61,10 @@ different input objects stays distinct. Local text transforms map detections bac
 their character provenance while extraction from the selected message retains its current
 text. A model's message indices always refer to its selected input order.
 
+Span searches follow each selected occurrence, including different transformed copies of
+one source message. Indexed `.content` and `.result` sources retain their owning selection;
+reading message content alone does not decode its tool arguments.
+
 Compiler identity is 21 with compiled-policy format 9 unchanged. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 

@@ -1165,22 +1165,28 @@ def _conversation_positions(transcript: Messages) -> dict[int, int]:
     return positions
 
 
-def _view_source_texts(transcript: Messages, view: Messages) -> list[SourceText]:
+def _view_source_texts(
+    transcript: Messages, view: Messages, *, include_calls: bool = True
+) -> list[SourceText]:
     """Locate the text of every selected message in the scanned chat or an input."""
 
     located = []
     positions = _conversation_positions(transcript)
-    for ordinal in view._ordinals:
-        message = view._message_at(ordinal)
+    for position, message in enumerate(view):
+        ordinal = view._ordinals[position]
         origin = view._root._origins[ordinal]
         if origin is None:
-            if not view.shares_root_with(transcript):
+            if not view.shares_source_with(transcript):
                 raise ValueError("a string's spans read only text of the scanned input")
+            if ordinal >= len(transcript._root._items):
+                raise ValueError("a string's spans need a canonical source message")
             original = transcript._root._items[ordinal]
+            if view._root._items[ordinal] is not original:
+                raise ValueError("a string's spans need a canonical source message")
             origin = Place(positions[id(original)], "", 0, original)
         origin = message_origin(message, origin)
         located.append(SourceText(message.content, origin, ordinal))
-        if view.shares_root_with(transcript):
+        if include_calls and view.shares_root_with(transcript):
             for call in getattr(message, "tool_calls", ()):
                 position = positions[id(call)]
                 located.extend(
@@ -1219,7 +1225,7 @@ async def _span_source_texts(
             )
         return texts
     if text_source.kind == "span_text":
-        owner = await evaluate_model_expression(
+        owner, selection = await _evaluate_owned_value(
             text_source.children[0],
             context,
             event=event,
@@ -1232,14 +1238,10 @@ async def _span_source_texts(
         field = str(text_source.value)
         transcript = context.conversation.messages
         positions = _conversation_positions(transcript)
-        if isinstance(owner, Message) and field in {"content", "result"} and id(owner) in positions:
-            return [
-                SourceText(
-                    owner.content,
-                    Place(positions[id(owner)], "", 0, owner),
-                    owner.message_index,
-                )
-            ]
+        if isinstance(owner, Message) and field in {"content", "result"}:
+            if selection is None:
+                raise ValueError("a string's spans need the message's owning selection")
+            return _view_source_texts(transcript, selection, include_calls=False)
         if isinstance(owner, ToolCall) and id(owner) in positions:
             position = positions[id(owner)]
             return [
