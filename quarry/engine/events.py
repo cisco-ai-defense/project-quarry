@@ -42,10 +42,11 @@ word is always built over the whole transcript.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Set
+from collections.abc import Callable, Iterator, Mapping, Set
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from quarry.language.runtime import surface_names
 from quarry.types.messages import Message, ToolCall, ToolMessage
@@ -124,6 +125,50 @@ class ConversationEvent:
         return None
 
 
+_Value = TypeVar("_Value")
+
+
+class _DeferredMapping(Mapping[str, _Value]):
+    """Resolve one immutable aggregate only when an atom reads it."""
+
+    def __init__(self, load: Callable[[], Mapping[str, _Value]]):
+        self._load = load
+        self._resolved: Mapping[str, _Value] | None = None
+
+    def _value(self) -> Mapping[str, _Value]:
+        if self._resolved is None:
+            self._resolved = self._load()
+        return self._resolved
+
+    def __getitem__(self, key: str) -> _Value:
+        return self._value()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._value())
+
+    def __len__(self) -> int:
+        return len(self._value())
+
+
+class _SurfaceSizes(Mapping[str, int]):
+    """Memoize each surface independently so one faulty surface cannot poison another."""
+
+    def __init__(self, load: Mapping[str, Callable[[], int]]):
+        self._load = MappingProxyType(dict(load))
+        self._resolved: dict[str, int] = {}
+
+    def __getitem__(self, key: str) -> int:
+        if key not in self._resolved:
+            self._resolved[key] = self._load[key]()
+        return self._resolved[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._load)
+
+    def __len__(self) -> int:
+        return len(self._load)
+
+
 @dataclass(frozen=True)
 class StaticEnvironment:
     """Zero-width data available to every event — never part of the temporal word.
@@ -134,7 +179,7 @@ class StaticEnvironment:
     stay zero-width in later phases.
     """
 
-    tools: dict[str, Any]  # name -> Tool
+    tools: Mapping[str, Any]  # name -> Tool, deferred until read
     system_prompt: str | None
     limits: Any = None  # SafetyLimits handle (opaque here)
     was_truncated: bool = False
@@ -143,7 +188,7 @@ class StaticEnvironment:
     # count — so they are grounded here once at the boot step (see the compiler's
     # surface-count macro), which scales to any N with a single atom rather than an
     # N-state temporal counter.
-    surface_sizes: dict[str, int] = field(default_factory=dict)
+    surface_sizes: Mapping[str, int] = field(default_factory=dict)
     # Per-name tool-call counts (``count_tool_calls("x")`` / ``len(get_tool_calls("x"))``):
     # a name-filtered collection-size aggregate, same zero-width treatment.
     tool_call_name_counts: dict[str, int] = field(default_factory=dict)
@@ -152,6 +197,9 @@ class StaticEnvironment:
     # read responses, not calls — an agent can call a tool without a paired
     # response (or vice-versa), so the two aggregates genuinely differ.
     tool_response_name_counts: dict[str, int] = field(default_factory=dict)
+    # Diagnostic metadata, never used to answer a rule's size comparison. Explanations
+    # can describe skipped tool atoms without semantically reading faulty definitions.
+    tool_count: int | None = None
 
     def has_tool(self, name: str) -> bool:
         """Return whether the static environment has a tool with the given name."""
@@ -315,11 +363,15 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     tool_responses = conv.tool_responses
     # Per-surface sizes, taken from the Conversation collections so they match exactly
     # what a rule's ``len(messages)`` / ``count(user_messages)`` sees.
-    surface_sizes = {
-        surface: len(getattr(conv, surface)) for surface in surface_names(domain="event")
+    size_readers: dict[str, Callable[[], int]] = {
+        surface: lambda surface=surface: len(getattr(conv, surface))
+        for surface in surface_names(domain="event")
     }
-    # Static surfaces are not timeline collections, but count/len use their ordinary sizes.
-    surface_sizes.update({"tools": len(conv.tools), "system_prompt": len(conv.system_prompt or "")})
+    # Deferring each key matters: len(messages) must not read offered tools.
+    size_readers.update(
+        tools=lambda: len(conv.tools), system_prompt=lambda: len(conv.system_prompt or "")
+    )
+    surface_sizes = _SurfaceSizes(size_readers)
     tool_call_name_counts: dict[str, int] = {}
     for tc in conv.tool_calls:
         tool_call_name_counts[tc.name] = tool_call_name_counts.get(tc.name, 0) + 1
@@ -328,13 +380,14 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
         name = cast(ToolMessage, tr).name
         tool_response_name_counts[name] = tool_response_name_counts.get(name, 0) + 1
     return StaticEnvironment(
-        tools={tool.name: tool for tool in conv.tools},
+        tools=_DeferredMapping(conv._tool_index),
         system_prompt=conv.system_prompt,
         limits=context.limits,
         was_truncated=context.was_truncated,
         surface_sizes=surface_sizes,
         tool_call_name_counts=tool_call_name_counts,
         tool_response_name_counts=tool_response_name_counts,
+        tool_count=len(conv._tools),
     )
 
 

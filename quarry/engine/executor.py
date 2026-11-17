@@ -64,7 +64,7 @@ from quarry.engine.exceptions import UnsupportedExecution
 from quarry.engine.oracle import BOOT, Oracle
 from quarry.engine.pacing import Pacer
 from quarry.engine.symbolic_dfa import GuardNode
-from quarry.types.exceptions import EvaluationError, EvaluationTimeoutError
+from quarry.types.exceptions import EvaluationError, EvaluationTimeoutError, InvalidInputError
 
 _Transition = tuple[int, int, bool, dict[str, bool], int]
 # A nested tool check and the body occurrences its Boolean proof used.
@@ -475,11 +475,12 @@ def _model_results_for_witness(oracle, artifact, events, trace, captured_value) 
     if attempt is None:
         return ()
     by_position = {event.position: event for event in events}
-    tools = list(oracle._static.tools.values()) if oracle._static else []
+    tools = None
     seen: set[int] = set()
     results = []
 
     def add_evidence(evaluation: AtomEvaluation, tool_index: int | None) -> None:
+        nonlocal tools
         if not evaluation.witness:
             return
         spec = artifact.atom_specs.get(evaluation.atom_id)
@@ -489,8 +490,14 @@ def _model_results_for_witness(oracle, artifact, events, trace, captured_value) 
         if where is None:
             return
         binding = captured_value if spec.parameter_names else None
-        if _is_per_tool_static(spec) and tool_index is not None and tool_index < len(tools):
-            evidence = oracle.evidence_for_tool(spec, tools[tool_index], binding)
+        if _is_per_tool_static(spec) and tool_index is not None:
+            if tools is None:
+                tools = list(oracle._static.tools.values()) if oracle._static else []
+            evidence = (
+                oracle.evidence_for_tool(spec, tools[tool_index], binding)
+                if tool_index < len(tools)
+                else None
+            )
         else:
             evidence = oracle.evidence_for(spec, where, binding)
         if isinstance(evidence, _witness.ModelResultEvidence) and id(evidence) not in seen:
@@ -791,7 +798,6 @@ def _explore_targets(artifact, evaluation_input, known, held, *, full: bool) -> 
     parts = artifact_parts(artifact)
     leaves = _witness.explained_atoms(artifact, parts)
     tool_body_atoms = {atom_id for body in parts.tool_bodies.values() for atom_id in body}
-    tools = list((evaluation_input.static.tools or {}).values())
     for atom_id in leaves:
         spec = artifact.atom_specs[atom_id]
         if spec.domain is AtomDomain.EVENT:
@@ -804,7 +810,14 @@ def _explore_targets(artifact, evaluation_input, known, held, *, full: bool) -> 
             # A recorded tool value is one tool's, and the verdict stops at the tool that
             # decides it, so only a tool that held settles the atom.
             if (atom_id, None) not in held:
-                targets += [_Target(atom_id, tool, None, tool=True) for tool in tools]
+                try:
+                    tools = list(evaluation_input.static.tools.values())
+                except InvalidInputError:
+                    # Exploration must record a failed speculative read as unknown;
+                    # grounding at BOOT performs the read inside its exception boundary.
+                    targets.append(_Target(atom_id, BOOT, None))
+                else:
+                    targets += [_Target(atom_id, tool, None, tool=True) for tool in tools]
         elif (atom_id, None) in known:
             continue
         else:

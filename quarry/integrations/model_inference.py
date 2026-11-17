@@ -87,6 +87,7 @@ from quarry.types.exceptions import (
     MODEL_REFUSED,
     ConfigurationError,
     ConversationValidationError,
+    InvalidInputError,
     LLMError,
     ModelError,
     QuarryError,
@@ -98,6 +99,7 @@ from quarry.types.messages import (
     Tool,
     ToolCallTypeRegistry,
     messages_digest,
+    tools_fault,
     wire_digest,
 )
 from quarry.types.results import (
@@ -138,6 +140,7 @@ def _as_conversation(source: ModelInput) -> Conversation:
 
     if isinstance(source, Messages):
         return Conversation._from_parts(source)
+    source._read_tools()
     return source
 
 
@@ -153,6 +156,7 @@ def _split_source(
 
     if isinstance(source, Messages):
         return source, _message_dicts(source), []
+    source._read_tools()
     return source.messages, _message_dicts(source.messages), source.raw_tools
 
 
@@ -214,6 +218,9 @@ def _tool_dicts(tools: Sequence[Tool] | None) -> list[dict[str, Any]]:
         return []
     if not all(isinstance(tool, Tool) for tool in tools):
         raise TypeError("tools must contain Tool objects")
+    fault = tools_fault(tools)
+    if fault is not None:
+        raise InvalidInputError(fault)
     return [tool.to_openai_dict() for tool in tools]
 
 

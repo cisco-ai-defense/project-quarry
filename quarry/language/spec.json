@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-14",
+  "compiler_version": "compiler-15",
   "examples": [
     {
       "checks": [],
@@ -3149,7 +3149,7 @@
           "type": "object"
         },
         {
-          "description": "Offered tool type; currently `function`.",
+          "description": "Offered tool type; rules read named function tools.",
           "name": "type",
           "type": "string"
         }

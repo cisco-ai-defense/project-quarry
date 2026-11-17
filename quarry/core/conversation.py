@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from quarry.language.metadata import DSLParameter, Use, dsl_function, dsl_surface
 from quarry.safety.validator import validate_conversation
-from quarry.types.exceptions import ConversationValidationError
+from quarry.types.exceptions import ConversationValidationError, InvalidInputError
 from quarry.types.messages import (
     Message,
     Messages,
@@ -41,6 +41,7 @@ from quarry.types.messages import (
     ToolCall,
     ToolCallTypeRegistry,
     ToolMessage,
+    tools_fault,
 )
 
 
@@ -51,6 +52,7 @@ class Conversation:
         "messages",
         "_tools",
         "_tools_by_name",
+        "_tools_fault",
         "_tools_supplied",
         "_sealed",
     )
@@ -166,8 +168,25 @@ class Conversation:
             raise ConversationValidationError(f"Invalid OpenAI tool definition: {exc}") from exc
         self._tools = canonical_tools
         self._tools_by_name = MappingProxyType({tool.name: tool for tool in self._tools})
-        if len(self._tools_by_name) != len(self._tools):
-            raise ConversationValidationError("Tool definitions must have unique function names")
+        self._tools_fault = tools_fault(canonical_tools)
+
+    @property
+    def tools_fault(self) -> str | None:
+        """Return a diagnostic while leaving wire inspection available."""
+
+        return self._tools_fault
+
+    def _read_tools(self) -> None:
+        """Attribute an unreadable offered collection to the rule that uses it."""
+
+        if self._tools_fault is not None:
+            raise InvalidInputError(self._tools_fault)
+
+    def _tool_index(self) -> Mapping[str, Tool]:
+        """Read the already-built immutable index without projecting another tool list."""
+
+        self._read_tools()
+        return self._tools_by_name
 
     @property
     @dsl_surface(
@@ -184,6 +203,7 @@ class Conversation:
         indicate that the assistant actually called any of those tools.
         """
 
+        self._read_tools()
         return list(self._tools)
 
     @property
@@ -272,6 +292,7 @@ class Conversation:
     def tool_by_name(self, name: str) -> Tool | None:
         """Return the offered tool with this exact name, if present."""
 
+        self._read_tools()
         return self._tools_by_name.get(name)
 
     @dsl_function(
@@ -283,6 +304,7 @@ class Conversation:
         This checks the request's tool definitions, not the tool calls made by the assistant.
         """
 
+        self._read_tools()
         return name in self._tools_by_name
 
     @dsl_function(
@@ -298,6 +320,7 @@ class Conversation:
         the tools.
         """
 
+        self._read_tools()
         return all(name in self._tools_by_name for name in names)
 
     def called_tool(self, name: str) -> bool:
@@ -398,6 +421,7 @@ class Conversation:
         conversation._tools_supplied = bool(tools) if tools_supplied is None else tools_supplied
         conversation.messages = messages
         conversation._tools = tuple(tools)
+        conversation._tools_fault = tools_fault(conversation._tools)
         conversation._tools_by_name = MappingProxyType(
             {tool.name: tool for tool in conversation._tools}
         )
