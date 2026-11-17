@@ -2040,13 +2040,18 @@ class Messages(Sequence[MessageType]):
                 if key is not None and piece is None:
                     piece = selected
                 if piece is not None:
-                    if key is not None and piece.message_index != mapped:
+                    remap_rewrite = (
+                        key is not None and piece._rewrite_source is part._root._items[ordinal]
+                    )
+                    if key is not None and (piece.message_index != mapped or remap_rewrite):
                         yield from _charge_combine_steps(
                             meter,
                             "message_clone_visits",
                         )
                         piece = piece.model_copy()
                         object.__setattr__(piece, "_message_index", mapped)
+                        if remap_rewrite:
+                            object.__setattr__(piece, "_rewrite_source", items[mapped])
                     mapped_segments[mapped] = piece
             specifications.append((part, tuple(mapped_ordinals), mapped_segments))
 
