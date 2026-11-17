@@ -45,7 +45,7 @@ from quarry.integrations.content_transforms import (
 from quarry.integrations.shared_transforms import TRANSFORM_BATCH_SIZE, transform_input_size
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.media import require_readable_media
-from quarry.types.messages import Messages, _project_json, _synthetic_key
+from quarry.types.messages import Messages, UnreadableMessage, _project_json, _synthetic_key
 from quarry.types.transforms import (
     MAX_TRANSFORM_INPUT_CHARACTERS,
     MAX_TRANSFORM_MAPPING_SEGMENTS,
@@ -151,9 +151,16 @@ async def apply_adapter_transform(
     if not selected:
         await require_readable_media(messages, rewritable_only=True)
         return await backend.transform_messages(name, messages)
-    await require_readable_media(messages, selected)
+    # Unreadable holders stay opaque in the result. A later field read decides
+    # whether they matter; a transform must not read them merely to reach another item.
+    readable = messages._view_positions(
+        position
+        for position, message in enumerate(messages)
+        if not isinstance(message, UnreadableMessage)
+    )
+    await require_readable_media(readable, selected)
     meter = _OperationMeter(_metrics if _metrics is not None else _TransformMetrics())
-    unique = {id(message): message for message in messages}
+    unique = {id(message): message for message in readable}
     input_characters = sum(len(message.content) for message in unique.values())
     if input_characters > MAX_TRANSFORM_INPUT_CHARACTERS:
         raise transform_error(
