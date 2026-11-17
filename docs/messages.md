@@ -281,3 +281,7 @@ exhausting it omits details without changing the verdict. A policy may contain a
 computed child plans, with at most 16 computed frames along a nesting path.
 Snapshot admission also has a 4,096-reference work limit per child; reaching it omits
 optional child details while preserving the verdict.
+
+Decision reports include the models and text resources used by a computed source or child
+condition. Changing a model or text changes its decision-node identity; moving only a model's
+serving location changes the path's configuration digest while preserving the node identity.
