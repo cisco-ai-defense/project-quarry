@@ -3258,12 +3258,15 @@ class Messages(Sequence[MessageType]):
         request.
         """
 
+        candidates = self._root._calls_by_name.get(name, ())
         if self._is_root_view():
-            if self._root._calls_by_name.get(name):
-                return True
-            self._read_call_names()
-            return False
-        return any(call.name == name for call in self.tool_calls)
+            found = bool(candidates)
+        else:
+            found = any(self._contains_root_ordinal(call.message_index) for call in candidates)
+        if found:
+            return True
+        self._read_call_names()
+        return False
 
     @dsl_function(
         allowed_uses=(Use.CONDITION, Use.FLOW_OPERAND, Use.COMPREHENSION_BODY),

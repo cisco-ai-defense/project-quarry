@@ -50,6 +50,9 @@ preserved as an unreadable call. It retains its wire data, transcript position a
 Rules can count calls or read unrelated message/result text. Reading an unreadable call's fields
 or sending its containing message to a model fails with `invalid_input`. Exact named counts
 also require readable call names.
+A known readable name remains a positive `called_tool()` match in selected message views,
+regardless of whether an unreadable call appears first. Exact counts and collections still
+require readable names; a readable match outside the selection does not satisfy the lookup.
 Raw host serialization remains available; rule field guards also protect ID and type reads.
 Whole-message rewrites skip a message containing an unreadable call, while text-part transforms
 can process its message text and retain its links. Omitted/wrong-type names remain structural
