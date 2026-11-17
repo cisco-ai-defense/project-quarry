@@ -28,6 +28,7 @@ MAX_EXPECTED_CHOICES = 12
 MAX_UNEXPECTED_CHARACTERS = 80
 
 _TERMINAL_LABELS = {
+    "ARG_NAME": "an argument name",
     "IDENTIFIER": "a name",
     "METADATA_KEY": "a metadata key",
     "MODIFIER": "a string modifier",

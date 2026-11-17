@@ -18,7 +18,7 @@
 
 import pytest
 from lark import Lark
-from lark.exceptions import UnexpectedCharacters
+from lark.exceptions import UnexpectedCharacters, UnexpectedInput
 
 from quarry.dsl.parser import DSLParser
 from quarry.dsl.syntax_errors import (
@@ -171,6 +171,21 @@ invalid rule syntax here
 
         with pytest.raises(ValueError, match="UNLABELLED"):
             validate_terminal_labels(parser)
+
+    def test_argument_name_terminal_has_a_syntax_label(self):
+        parser = Lark(
+            'start: ARG_NAME "=" VALUE\n'
+            'ARG_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/\n'
+            'VALUE: "value"',
+            parser="lalr",
+        )
+        validate_terminal_labels(parser)
+
+        with pytest.raises(UnexpectedInput) as raised:
+            parser.parse("= value")
+
+        message = format_syntax_error(raised.value, "= value", parser)
+        assert "an argument name" in message
 
     def test_syntax_error_output_is_bounded_and_escapes_control_characters(self):
         long_name = "x" * 200
