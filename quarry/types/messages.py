@@ -23,6 +23,7 @@ import json
 import math
 import re
 import sys
+from bisect import bisect_left
 from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import getattr_static
@@ -40,6 +41,7 @@ from quarry.language.metadata import (
     dsl_surface,
 )
 from quarry.types.exceptions import ConversationValidationError, EvaluationError, InvalidInputError
+from quarry.types.message_links import LinkEvent, resolve_links
 from quarry.types.results import Span
 from quarry.types.transforms import (
     ContentSourcePart,
@@ -694,6 +696,9 @@ class Message(OpenAIObject):
                     _raise_if_combine_expired()
                 if isinstance(call, UnreadableToolCall):
                     raise InvalidInputError(call.fault)
+                call.guard_read("id")
+        elif isinstance(self, ToolMessage):
+            self.guard_read("call")
 
     def contains(self, text: str, case_sensitive: bool = False) -> bool:
         """Return whether flattened text contains ``text``."""
@@ -729,6 +734,12 @@ class UserMessage(Message):
 
     role: Literal["user"]  # ty: ignore[invalid-mutable-override]
     source_content: str | tuple[Any, ...] = Field(alias="content")
+    tool_call_id: str | None = None
+    DSL_FIELDS: ClassVar[frozenset[str]] = Message.DSL_FIELDS | {"tool_call_id"}
+    DSL_FIELD_METADATA: ClassVar[tuple[SurfaceFieldMetadata, ...]] = (
+        *Message.DSL_FIELD_METADATA,
+        SurfaceFieldMetadata("tool_call_id", "string | null", "Optional sender-supplied call ID."),
+    )
 
 
 class ToolCallFunction(OpenAIObject):
@@ -770,16 +781,28 @@ class ToolCall(OpenAIObject):
         ),
     )
 
-    id: str
+    id: str | None = None
     type: Literal["function"]
     function: ToolCallFunction
 
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
     _arguments_error: str | None = PrivateAttr(default=None)
     _call_index: int = PrivateAttr(default=-1)
+    _id_error: str | None = PrivateAttr(default=None)
+    _response_error: str | None = PrivateAttr(default=None)
 
     def guard_read(self, field: str) -> None:
-        """Hook for rule field access; structurally exact regular calls are readable."""
+        error = (
+            self._id_error
+            if field == "id"
+            else self._response_error
+            if field == "response"
+            else None
+        )
+        if error is not None:
+            raise InvalidInputError(
+                f"messages[{self.message_index}].tool_calls[{self._call_index}]: {error}"
+            )
 
     def _readable_for_rewrite(self) -> bool:
         """Whether a containing message may be handed to a whole-message adapter."""
@@ -931,7 +954,7 @@ class ToolMessage(Message):
 
     role: Literal["tool"]  # ty: ignore[invalid-mutable-override]
     source_content: str | tuple[Any, ...] = Field(alias="content")
-    tool_call_id: str
+    tool_call_id: str | None = None
     DSL_FIELDS: ClassVar[frozenset[str]] = Message.DSL_FIELDS | {
         "tool_call_id",
         "call",
@@ -953,20 +976,30 @@ class ToolMessage(Message):
     )
 
     _call: ToolCall | None = PrivateAttr(default=None)
+    _link_error: str | None = PrivateAttr(default=None)
+
+    def guard_read(self, field: str) -> None:
+        if field in {"tool_call_id", "id", "call", "name"}:
+            if self._link_error is not None or self._call is None:
+                raise InvalidInputError(
+                    f"messages[{self.message_index}]: tool result has no exact call link"
+                )
+            if field == "name" and isinstance(self._call, UnreadableToolCall):
+                raise InvalidInputError(self._call.fault)
 
     @property
     def call(self) -> ToolCall:
         """Return the exact canonical call answered by this message."""
 
         if self._call is None:
-            raise ConversationValidationError(
-                f"Tool message references unknown tool_call_id '{self.tool_call_id}'"
+            raise InvalidInputError(
+                f"messages[{self.message_index}]: tool result has no exact call link"
             )
         return self._call
 
     @property
-    def id(self) -> str:
-        """Compatibility alias for ``tool_call_id``."""
+    def id(self) -> str | None:
+        """Compatibility alias for the raw ``tool_call_id``."""
 
         return self.tool_call_id
 
@@ -981,6 +1014,101 @@ class ToolMessage(Message):
         """Compatibility alias for flattened tool-result text."""
 
         return self.content
+
+
+def message_fault(raw: Mapping[str, Any]) -> str | None:
+    role = raw.get("role")
+    if role not in Message.VALID_ROLES:
+        return "unsupported message role"
+    allowed = {"role", "content"}
+    if role == "assistant":
+        allowed.update(("tool_calls", "refusal"))
+    elif role in {"user", "tool"}:
+        allowed.add("tool_call_id")
+    if any(key not in allowed for key in raw):
+        return "message contains fields belonging to another role"
+    return None
+
+
+class UnreadableMessage(Message):
+    """An immutable sender value whose role and position remain available."""
+
+    role: str
+    source_content: Any = Field(default=None, alias="content")
+    refusal: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
+    _fault: str = PrivateAttr(default="unreadable message")
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: str) -> str:
+        return value
+
+    @property
+    def fault(self) -> str:
+        return f"messages[{self.message_index}]: {self._fault}"
+
+    def guard_read(self, field: str) -> None:
+        if field in {
+            "content",
+            "content_parts",
+            "openai_content",
+            "refusal",
+            "tool_calls",
+            "tool_call_id",
+            "call",
+            "name",
+            "result",
+            "id",
+        }:
+            raise InvalidInputError(self.fault)
+
+    @property
+    def content(self) -> str:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def content_parts(self) -> list[ContentPart]:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def openai_content(self) -> Any:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def name(self) -> str:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def result(self) -> str:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def call(self) -> ToolCall:
+        raise InvalidInputError(self.fault)
+
+    def _readable_for_rewrite(self) -> bool:
+        return False
+
+    def _require_model_readable(self) -> None:
+        raise InvalidInputError(self.fault)
+
+    def place_texts(self) -> tuple[tuple[str, str], ...]:
+        raw = self.source_content
+        if isinstance(raw, str):
+            return (("content", raw),)
+        return ()
+
+
+def calls_of(message: Message) -> tuple[ToolCall, ...]:
+    return message.tool_calls if isinstance(message, (AssistantMessage, UnreadableMessage)) else ()
+
+
+def _call_slot(call: ToolCall) -> tuple[int, int]:
+    """Identify a source call independently of its optional, reusable wire ID."""
+
+    return call.message_index, call._call_index
 
 
 class ToolFunction(OpenAIObject):
@@ -1049,7 +1177,14 @@ def tools_fault(tools: Sequence[Tool]) -> str | None:
     return None
 
 
-MessageType = SystemMessage | DeveloperMessage | UserMessage | AssistantMessage | ToolMessage
+MessageType = (
+    SystemMessage
+    | DeveloperMessage
+    | UserMessage
+    | AssistantMessage
+    | ToolMessage
+    | UnreadableMessage
+)
 ToolCallTypeRegistry = Mapping[tuple[str, str], type[ToolCall]]
 _MAX_COMBINED_MESSAGE_PARTS = 256
 _MAX_COMBINED_MESSAGES = 10_000
@@ -1155,14 +1290,6 @@ class _CanonicalToolUnit:
     call: ToolCall
     response_ordinal: int | None = None
     response: ToolMessage | None = None
-
-
-def _require_tool_identity(value: object, owner: str) -> str:
-    """Return one stable non-empty tool ID or reject a corrupted variant."""
-
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{owner} must have a non-empty string tool identity")
-    return value
 
 
 def _same_tool_call_identity(left: ToolCall, right: ToolCall) -> bool:
@@ -1578,32 +1705,37 @@ class Messages(Sequence[MessageType]):
         for message_index, raw_message in enumerate(raw_messages):
             payload = dict(raw_message)
             role = raw_message["role"]
-            if role == "assistant":
+            fault = message_fault(raw_message)
+            if "tool_calls" in raw_message:
                 calls: list[ToolCall] = []
-                for raw_call in raw_message.get("tool_calls", []):
+                for raw_call in raw_message["tool_calls"]:
                     function = raw_call["function"]
-                    fault = call_fault(raw_call)
+                    call_error = fault or call_fault(raw_call)
                     call_class = (
                         UnreadableToolCall
-                        if fault is not None
+                        if call_error is not None
                         else registry.get((str(raw_call["type"]), str(function["name"])), ToolCall)
                     )
                     call = call_class.model_validate(raw_call, strict=True)
-                    if fault is not None:
-                        object.__setattr__(call, "_fault", fault)
+                    if call_error is not None:
+                        object.__setattr__(call, "_fault", call_error)
                     calls.append(call)
-                if "tool_calls" in raw_message:
-                    payload["tool_calls"] = tuple(calls)
-                message_class: type[MessageType] = AssistantMessage
-            else:
-                message_class = {
+                payload["tool_calls"] = tuple(calls)
+            message_class = (
+                UnreadableMessage
+                if fault is not None
+                else {
                     "system": SystemMessage,
                     "developer": DeveloperMessage,
                     "user": UserMessage,
+                    "assistant": AssistantMessage,
                     "tool": ToolMessage,
                 }[role]
+            )
             message = message_class.model_validate(payload, strict=True)
             object.__setattr__(message, "_message_index", message_index)
+            if fault is not None:
+                object.__setattr__(message, "_fault", fault)
             items.append(message)
 
         root = cls()
@@ -1653,22 +1785,29 @@ class Messages(Sequence[MessageType]):
         the bidirectional call/response links to the same values, so it is safe both for freshly
         validated messages and for reused ones (:meth:`_from_items`)."""
 
-        call_by_id: dict[str, ToolCall] = {}
-        response_by_id: dict[str, ToolMessage] = {}
+        events = []
         for message in root._items:
-            if isinstance(message, AssistantMessage):
-                for call_index, call in enumerate(message.tool_calls):
-                    object.__setattr__(call, "_message_index", message.message_index)
-                    object.__setattr__(call, "_call_index", call_index)
-                    object.__setattr__(call, "_max_nesting_depth", max_nesting_depth)
-                    call_by_id[call.id] = call
-            elif isinstance(message, ToolMessage):
-                response_by_id[message.tool_call_id] = message
-
-        for call_id, response in response_by_id.items():
-            call = call_by_id[call_id]
-            object.__setattr__(call, "_response", response)
-            object.__setattr__(response, "_call", call)
+            if message.role == "tool":
+                events.append(
+                    LinkEvent(
+                        "result", message, message.tool_call_id, isinstance(message, ToolMessage)
+                    )
+                )
+            for call_index, call in enumerate(calls_of(message)):
+                object.__setattr__(call, "_message_index", message.message_index)
+                object.__setattr__(call, "_call_index", call_index)
+                object.__setattr__(call, "_max_nesting_depth", max_nesting_depth)
+                events.append(LinkEvent("call", call, call.id))
+        links = resolve_links(events, _raise_if_combine_expired)
+        for event in events:
+            value, identity = event.value, id(event.value)
+            if event.kind == "call":
+                object.__setattr__(value, "_id_error", links.call_faults.get(identity))
+                object.__setattr__(value, "_response_error", links.response_faults.get(identity))
+                object.__setattr__(value, "_response", links.responses.get(identity))
+            elif isinstance(value, ToolMessage):
+                object.__setattr__(value, "_link_error", links.result_faults.get(identity))
+                object.__setattr__(value, "_call", links.calls.get(identity))
 
         ordinals_by_role: dict[str, list[int]] = {}
         calls_by_name: dict[str, list[ToolCall]] = {}
@@ -1678,15 +1817,15 @@ class Messages(Sequence[MessageType]):
         unreadable_responses: list[ToolMessage] = []
         for message in root._items:
             ordinals_by_role.setdefault(message.role, []).append(message.message_index)
-            if isinstance(message, AssistantMessage):
-                for call in message.tool_calls:
+            if isinstance(message, (AssistantMessage, UnreadableMessage)):
+                for call in calls_of(message):
                     all_calls.append(call)
                     if isinstance(call, UnreadableToolCall):
                         unreadable_calls.append(call)
                     else:
                         calls_by_name.setdefault(call.name, []).append(call)
-            elif isinstance(message, ToolMessage):
-                if isinstance(message._call, UnreadableToolCall):
+            if isinstance(message, ToolMessage):
+                if message._link_error is not None or isinstance(message._call, UnreadableToolCall):
                     unreadable_responses.append(message)
                 else:
                     responses_by_name.setdefault(message.name, []).append(message)
@@ -2036,7 +2175,13 @@ class Messages(Sequence[MessageType]):
         if len(wires) != len(selected):
             raise ValueError("message rewrite must return one message per input")
         overrides: dict[int, MessageType] = {}
-        calls = {call.id: call for call in self._root._all_calls if call._readable_for_rewrite()}
+        calls: dict[str, list[ToolCall]] = {}
+        call_positions: dict[str, list[int]] = {}
+        for call in self._root._all_calls:
+            yield
+            if call.id and call._id_error is None and call._readable_for_rewrite():
+                calls.setdefault(call.id, []).append(call)
+                call_positions.setdefault(call.id, []).append(call.message_index)
         for position, wire in zip(selected, wires, strict=True):
             yield
             if type(wire) is not dict:
@@ -2078,6 +2223,8 @@ class Messages(Sequence[MessageType]):
             except (ConversationValidationError, TypeError, ValueError) as exc:
                 raise ValueError("rewritten message is not valid OpenAI data") from exc
             replacement = parsed[-1]
+            if isinstance(replacement, UnreadableMessage):
+                raise ValueError("rewritten message must have readable fields for its role")
             if isinstance(replacement, AssistantMessage) and replacement.tool_calls:
                 raise ValueError("a rewritten message must make no tool calls")
             if replacement.content != original.content:
@@ -2094,7 +2241,18 @@ class Messages(Sequence[MessageType]):
                 or replacement.source_content != original.source_content,
             )
             if isinstance(replacement, ToolMessage):
-                object.__setattr__(replacement, "_call", calls.get(replacement.tool_call_id))
+                identity = replacement.tool_call_id
+                if isinstance(original, ToolMessage) and identity == original.tool_call_id:
+                    object.__setattr__(replacement, "_call", original._call)
+                    object.__setattr__(replacement, "_link_error", original._link_error)
+                else:
+                    candidates = calls.get(identity, []) if identity else []
+                    before = (
+                        bisect_left(call_positions.get(identity, []), ordinal) if identity else 0
+                    )
+                    object.__setattr__(
+                        replacement, "_call", candidates[before - 1] if before else None
+                    )
             overrides[position] = replacement
         return overrides
 
@@ -2146,28 +2304,25 @@ class Messages(Sequence[MessageType]):
 
         # A transformed assistant/result must never traverse back into the canonical graph.
         # Prefer selected variants, then clone any linked counterpart outside this selection.
-        call_sources: dict[str, ToolCall] = {}
-        response_sources: dict[str, ToolMessage] = {}
+        call_sources: dict[tuple[int, int], ToolCall] = {}
+        response_sources: dict[int, ToolMessage] = {}
         for position, message in selected.items():
             yield
-            if not message._readable_for_rewrite() and not (
-                isinstance(message, AssistantMessage)
-                and (
-                    position in overrides
-                    or any(call._response is not None for call in message.tool_calls)
-                )
+            if (
+                not message._readable_for_rewrite()
+                and position not in overrides
+                and not any(call._response is not None for call in calls_of(message))
             ):
                 continue
-            if isinstance(message, AssistantMessage):
-                call_sources.update((call.id, call) for call in message.tool_calls)
-            elif isinstance(message, ToolMessage):
-                if message.tool_call_id in response_sources:
-                    raise ValueError("message rewrite contains duplicate tool results")
-                response_sources[message.tool_call_id] = message
+            for call in calls_of(message):
+                yield
+                call_sources[_call_slot(call)] = call
+            if isinstance(message, ToolMessage):
+                response_sources[message.message_index] = message
         for response in tuple(response_sources.values()):
             yield
             if response._call is not None:
-                call_sources.setdefault(response.tool_call_id, response._call)
+                call_sources.setdefault(_call_slot(response._call), response._call)
         for call in tuple(call_sources.values()):
             yield
             selected_responses = (
@@ -2177,55 +2332,50 @@ class Messages(Sequence[MessageType]):
             )
             if call._response is not None and (
                 not selected_responses
-                or any(
-                    isinstance(response, ToolMessage) and response.tool_call_id == call.id
-                    for response in selected_responses
-                )
+                or any(isinstance(response, ToolMessage) for response in selected_responses)
             ):
-                response_sources.setdefault(call.id, call._response)
+                response_sources.setdefault(call._response.message_index, call._response)
 
-        call_clones: dict[str, ToolCall] = {}
-        for call_id, call in call_sources.items():
+        call_clones: dict[tuple[int, int], ToolCall] = {}
+        for slot, call in call_sources.items():
             yield
             clone = call.model_copy()
             object.__setattr__(clone, "_arguments_cache", None)
             object.__setattr__(clone, "_response", None)
-            call_clones[call_id] = clone
-        response_clones: dict[str, ToolMessage] = {}
-        for call_id, response in response_sources.items():
+            call_clones[slot] = clone
+        response_clones: dict[int, ToolMessage] = {}
+        for ordinal, response in response_sources.items():
             yield
             clone = response.model_copy()
             object.__setattr__(clone, "_call", None)
-            response_clones[call_id] = clone
-        for call_id, call in call_clones.items():
+            response_clones[ordinal] = clone
+        linked_slots: set[tuple[int, int]] = set()
+        for ordinal, response in response_clones.items():
             yield
-            response = response_clones.get(call_id)
-            if response is not None:
+            source_call = response_sources[ordinal]._call
+            call = call_clones.get(_call_slot(source_call)) if source_call is not None else None
+            if call is not None:
+                slot = _call_slot(call)
+                if slot in linked_slots:
+                    raise ValueError("message rewrite contains duplicate tool results")
+                linked_slots.add(slot)
                 object.__setattr__(call, "_response", response)
                 object.__setattr__(response, "_call", call)
 
         for position, message in selected.items():
             yield
-            if not message._readable_for_rewrite():
-                if isinstance(message, AssistantMessage) and any(
-                    call.id in call_clones for call in message.tool_calls
-                ):
-                    selected[position] = message.model_copy(
-                        update={
-                            "tool_calls": tuple(
-                                call_clones.get(call.id, call) for call in message.tool_calls
-                            )
-                        }
-                    )
-                continue
-            if isinstance(message, AssistantMessage) and message.tool_calls:
+            if calls_of(message) and any(
+                _call_slot(call) in call_clones for call in calls_of(message)
+            ):
                 message = message.model_copy(
                     update={
-                        "tool_calls": tuple(call_clones[call.id] for call in message.tool_calls)
+                        "tool_calls": tuple(
+                            call_clones.get(_call_slot(call), call) for call in calls_of(message)
+                        )
                     }
                 )
             elif isinstance(message, ToolMessage):
-                message = response_clones[message.tool_call_id]
+                message = response_clones[message.message_index]
             selected[position] = message
         view._install_variants(tuple(selected.values()))
         object.__setattr__(view, "_chunk", self._chunk)
@@ -2445,19 +2595,18 @@ class Messages(Sequence[MessageType]):
                 if compatible:
                     ordered_pieces[-1] = existing
 
-        canonical_tools: dict[str, _CanonicalToolUnit] = {}
+        canonical_tools: dict[tuple[int, int], _CanonicalToolUnit] = {}
+        canonical_responses: dict[int, _CanonicalToolUnit] = {}
         for ordinal, canonical in enumerate(root._items):
             if meter.record("canonical_message_visits") and meter.checkpoint():
                 yield
-            if isinstance(canonical, AssistantMessage):
-                for call in canonical.tool_calls:
+            if calls_of(canonical):
+                for call in calls_of(canonical):
                     if meter.record("canonical_call_visits") and meter.checkpoint():
                         yield
-                    call_id = _require_tool_identity(call.id, "canonical tool call")
-                    if call_id in canonical_tools:
-                        raise ValueError(
-                            f"canonical source contains ambiguous tool-call ID {call_id!r}"
-                        )
+                    slot = _call_slot(call)
+                    if slot in canonical_tools:
+                        raise ValueError("canonical source repeats a tool-call position")
                     if len(canonical_tools) >= _MAX_COMBINED_TOOL_IDENTITIES:
                         raise ValueError(
                             "canonical source exceeds "
@@ -2467,28 +2616,24 @@ class Messages(Sequence[MessageType]):
                         raise ValueError(
                             "canonical tool call does not match its source message identity"
                         )
-                    canonical_tools[call_id] = _CanonicalToolUnit(ordinal, call)
-                continue
+                    canonical_tools[slot] = _CanonicalToolUnit(ordinal, call)
             if isinstance(canonical, ToolMessage):
                 if meter.record("canonical_response_visits") and meter.checkpoint():
                     yield
-                call_id = _require_tool_identity(
-                    canonical.tool_call_id,
-                    "canonical tool result",
-                )
+                if canonical._call is None:
+                    continue
                 if meter.record("canonical_lookups") and meter.checkpoint():
                     yield
-                unit = canonical_tools.get(call_id)
+                unit = canonical_tools.get(_call_slot(canonical._call))
                 if unit is None:
                     raise ValueError("canonical tool result has no earlier compatible tool call")
                 if unit.response is not None:
-                    raise ValueError(
-                        f"canonical source contains ambiguous tool-result ID {call_id!r}"
-                    )
+                    raise ValueError("canonical source repeats an exact tool-result link")
                 if canonical._call is not unit.call or unit.call._response is not canonical:
                     raise ValueError("canonical tool call and result have incompatible links")
                 unit.response_ordinal = ordinal
                 unit.response = canonical
+                canonical_responses[ordinal] = unit
 
         for unit in canonical_tools.values():
             if meter.record("canonical_link_checks") and meter.checkpoint():
@@ -2496,10 +2641,11 @@ class Messages(Sequence[MessageType]):
             if (unit.call._response is None) != (unit.response is None):
                 raise ValueError("canonical tool call has an incompatible hidden result")
 
-        selected_calls: dict[str, tuple[int, ToolCall, _CanonicalToolUnit]] = {}
-        selected_responses: dict[str, tuple[int, ToolMessage, _CanonicalToolUnit]] = {}
-        selected_assistants: dict[int, AssistantMessage] = {}
-        response_positions: dict[str, int] = {}
+        selected_calls: dict[tuple[int, int], tuple[int, ToolCall, _CanonicalToolUnit]] = {}
+        selected_responses: dict[int, tuple[int, ToolMessage, _CanonicalToolUnit | None]] = {}
+        selected_assistants: dict[int, MessageType] = {}
+        response_positions: dict[int, int] = {}
+        selected_response_slots: set[tuple[int, int]] = set()
         relink_tool_variants = False
         for position, (ordinal, piece) in enumerate(
             zip(combined._ordinals, ordered_pieces, strict=True)
@@ -2529,16 +2675,14 @@ class Messages(Sequence[MessageType]):
                             raise ValueError(
                                 "combined content variant has incompatible source provenance"
                             )
-            if isinstance(message, AssistantMessage):
+            if isinstance(message, (AssistantMessage, UnreadableMessage)):
                 canonical = root._items[ordinal]
                 rewritten = message._rewrite_source is canonical
-                if not isinstance(canonical, AssistantMessage) and not rewritten:
+                if type(message) is not type(canonical) and not rewritten:
                     raise ValueError("combined tool-call variant does not match its source message")
-                canonical_calls = (
-                    canonical.tool_calls if isinstance(canonical, AssistantMessage) else ()
-                )
+                canonical_calls = calls_of(canonical)
                 if message.tool_calls:
-                    selected_assistants[position] = message
+                    selected_assistants[position] = cast(MessageType, message)
                 if len(message.tool_calls) != len(canonical_calls):
                     raise ValueError(
                         "combined tool-call variant does not preserve its source tool identities"
@@ -2550,10 +2694,10 @@ class Messages(Sequence[MessageType]):
                 ):
                     if meter.record("selected_call_visits") and meter.checkpoint():
                         yield
-                    call_id = _require_tool_identity(call.id, "selected tool call")
+                    slot = _call_slot(call)
                     if meter.record("canonical_lookups") and meter.checkpoint():
                         yield
-                    unit = canonical_tools.get(call_id)
+                    unit = canonical_tools.get(slot)
                     if (
                         unit is None
                         or unit.call is not canonical_call
@@ -2564,47 +2708,63 @@ class Messages(Sequence[MessageType]):
                         raise ValueError(
                             "combined tool-call variant does not match its source tool identity"
                         )
-                    if call_id in selected_calls:
+                    if slot in selected_calls:
                         raise ValueError(
-                            f"message selection contains duplicate tool-call ID {call_id!r}"
+                            f"message selection contains duplicate tool-call ID {call.id!r}"
                         )
                     if len(selected_calls) >= _MAX_COMBINED_TOOL_IDENTITIES:
                         raise ValueError(
                             "combined selection exceeds "
                             f"{_MAX_COMBINED_TOOL_IDENTITIES} tool identities"
                         )
-                    selected_calls[call_id] = (ordinal, call, unit)
+                    selected_calls[slot] = (ordinal, call, unit)
                 relink_tool_variants = relink_tool_variants or (
                     piece is not whole and bool(message.tool_calls)
                 )
             elif isinstance(message, ToolMessage):
                 if meter.record("selected_response_visits") and meter.checkpoint():
                     yield
-                call_id = _require_tool_identity(
-                    message.tool_call_id,
-                    "selected tool result",
-                )
                 if meter.record("canonical_lookups") and meter.checkpoint():
                     yield
-                unit = canonical_tools.get(call_id)
-                if unit is None or (
-                    unit.response_ordinal != ordinal
-                    and message._rewrite_source is not root._items[ordinal]
+                rewritten = message._rewrite_source is root._items[ordinal]
+                unit = (
+                    canonical_tools.get(_call_slot(message._call))
+                    if rewritten and message._call is not None
+                    else canonical_responses.get(ordinal)
+                )
+                canonical = root._items[ordinal]
+                if (
+                    not rewritten
+                    and (
+                        not isinstance(canonical, ToolMessage)
+                        or message.tool_call_id != canonical.tool_call_id
+                        or (message._call is None) != (unit is None)
+                    )
+                    or rewritten
+                    and message._call is not None
+                    and unit is None
                 ):
                     raise ValueError(
                         "combined tool-result variant does not match its source tool identity"
                     )
-                if call_id in selected_responses:
+                slot = _call_slot(unit.call) if unit is not None else None
+                if (
+                    ordinal in selected_responses
+                    or slot is not None
+                    and slot in selected_response_slots
+                ):
                     raise ValueError(
                         "message selection contains duplicate tool-result for tool-call ID "
-                        f"{call_id!r}"
+                        f"{message.tool_call_id!r}"
                     )
                 if len(selected_responses) >= _MAX_COMBINED_TOOL_IDENTITIES:
                     raise ValueError(
                         f"combined selection exceeds {_MAX_COMBINED_TOOL_IDENTITIES} tool results"
                     )
-                selected_responses[call_id] = (ordinal, message, unit)
-                response_positions[call_id] = position
+                selected_responses[ordinal] = (ordinal, message, unit)
+                response_positions[ordinal] = position
+                if slot is not None:
+                    selected_response_slots.add(slot)
                 relink_tool_variants = relink_tool_variants or piece is not whole
 
         variants: list[MessageType] = [
@@ -2616,52 +2776,47 @@ class Messages(Sequence[MessageType]):
                 yield
 
         if relink_tool_variants:
-            call_clones: dict[str, ToolCall] = {}
-            for call_id, (ordinal, call, _unit) in selected_calls.items():
+            call_clones: dict[tuple[int, int], ToolCall] = {}
+            for slot, (ordinal, call, _unit) in selected_calls.items():
                 if meter.record("call_clone_visits") and meter.checkpoint():
                     yield
                 clone = call.model_copy()
                 object.__setattr__(clone, "_arguments_cache", None)
                 object.__setattr__(clone, "_response", None)
                 object.__setattr__(clone, "_message_index", ordinal)
-                call_clones[call_id] = clone
-            response_clones: dict[str, ToolMessage] = {}
-            for call_id, (ordinal, response, _unit) in selected_responses.items():
+                call_clones[slot] = clone
+            response_clones: dict[int, ToolMessage] = {}
+            for ordinal, response, _unit in selected_responses.values():
                 if meter.record("response_clone_visits") and meter.checkpoint():
                     yield
                 clone = response.model_copy()
                 object.__setattr__(clone, "_call", None)
                 object.__setattr__(clone, "_message_index", ordinal)
-                response_clones[call_id] = clone
-            for call_id, call in call_clones.items():
-                response = response_clones.get(call_id)
-                if response is None:
+                response_clones[ordinal] = clone
+            for ordinal, _response, unit in selected_responses.values():
+                call = call_clones.get(_call_slot(unit.call)) if unit is not None else None
+                if call is None:
                     continue
                 if meter.record("relink_visits") and meter.checkpoint():
                     yield
-                unit = selected_calls[call_id][2]
-                response_unit = selected_responses[call_id][2]
-                if unit is not response_unit:
-                    raise ValueError(
-                        "combined tool-call and tool-result variants have mismatched identities"
-                    )
+                response = response_clones[ordinal]
                 object.__setattr__(call, "_response", response)
                 object.__setattr__(response, "_call", call)
             for position, assistant in selected_assistants.items():
                 cloned_calls: list[ToolCall] = []
-                for call in assistant.tool_calls:
+                for call in calls_of(assistant):
                     if meter.record("assembly_visits") and meter.checkpoint():
                         yield
-                    cloned_calls.append(call_clones[call.id])
+                    cloned_calls.append(call_clones[_call_slot(call)])
                 if meter.record("message_clone_visits") and meter.checkpoint():
                     yield
                 variants[position] = assistant.model_copy(
                     update={"tool_calls": tuple(cloned_calls)}
                 )
-            for call_id in selected_responses:
+            for ordinal in selected_responses:
                 if meter.record("relink_visits") and meter.checkpoint():
                     yield
-                variants[response_positions[call_id]] = response_clones[call_id]
+                variants[response_positions[ordinal]] = response_clones[ordinal]
 
         combined._install_variants(variants)
         object.__setattr__(combined, "_chunk", all(part._chunk for part in present))
@@ -3088,6 +3243,8 @@ class Messages(Sequence[MessageType]):
         for message in self:
             if isinstance(message, AssistantMessage):
                 for call in message.tool_calls:
+                    if not isinstance(call.id, str) or not call.id:
+                        raise ValueError("model input contains a tool call without a usable ID")
                     link = id(call)
                     if call.id in selected_call_ids or link in selected_call_links:
                         raise ValueError(
@@ -3097,6 +3254,8 @@ class Messages(Sequence[MessageType]):
                     selected_call_links.add(link)
                 continue
             if isinstance(message, ToolMessage):
+                if not isinstance(message.tool_call_id, str) or not message.tool_call_id:
+                    raise ValueError("model input contains a tool result without a usable ID")
                 call = message._call
                 link = id(call) if call is not None else None
                 if (
@@ -3127,7 +3286,7 @@ class Messages(Sequence[MessageType]):
         if not self:
             return None
         first = self[0]
-        return first.content if isinstance(first, SystemMessage) else None
+        return first.content if first.role == "system" else None
 
     @property
     @dsl_surface(
@@ -3215,18 +3374,21 @@ class Messages(Sequence[MessageType]):
 
         if self._is_root_view():
             return list(self._root._all_calls)
-        return [
-            call
-            for message in self
-            if isinstance(message, AssistantMessage)
-            for call in message.tool_calls
-        ]
+        return [call for message in self for call in calls_of(message)]
 
     def _name_counts(self, *, responses: bool = False) -> Mapping[str, int]:
         """Compute a requested name aggregate within the canonical value's fault boundary."""
 
+        # A call with no result contributes nothing to a result count. A result's
+        # name property still refuses its unreadable originating call.
         if responses:
-            self._root._read_call_names()
+            # An unreadable sender claiming a result ID cannot establish a
+            # result name, even though its written role is preserved in views.
+            for index, message in enumerate(self):
+                if index % 256 == 0:
+                    _raise_if_combine_expired()
+                if isinstance(message, UnreadableMessage) and message.tool_call_id:
+                    raise InvalidInputError(message.fault)
         items = self.tool_responses if responses else self.tool_calls
         counts: dict[str, int] = {}
         for index, item in enumerate(items):

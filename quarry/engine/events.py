@@ -204,6 +204,18 @@ class StaticEnvironment:
     # Diagnostic metadata, never used to answer a rule's size comparison. Explanations
     # can describe skipped tool atoms without semantically reading faulty definitions.
     tool_count: int | None = None
+    _system_prompt_reader: Callable[[], str | None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def __getattribute__(self, name: str):
+        if name == "system_prompt":
+            reader = object.__getattribute__(self, "_system_prompt_reader")
+            if reader is not None:
+                value = reader()
+                object.__setattr__(self, "system_prompt", value)
+                object.__setattr__(self, "_system_prompt_reader", None)
+        return object.__getattribute__(self, name)
 
     def has_tool(self, name: str) -> bool:
         """Return whether the static environment has a tool with the given name."""
@@ -377,7 +389,8 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     tool_response_name_counts = _DeferredMapping(lambda: conv.messages._name_counts(responses=True))
     return StaticEnvironment(
         tools=_DeferredMapping(conv._tool_index),
-        system_prompt=conv.system_prompt,
+        system_prompt=None,
+        _system_prompt_reader=lambda: conv.system_prompt,
         limits=context.limits,
         was_truncated=context.was_truncated,
         surface_sizes=surface_sizes,

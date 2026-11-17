@@ -673,7 +673,7 @@ Surfaces are bare names. Do not add `()`.
 | `tool_calls` | `collection<tool_call>` | `arguments`, `id`, `name`, `raw_arguments`, `response`, `type` | Assistant tool calls in chronological order. |
 | `tool_responses` | `collection<tool_response>` | `call`, `content`, `id`, `name`, `result`, `role`, `tool_call_id` | Tool-result messages linked to assistant calls by `tool_call_id`. |
 | `tools` | `collection<tool_definition>` | `description`, `name`, `parameters`, `type` | Tools offered to the model in the inspected request. |
-| `user_messages` | `collection<message>` | `content`, `role` | User-role messages from this value, in its current order. |
+| `user_messages` | `collection<message>` | `content`, `role`, `tool_call_id` | User-role messages from this value, in its current order. |
 
 ### Surface fields
 
@@ -710,6 +710,7 @@ Only the fields listed here are supported for rule authoring.
 | `tools` | `type` | `string` | Offered tool type; rules read named function tools. |
 | `user_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `user_messages` | `role` | `string` | OpenAI message role. |
+| `user_messages` | `tool_call_id` | `string \| null` | Optional sender-supplied call ID. |
 
 ## Operator precedence
 

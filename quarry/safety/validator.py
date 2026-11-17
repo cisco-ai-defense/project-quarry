@@ -539,9 +539,6 @@ def validate_conversation(
     ):
         raise ConversationValidationError("max_nesting_depth must be an integer from 1 to 100")
 
-    if allowed_roles is None:
-        allowed_roles = OPENAI_MESSAGE_ROLES
-
     if not isinstance(data, dict):
         raise ConversationValidationError(
             f"Expected dict, got {type(data).__name__}. "
@@ -572,8 +569,6 @@ def validate_conversation(
     if not messages:
         raise ConversationValidationError("'messages' list is empty. Nothing to scan.")
 
-    seen_call_ids: set[str] = set()
-
     for i, msg in enumerate(messages):
         if not isinstance(msg, dict):
             raise ConversationValidationError(
@@ -587,104 +582,59 @@ def validate_conversation(
             )
 
         role = msg["role"]
-        if not isinstance(role, str) or role not in allowed_roles:
+        if not isinstance(role, str) or (allowed_roles is not None and role not in allowed_roles):
             raise ConversationValidationError(
-                f"Message at index {i} has invalid role '{role}'. Valid roles: "
-                f"{sorted(allowed_roles)}"
+                f"Message at index {i} must have a supported string role"
             )
-
-        allowed_keys = (
-            OPENAI_TOOL_RESPONSE_KEYS
-            if role == "tool"
-            else frozenset({"role", "content", "tool_calls", "refusal"})
-            if role == "assistant"
-            else frozenset({"role", "content"})
+        unexpected = _unexpected_keys(
+            msg, frozenset({"role", "content", "tool_calls", "tool_call_id", "refusal"})
         )
-        unexpected = _unexpected_keys(msg, allowed_keys)
         if unexpected:
             raise ConversationValidationError(
                 f"Message at index {i} has unsupported keys: {unexpected}"
             )
-
-        if role == "tool":
-            if "content" not in msg:
-                raise ConversationValidationError(f"Tool message at index {i} must have 'content'")
-            _validate_message_content(msg["content"], i, max_nesting_depth)
-            if not isinstance(msg.get("tool_call_id"), str) or not msg["tool_call_id"]:
-                raise ConversationValidationError(
-                    f"Tool message at index {i} must have a non-empty string 'tool_call_id'"
-                )
-        elif "content" not in msg and "tool_calls" not in msg and "refusal" not in msg:
+        if not any(key in msg for key in ("content", "tool_calls", "refusal")):
             raise ConversationValidationError(
                 f"Message at index {i} (role={role}) missing both 'content' and 'tool_calls'. "
                 "Messages must have at least one of these fields."
             )
-
-        if role in {"system", "developer", "user"} and "content" not in msg:
+        content_roles = {"system", "developer", "user", "tool"}
+        if role in content_roles and "content" not in msg:
             raise ConversationValidationError(
                 f"{role.title()} message at index {i} must have 'content'"
             )
-        if role in {"system", "developer", "user"}:
-            _validate_message_content(msg["content"], i, max_nesting_depth)
-
-        if role == "assistant":
-            if (
-                "refusal" in msg
-                and msg["refusal"] is not None
-                and not isinstance(msg["refusal"], str)
-            ):
+        if "content" in msg:
+            _validate_message_content(
+                msg["content"], i, max_nesting_depth, allow_null=role not in content_roles
+            )
+        if "refusal" in msg and msg["refusal"] is not None and not isinstance(msg["refusal"], str):
+            raise ConversationValidationError(
+                f"Message at index {i} 'refusal' must be a string or null"
+            )
+        if "tool_call_id" in msg:
+            identifier = msg["tool_call_id"]
+            if role in {"system", "developer", "user"}:
+                valid_id = isinstance(identifier, str) and bool(identifier)
+            else:
+                valid_id = identifier is None or isinstance(identifier, str)
+            if not valid_id:
                 raise ConversationValidationError(
-                    f"Assistant message at index {i} 'refusal' must be a string or null"
+                    f"Message at index {i} has an invalid 'tool_call_id' type"
                 )
-            if "content" in msg:
-                _validate_message_content(msg["content"], i, max_nesting_depth, allow_null=True)
-            elif "tool_calls" not in msg and "refusal" not in msg:
+        if "tool_calls" in msg:
+            tool_calls = msg["tool_calls"]
+            if not isinstance(tool_calls, list) or not tool_calls:
                 raise ConversationValidationError(
-                    f"Assistant message at index {i} must have 'content', 'tool_calls', "
-                    "or 'refusal'"
+                    f"Message at index {i} 'tool_calls' must be a non-empty list"
                 )
-            if "tool_calls" in msg:
-                tool_calls = msg["tool_calls"]
-                if not isinstance(tool_calls, list) or not tool_calls:
-                    raise ConversationValidationError(
-                        f"Assistant message at index {i} 'tool_calls' must be a non-empty list"
-                    )
-                for call_index, tool_call in enumerate(tool_calls):
-                    _validate_tool_call(
-                        tool_call,
-                        message_index=i,
-                        call_index=call_index,
-                        seen_call_ids=seen_call_ids,
-                        parse_arguments=parse_arguments,
-                        max_nesting_depth=max_nesting_depth,
-                    )
-
-    # Validate tool responses after calls are seen so references are unambiguous.
-    call_message_indices = {
-        tool_call["id"]: message_index
-        for message_index, message in enumerate(messages)
-        if message["role"] == "assistant"
-        for tool_call in message.get("tool_calls", [])
-    }
-    seen_response_ids: set[str] = set()
-    for i, msg in enumerate(messages):
-        if msg["role"] != "tool":
-            continue
-        tool_call_id = msg["tool_call_id"]
-        if tool_call_id not in seen_call_ids:
-            raise ConversationValidationError(
-                f"Tool message at index {i} references unknown tool_call_id '{tool_call_id}'"
-            )
-        if call_message_indices[tool_call_id] >= i:
-            raise ConversationValidationError(
-                f"Tool message at index {i} references tool_call_id '{tool_call_id}' "
-                "before its assistant tool call"
-            )
-        if tool_call_id in seen_response_ids:
-            raise ConversationValidationError(
-                f"Tool message at index {i} duplicates response for tool_call_id '{tool_call_id}'"
-            )
-        seen_response_ids.add(tool_call_id)
+            for call_index, tool_call in enumerate(tool_calls):
+                _validate_tool_call(
+                    tool_call,
+                    message_index=i,
+                    call_index=call_index,
+                    parse_arguments=parse_arguments,
+                    max_nesting_depth=max_nesting_depth,
+                )
 
     if "tools" in data:
         tools = data["tools"]
@@ -736,7 +686,6 @@ def _validate_tool_call(
     *,
     message_index: int,
     call_index: int,
-    seen_call_ids: set[str],
     parse_arguments: bool,
     max_nesting_depth: int = 100,
 ) -> None:
@@ -755,14 +704,9 @@ def _validate_tool_call(
             f"has unsupported keys: {unexpected}"
         )
     call_id = tool_call.get("id")
-    if not isinstance(call_id, str) or not call_id:
+    if call_id is not None and not isinstance(call_id, str):
         raise ConversationValidationError(
-            f"Assistant message at index {message_index} tool_calls[{call_index}] "
-            "must have a non-empty string 'id'"
-        )
-    if call_id in seen_call_ids:
-        raise ConversationValidationError(
-            f"Duplicate tool-call id '{call_id}' at assistant message index {message_index}"
+            f"Assistant message at index {message_index} tool_calls[{call_index}] 'id' must be a string or null"
         )
     if not isinstance(tool_call.get("type"), str) or not isinstance(
         tool_call.get("function"), dict
@@ -789,7 +733,6 @@ def _validate_tool_call(
             "function 'arguments' must be a JSON string"
         )
 
-    seen_call_ids.add(call_id)
     if parse_arguments:
         _validate_json_arguments(
             function["arguments"], message_index, call_index, max_nesting_depth

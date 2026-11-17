@@ -24,11 +24,12 @@ Quarry accepts OpenAI-shaped conversations:
 }
 ```
 
-Supported roles are `system`, `developer`, `user`, `assistant`, and `tool`. Assistant messages can
-contain tool calls. A tool response must reference an earlier assistant tool call by ID.
+Readable roles are `system`, `developer`, `user`, `assistant`, and `tool`. Assistant messages can
+contain tool calls. A user message may also carry an optional nonempty `tool_call_id`; this is
+sender data and does not make it a tool response.
 
-Quarry rejects duplicate tool-call IDs, orphan tool responses, unexpected top-level fields,
-non-finite numbers, and data that exceeds configured safety limits. Tool-call arguments are
+Quarry rejects malformed field types, unexpected fields, non-finite numbers, and data that
+exceeds configured safety limits. Tool-call arguments are
 held as raw strings and decoded when a rule reads `call.arguments`. Freeform text, cut-off JSON
 and non-object JSON have no named arguments. Excessive decoded nesting, non-finite numbers and
 integers beyond the interpreter's digit limit fail the reading rule with `invalid_input`.
@@ -56,7 +57,26 @@ require readable names; a readable match outside the selection does not satisfy 
 Raw host serialization remains available; rule field guards also protect ID and type reads.
 Whole-message rewrites skip a message containing an unreadable call, while text-part transforms
 can process its message text and retain its links. Omitted/wrong-type names remain structural
-errors. Missing or ambiguous call/result identifiers still require the existing strict input form.
+errors.
+
+Other string roles and fields belonging to another role are preserved as unreadable messages
+when their structure is valid. Their written role, position and collection membership remain
+available. Reading their content or other documented fields fails only the reading rule with
+`invalid_input`. Raw serialization preserves the sender's data. Whole-message rewrites skip
+these messages, and model calls refuse them before cache or adapter access.
+
+Call and tool-result IDs may be omitted, null, or empty. Overlapping calls with the same ID and
+results without an exact preceding call remain in the transcript. Call names, argument text,
+result text and collection sizes can still be read independently. An unusable or ambiguous call
+ID fails an ID or response read; a result without an exact call fails ID, call and name reads.
+An unassigned later result can also make an earlier call's response uncertain. A named result
+aggregate fails if an unreadable message claims a nonempty result ID.
+
+Reusing an ID after the earlier exchange has consumed its results creates a distinct call node.
+Plain slices retain the canonical transcript's links and uncertainty, including counterparts
+outside the slice. Text transforms retain separate call positions and never relink reused IDs
+to a different exchange. Models require usable, unique IDs and exact selected call/result links;
+sequential ID reuse is therefore readable by rules but refused as a whole model request.
 
 Offered tools must have a string `type` and a `function` object with a string `name`.
 Unknown string types, empty names and duplicate names are preserved in raw serialization.
@@ -112,7 +132,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 16 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 17 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text

@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-16",
+  "compiler_version": "compiler-17",
   "examples": [
     {
       "checks": [],
@@ -3184,11 +3184,17 @@
           "description": "OpenAI message role.",
           "name": "role",
           "type": "string"
+        },
+        {
+          "description": "Optional sender-supplied call ID.",
+          "name": "tool_call_id",
+          "type": "string | null"
         }
       ],
       "fields": [
         "content",
-        "role"
+        "role",
+        "tool_call_id"
       ],
       "id": "surface:user_messages",
       "kind": "surface",

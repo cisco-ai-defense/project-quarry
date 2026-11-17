@@ -152,4 +152,4 @@ def test_untrusted_conversation_data_is_validated_at_entry() -> None:
     with pytest.raises(ConversationValidationError, match="Expected mapping"):
         Conversation.from_openai([])  # type: ignore[arg-type]
     with pytest.raises(ConversationValidationError):
-        Conversation.from_openai({"messages": [{"role": "unknown", "content": "text"}]})
+        Conversation.from_openai({"messages": [{"role": 7, "content": "text"}]})
