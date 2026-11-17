@@ -519,8 +519,8 @@ def path_report(
         tree: The scanned rule's tree under the scan's configuration.
         recorder: The scan's observed checks; None for a rule with one whole-rule node.
         matched: The verdict, or None when the scan did not complete.
-        conversation: The validated scanned conversation, whose hash selects exploration. None
-            for invalid input that must not be traversed.
+        conversation: Validated inputs whose hash selects exploration, or None when no safe
+            digest is available.
         parameter_digest: The digest of the parameter values the scan used.
         explain: Whether score entries list every chunk.
         explore_rate: The exploration rate the scan used.

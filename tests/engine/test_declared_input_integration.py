@@ -50,6 +50,34 @@ def test_reference_lists_model_metadata_and_inputs_together_without_inference(tm
     )
 
 
+async def test_plugin_digest_ignores_unread_declared_input():
+    config = QuarryConfig(
+        config_version=2,
+        inputs={**INPUTS, "other.records": {"facts": {"value": {"type": "string"}}}},
+    )
+    plugin = QuarryPlugin(config)
+    baseline = await plugin.scan(rule_text=RULE, conversation=DATA, explore_rate=1.0)
+    with_unread = await plugin.scan(
+        rule_text=RULE,
+        conversation={**DATA, "other": object()},
+        explore_rate=1.0,
+    )
+
+    assert with_unread["completion_state"] == "complete"
+    assert (
+        with_unread["decision_path"]["conversation_sha256"]
+        == baseline["decision_path"]["conversation_sha256"]
+    )
+
+    invalid = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": {"writes": object()}},
+        explore_rate=1.0,
+    )
+    assert invalid["completion_state"] == "incomplete"
+    assert invalid["decision_path"]["conversation_sha256"] is None
+
+
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
     policy = compile_policy(RULE, runtime_config=config)

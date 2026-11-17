@@ -52,7 +52,7 @@ from quarry.plugin.visualization import (
     build_runtime_attribution,
     build_visualization_bundle,
 )
-from quarry.policy import bind_prepared_policy
+from quarry.policy import _validated_sample, bind_prepared_policy
 from quarry.prepared import PreparedRuleCache
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import Complexity, RuleValidator
@@ -709,11 +709,24 @@ class QuarryPlugin:
             # ``scan_many_async`` stamps every result, timed-out ones included, with the digest.
             assert result.parameter_digest is not None
             payload = self._scan_payload(scanner, result, static_graphs, node_ids=tree.ids)
+            if result.validation_error is not None:
+                report_input = None
+            elif scanner.input_registry.declarations or scanner.input_adapters:
+                report_input = _validated_sample(
+                    item,
+                    artifact.read_surfaces,
+                    policy._adapter_hashes,
+                    artifact.orders_input_items,
+                    scanner.limits,
+                    scanner.input_registry,
+                )
+            else:
+                report_input = item
             payload["decision_path"] = path_report(
                 tree,
                 (result.decision_paths or {}).get(rule_name),
                 matched=rule_name in result.rule_matches if result.is_complete else None,
-                conversation=None if result.validation_error is not None else item,
+                conversation=report_input,
                 parameter_digest=result.parameter_digest,
                 explain=bool(explain),
                 explore_rate=0.0 if result.validation_error is not None else float(explore_rate),
