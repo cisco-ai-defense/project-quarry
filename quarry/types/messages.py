@@ -1166,8 +1166,10 @@ def _tool_call_variant_steps(
 def _message_variant_steps(
     message: Message,
     meter: _CombineMeter,
+    *,
+    message_index: int | None = None,
 ) -> Generator[None, None, object]:
-    """Represent one immutable message variant exactly once, excluding object identity."""
+    """Represent a variant, optionally normalizing its synthetic root-local index."""
 
     active: set[int] = set()
     fields = []
@@ -1181,7 +1183,11 @@ def _message_variant_steps(
         "_provenance",
     ):
         yield from _charge_combine_steps(meter, "variant_projection_visits")
-        value = getattr(message, attribute)
+        value = (
+            message_index
+            if attribute == "message_index" and message_index is not None
+            else getattr(message, attribute)
+        )
         fields.append((yield from _variant_value_steps(value, meter, active)))
     if message._rewrite_content_changed:
         yield from _charge_combine_steps(meter, "variant_projection_visits")
@@ -2099,8 +2105,12 @@ class Messages(Sequence[MessageType]):
                     mapped = synthetic_ordinals.get(key, -1)
                     canonical = part._root._items[ordinal]
                     if mapped >= 0 and synthetic_sources[key] is not canonical:
-                        previous = yield from _message_variant_steps(synthetic_sources[key], meter)
-                        current = yield from _message_variant_steps(canonical, meter)
+                        previous = yield from _message_variant_steps(
+                            synthetic_sources[key], meter, message_index=mapped
+                        )
+                        current = yield from _message_variant_steps(
+                            canonical, meter, message_index=mapped
+                        )
                         if not (
                             yield from _variant_representations_equal_steps(
                                 previous, current, meter
