@@ -949,23 +949,31 @@ class InputRegistry:
         them as steps. Each entry's section is looked up in the conversation, which is never
         listed. A timeline that is not a list is left as it is, for its check to refuse."""
 
-        if not isinstance(entries, list):
+        if type(entries) is not list:
             return entries
 
         def unread(entry: dict[str, Any]) -> bool:
-            section = entry.get("input")
-            if isinstance(section, str):
+            # Leave malformed entries for order_timeline to report as a clock fault.
+            # Looking up a key in a subclass or alongside non-string keys could run
+            # user-defined equality methods before that validation happens.
+            if type(entry) is not dict or any(type(key) is not str for key in dict.__iter__(entry)):
+                return False
+            section = dict.get(entry, "input")
+            if type(section) is str:
                 if section in read:
                     return False
                 namespace, _, name = section.partition(".")
                 holder = conversation.get(namespace)
                 return section in self.event_surfaces or (
-                    namespace in self.definitions and isinstance(holder, dict) and name in holder
+                    namespace in self.definitions
+                    and type(holder) is dict
+                    and all(type(key) is str for key in dict.__iter__(holder))
+                    and name in holder
                 )
             # The chat no rule reads: every entry that names a chat item, whatever else it holds.
             return not chat_read and ("message_index" in entry or "tool_call_id" in entry)
 
-        return [entry for entry in entries if not (isinstance(entry, dict) and unread(entry))]
+        return [entry for entry in list.__iter__(entries) if not unread(entry)]
 
     def order_timeline(
         self,
@@ -981,8 +989,19 @@ class InputRegistry:
         every item of a supplied list section once, so an omitted item cannot silently change
         a temporal result; it may reorder a section's items.
         """
-        if not isinstance(order, list):
-            raise ConversationValidationError("The timeline must be a list")
+        if type(order) is not list:
+            raise ConversationValidationError("The timeline must be an exact built-in list")
+        # Check only the shallow shape before measuring size: the projection above
+        # intentionally preserves malformed entries for this clock-local error.
+        if limits.enforce_limits and len(order) > limits.max_total_size:
+            raise ConversationValidationError("The timeline exceeds max_total_size")
+        for position, entry in enumerate(list.__iter__(order)):
+            if type(entry) is not dict:
+                raise ConversationValidationError(f"Timeline entry {position} must be an object")
+            if any(type(key) is not str for key in dict.__iter__(entry)):
+                raise ConversationValidationError(
+                    f"Timeline entry {position} keys must be exact built-in strings"
+                )
         if limits.enforce_limits and (
             json_size(order, limits.max_total_size) > limits.max_total_size
         ):
