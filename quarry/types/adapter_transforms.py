@@ -127,6 +127,27 @@ def _settings(value: object) -> Mapping[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
+class TransformCacheIdentity:
+    """Host opt-in to deterministic part-transform reuse across adapter instances.
+
+    The namespace identifies the implementation; version must change whenever semantics
+    outside LocalTransformConfig change. No mutable state or request context may affect it.
+    """
+
+    namespace: str
+    version: str
+
+    def __post_init__(self) -> None:
+        for value in (self.namespace, self.version):
+            if type(value) is not str or not 1 <= len(value) <= 128:
+                raise ValueError("transform cache namespace/version must be 1..128 characters")
+            try:
+                value.encode("utf-8")
+            except UnicodeError as exc:
+                raise ValueError("transform cache namespace/version must be valid Unicode") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class LocalTransformConfig:
     """A registered in-process adapter, its JSON settings and optional part selection."""
 

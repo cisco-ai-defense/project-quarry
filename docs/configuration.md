@@ -126,6 +126,55 @@ with the same transform registry and registered capabilities. Changed or missing
 at load time. Model-backed transforms cannot run inside local map values, selection predicates,
 or conditional predicates.
 
+Deterministic part adapters can explicitly share validated results across instances and scans:
+
+```python
+from quarry.types.adapter_transforms import TransformCacheIdentity
+
+
+class Uppercase:
+    local = True
+    transform_parts = ("text",)
+    transform_cache = TransformCacheIdentity("application.uppercase", "1")
+
+    def transform(self, config, part, *, timeout=None):
+        return part["text"].upper()
+```
+
+The namespace names the implementation; change its version whenever behavior outside
+`LocalTransformConfig` changes. A versioned adapter must be deterministic from that identity,
+its complete configuration and the complete wire part. Mutable adapter state, ambient request
+context and unversioned external resources must not affect its output. Omitting `transform_cache`
+or setting it to `None` keeps the existing instance-local cache and per-message execution behavior.
+The namespace also defines the host's reuse boundary: use separate namespaces or settings for
+different tenants or security domains.
+
+Shared results contain relative input ranges. Each read validates the record's request binding,
+integrity, text and origin map, then composes it with the current message and part positions.
+A malformed or mismatched record is removed and recomputed once; invalid adapter output is never
+admitted. The process cache's existing byte, entry and expiry limits apply. No external storage
+service is configured by this declaration.
+
+The message pipeline uses ordered windows of at most 16 parts for versioned adapters, splitting
+them further to keep each batch within the existing aggregate input limit. Output and mapping
+budgets remain enforced. Valid completed items can survive a failed batch; cancelled or failed
+items are recomputed on retry. All owned batch work finishes or cancels before failure returns.
+`ModelInferenceBackend.transform_units(name, units)` exposes the same bounded ordered operation
+to hosts. Unversioned adapters execute sequentially through their existing single-part hooks.
+
+Reuse adds hashing and validation work. From a source checkout, run
+`uv run --frozen python scripts/benchmark_transform_cache.py` to compare cheap uppercase,
+JSON projection and a deliberately expensive deterministic CPU workload. The report includes
+adapter calls, elapsed samples, retained-result estimates, and matching output/current-origin
+digests. Choose opt-in reuse using workloads representative of the adapter.
+
+The [example run](benchmarks/shared-transform-cache-example.json) uses three alternating samples,
+32 parts, four instances and eight distinct inputs. Both modes have identical output and current
+origin digests; shared mode makes eight adapter calls instead of 128. In that local run, median
+unversioned/shared time ratios were 0.63 for uppercase, 0.95 for JSON projection, and 4.21 for the
+CPU workload (ratios above one favor reuse). These are controlled examples, not general latency
+or memory guarantees; the inexpensive workloads show why sharing is an explicit host choice.
+
 A local adapter can instead implement `transform_messages(config, wire_messages)`. This method
 receives the selected messages once and returns one wire message per input in the same order.
 The operation runs locally without caching, model-call charges or rate-limiter tickets. Do not
