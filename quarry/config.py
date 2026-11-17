@@ -45,6 +45,15 @@ MAX_CLASSIFY_LABELS = 255
 # Model descriptions are returned by the plugin reference tool, so bound each configured value.
 MAX_MODEL_DESCRIPTION_LENGTH = 500
 
+# Model templates are untrusted configuration input. These limits bound both the inheritance walk
+# and the recursive merge before provider settings are parsed into immutable runtime objects.
+MAX_MODEL_CONFIG_DEFINITIONS = 256
+MAX_MODEL_CONFIG_INHERITANCE_DEPTH = 32
+MAX_MODEL_CONFIG_NESTING_DEPTH = 16
+MAX_MODEL_CONFIG_VALUES = 20_000
+MAX_RESOLVED_MODEL_CONFIG_VALUES = 20_000
+MAX_RESOLVED_MODEL_CONFIG_BYTES = 1_000_000
+
 # Configuration blocks holding named text resources, each mapping a name to the text or {file: path}.
 # 'texts' is the general name; 'judge_prompts' is what the same block was called first. Both load
 # into one namespace, so a rule's reference resolves the same either way.
@@ -58,6 +67,7 @@ _CONFIG_FIELDS = frozenset(
         "rules",
         "config_version",
         "models",
+        "model_templates",
         "texts",
         "judge_prompts",
         "llm_rate_limits",
@@ -80,6 +90,56 @@ _CONFIG_FIELDS = frozenset(
         "fail_on_limit",
     }
 )
+
+_INFERENCE_MODEL_FIELDS = frozenset(
+    {
+        "description",
+        "adapter",
+        "model",
+        "endpoint",
+        "aws_profile",
+        "region",
+        "category",
+        "tokens",
+        "score",
+        "classify",
+        "spans",
+        "complete",
+    }
+)
+
+_ANY_MAPPING = object()
+_LIST_OR_MAPPING = object()
+_MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
+    "adapter": str,
+    "model": str,
+    "endpoint": str,
+    "aws_profile": str,
+    "region": str,
+    "category": str,
+    "tokens": {
+        "adapter": str,
+        "endpoint": str,
+        "extraction": {"count": str},
+        "model": str,
+    },
+    "score": {
+        "message_builder": str,
+        "boundary_seed": int,
+        "tokens": {"negative": str, "positive": str},
+        "extraction": {"probabilities": str},
+        "calibration": str,
+        "reasoning": {"max_tokens": int},
+        "explanation": {"max_tokens": int},
+    },
+    "classify": {
+        "class_index": int,
+        "instructions": str,
+        "labels": _LIST_OR_MAPPING,
+    },
+    "spans": {"class_index": int},
+    "complete": {"response_schema": _ANY_MAPPING},
+}
 
 
 @dataclass(frozen=True)
@@ -448,19 +508,20 @@ class QuarryConfig:
 
         models: dict[str, InferenceModelConfig] = {}
         model_descriptions: dict[str, str] = {}
-        if "models" in document and document["models"]:
-            for model_name, model_data in document["models"].items():
-                if not isinstance(model_data, dict):
-                    raise ValueError(f"Model '{model_name}' config must be a mapping")
-                models[model_name] = _parse_inference_model(model_name, model_data)
-                description = model_data.get("description")
-                if description is not None:
-                    model_descriptions[model_name] = description
-                if config_version == 1 and models[model_name].complete is not None:
-                    raise ValueError(
-                        f"Inference model '{model_name}' complete is only supported by "
-                        "config_version 2"
-                    )
+        resolved_models, environment_resolved = _resolve_model_definitions(document)
+        for model_name, model_data in resolved_models.items():
+            models[model_name] = _parse_inference_model(
+                model_name,
+                model_data,
+                resolve_environment=not environment_resolved,
+            )
+            description = model_data.get("description")
+            if description is not None:
+                model_descriptions[model_name] = description
+            if config_version == 1 and models[model_name].complete is not None:
+                raise ValueError(
+                    f"Inference model '{model_name}' complete is only supported by config_version 2"
+                )
 
         judge_prompts = _parse_text_resources(document, config_dir)
 
@@ -582,7 +643,12 @@ def _reject_unknown_fields(data: dict, allowed: set[str], owner: str) -> None:
         )
 
 
-def _resolve_environment_reference(value: str | None, owner: str) -> str | None:
+def _resolve_environment_reference(
+    value: str | None,
+    owner: str,
+    *,
+    cache: dict[str, str | None] | None = None,
+) -> str | None:
     """Resolve an exact ${NAME} reference while leaving literal strings unchanged."""
 
     if value is None:
@@ -591,39 +657,545 @@ def _resolve_environment_reference(value: str | None, owner: str) -> str | None:
     if match is None:
         return value
     variable = match.group(1)
-    resolved = os.getenv(variable)
+    if cache is not None and variable in cache:
+        resolved = cache[variable]
+    else:
+        resolved = os.getenv(variable)
+        if cache is not None:
+            cache[variable] = resolved
     if not resolved:
         raise ValueError(f"{owner} references unset environment variable '{variable}'")
     return resolved
 
 
+def _configured_environment_value(
+    value: str | None,
+    owner: str,
+    *,
+    resolve_environment: bool,
+) -> str | None:
+    """Resolve at the direct-config boundary, or retain a value resolved during inheritance."""
+
+    return _resolve_environment_reference(value, owner) if resolve_environment else value
+
+
+def _named_model_block(document: dict, field_name: str) -> dict[str, dict]:
+    """Validate one top-level block of named model definitions."""
+
+    if field_name not in document:
+        return {}
+    block = document[field_name]
+    if not isinstance(block, dict):
+        raise ConfigurationError(f"Configuration field '{field_name}' must be a mapping")
+
+    definitions: dict[str, dict] = {}
+    singular = "Model template" if field_name == "model_templates" else "Model"
+    for name, value in block.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigurationError(f"{singular} names must be non-empty strings")
+        if not isinstance(value, dict):
+            error = f"{singular} {name!r} config must be a mapping"
+            if field_name == "models":
+                raise ValueError(error)
+            raise ConfigurationError(error)
+        definitions[name] = value
+    return definitions
+
+
+def _validate_model_config_bounds(definitions: Mapping[str, dict]) -> None:
+    """Bound nested containers before inheritance recursively merges them."""
+
+    value_count = 0
+    active: set[int] = set()
+
+    def visit(value: object, depth: int, owner: str) -> None:
+        nonlocal value_count
+        if not isinstance(value, dict | list | tuple):
+            return
+        if depth > MAX_MODEL_CONFIG_NESTING_DEPTH:
+            raise ConfigurationError(
+                f"{owner} exceeds the model configuration nesting limit of "
+                f"{MAX_MODEL_CONFIG_NESTING_DEPTH}"
+            )
+        identity = id(value)
+        if identity in active:
+            raise ConfigurationError(f"{owner} contains a recursive container")
+        active.add(identity)
+        try:
+            children = value.values() if isinstance(value, dict) else value
+            for child in children:
+                value_count += 1
+                if value_count > MAX_MODEL_CONFIG_VALUES:
+                    raise ConfigurationError(
+                        "Model configuration exceeds the aggregate limit of "
+                        f"{MAX_MODEL_CONFIG_VALUES} values"
+                    )
+                visit(child, depth + 1, owner)
+        finally:
+            active.remove(identity)
+
+    for name, definition in definitions.items():
+        visit(definition, 1, f"Model or template {name!r}")
+
+
+def _validate_template_value(value: object, schema: object, owner: str) -> None:
+    """Validate a supplied template value while allowing null to remove inheritance."""
+
+    if value is None:
+        return
+    if schema is _ANY_MAPPING:
+        if not isinstance(value, dict):
+            raise ConfigurationError(f"{owner} must be a mapping or null")
+        return
+    if schema is _LIST_OR_MAPPING:
+        if not isinstance(value, list | dict):
+            raise ConfigurationError(f"{owner} must be a list or mapping, or null")
+        entries = ((label, None) for label in value) if isinstance(value, list) else value.items()
+        if any(
+            not isinstance(label, str)
+            or not label.strip()
+            or (description is not None and not isinstance(description, str))
+            for label, description in entries
+        ):
+            raise ConfigurationError(
+                f"{owner} must contain non-empty names with string or null descriptions"
+            )
+        return
+    if isinstance(schema, dict):
+        if not isinstance(value, dict):
+            raise ConfigurationError(f"{owner} must be a mapping or null")
+        _reject_unknown_fields(value, set(schema), owner)
+        for field_name, field_value in value.items():
+            _validate_template_value(
+                field_value,
+                schema[field_name],
+                f"{owner} {field_name}",
+            )
+        return
+    if schema is str and (not isinstance(value, str) or not value):
+        raise ConfigurationError(f"{owner} must be a non-empty string or null")
+    if schema is int and (isinstance(value, bool) or not isinstance(value, int)):
+        raise ConfigurationError(f"{owner} must be an integer or null")
+
+
+def _validate_model_template_fragment_semantics(owner: str, data: dict) -> None:
+    """Validate supplied fragment values without requiring omitted model settings."""
+
+    category = data.get("category")
+    if isinstance(category, str) and not category.strip():
+        raise ConfigurationError(f"{owner} category must be a non-empty string or null")
+
+    spans = data.get("spans")
+    if isinstance(spans, dict):
+        class_index = spans.get("class_index")
+        if class_index is not None and class_index < 0:
+            raise ConfigurationError(
+                f"{owner} spans class_index must be a non-negative integer or null"
+            )
+
+    classify = data.get("classify")
+    if isinstance(classify, dict):
+        class_index = classify.get("class_index")
+        if class_index is not None and class_index < 0:
+            raise ConfigurationError(
+                f"{owner} classify class_index must be a non-negative integer or null"
+            )
+        labels = classify.get("labels")
+        if isinstance(labels, list):
+            try:
+                parsed_labels = _parse_classify_labels(labels, f"{owner} classify")
+            except ValueError as exc:
+                raise ConfigurationError(str(exc)) from exc
+            if class_index is not None and class_index >= len(parsed_labels):
+                raise ConfigurationError(
+                    f"{owner} classify class_index {class_index} is outside its "
+                    f"{len(parsed_labels)} labels"
+                )
+        elif isinstance(labels, dict) and len(labels) > MAX_CLASSIFY_LABELS:
+            raise ConfigurationError(
+                f"{owner} classify labels may name at most {MAX_CLASSIFY_LABELS} choices"
+            )
+
+    score = data.get("score")
+    if isinstance(score, dict):
+        score_tokens = score.get("tokens")
+        if isinstance(score_tokens, dict):
+            negative = score_tokens.get("negative")
+            positive = score_tokens.get("positive")
+            stripped_negative = negative.strip() if isinstance(negative, str) else None
+            stripped_positive = positive.strip() if isinstance(positive, str) else None
+            if negative is not None and not stripped_negative:
+                raise ConfigurationError(f"{owner} score negative token must be non-empty")
+            if positive is not None and not stripped_positive:
+                raise ConfigurationError(f"{owner} score positive token must be non-empty")
+            if (
+                stripped_negative is not None
+                and stripped_positive is not None
+                and stripped_negative == stripped_positive
+            ):
+                raise ConfigurationError(f"{owner} score positive and negative tokens must differ")
+
+        reasoning = score.get("reasoning")
+        reasoning_max_tokens = reasoning.get("max_tokens") if isinstance(reasoning, dict) else None
+        if reasoning_max_tokens is not None and reasoning_max_tokens < _MIN_EXPLANATION_TOKENS:
+            raise ConfigurationError(
+                f"{owner} score reasoning max_tokens must be an integer of at least "
+                f"{_MIN_EXPLANATION_TOKENS} or null"
+            )
+
+        explanation = score.get("explanation")
+        explanation_max_tokens = (
+            explanation.get("max_tokens") if isinstance(explanation, dict) else None
+        )
+        if explanation_max_tokens is not None:
+            try:
+                _explanation_token_budget(
+                    explanation_max_tokens,
+                    reasoning_max_tokens,
+                    f"{owner} score",
+                )
+            except ValueError as exc:
+                raise ConfigurationError(str(exc)) from exc
+
+
+def _validate_model_template(name: str, data: dict) -> None:
+    """Validate a partial model template without requiring runtime-only fields."""
+
+    owner = f"Model template {name!r}"
+    _reject_unknown_fields(data, set(_MODEL_TEMPLATE_SCHEMA) | {"extends"}, owner)
+    if "extends" in data:
+        extends = data["extends"]
+        if not isinstance(extends, str) or not extends.strip():
+            raise ConfigurationError(f"{owner} extends must be a non-empty string")
+    for field_name, value in data.items():
+        if field_name != "extends":
+            _validate_template_value(
+                value, _MODEL_TEMPLATE_SCHEMA[field_name], f"{owner} {field_name}"
+            )
+    _validate_model_template_fragment_semantics(owner, data)
+
+
+def _expand_model_environment_references(
+    name: str,
+    data: dict,
+    *,
+    template: bool,
+    environment_cache: dict[str, str | None],
+) -> dict:
+    """Resolve each environment-backed field in one definition exactly once."""
+
+    owner = f"Model template {name!r}" if template else f"Inference model {name!r}"
+
+    def expand_fields(fields: dict, names: tuple[str, ...], field_owner: str) -> dict:
+        expanded = dict(fields)
+        for field_name in names:
+            value = fields.get(field_name)
+            if not isinstance(value, str):
+                continue
+            try:
+                expanded[field_name] = _resolve_environment_reference(
+                    value,
+                    field_owner,
+                    cache=environment_cache,
+                )
+            except ValueError as exc:
+                raise ConfigurationError(str(exc)) from exc
+        return expanded
+
+    expanded = expand_fields(
+        data,
+        ("model", "endpoint", "aws_profile", "region"),
+        owner,
+    )
+    tokens = data.get("tokens")
+    if isinstance(tokens, dict):
+        expanded["tokens"] = expand_fields(
+            tokens,
+            ("endpoint", "model"),
+            f"{owner} tokens",
+        )
+    score = data.get("score")
+    if isinstance(score, dict):
+        expanded["score"] = expand_fields(
+            score,
+            ("calibration",),
+            f"{owner} score",
+        )
+    return expanded
+
+
+def _merge_model_definition(parent: dict, child: dict, depth: int = 1) -> dict:
+    """Recursively merge one validated definition, with null removing an inherited field."""
+
+    if depth > MAX_MODEL_CONFIG_NESTING_DEPTH:
+        raise ConfigurationError(
+            "Resolved model configuration exceeds the nesting limit of "
+            f"{MAX_MODEL_CONFIG_NESTING_DEPTH}"
+        )
+    merged = dict(parent)
+    for key, value in child.items():
+        if depth == 1 and key == "extends":
+            continue
+        if value is None:
+            if key in merged:
+                merged.pop(key)
+            else:
+                # Preserve validation behavior for a null field that did not override anything.
+                # Null is inheritance removal syntax, not a way to bypass a required field.
+                merged[key] = None
+            continue
+        inherited = merged.get(key)
+        if isinstance(inherited, dict) and isinstance(value, dict):
+            merged[key] = _merge_model_definition(inherited, value, depth + 1)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _validate_resolved_model_semantics(name: str, data: dict, *, template: bool) -> None:
+    """Fully validate each configured section after inherited fragments have merged."""
+
+    owner = f"Model template {name!r}" if template else f"Inference model {name!r}"
+    try:
+        if data.get("tokens") is not None:
+            _parse_input_tokens(
+                name,
+                data["tokens"],
+                owner=f"{owner} tokens",
+                resolve_environment=False,
+            )
+        if data.get("score") is not None:
+            _parse_score_config(
+                name,
+                data["score"],
+                owner=f"{owner} score",
+                resolve_environment=False,
+            )
+        if data.get("classify") is not None:
+            _parse_classify_config(name, data["classify"], owner=f"{owner} classify")
+        spans = (
+            _parse_span_config(name, data["spans"], owner=f"{owner} spans")
+            if data.get("spans") is not None
+            else None
+        )
+        if data.get("complete") is not None:
+            _parse_complete_config(name, data["complete"], owner=f"{owner} complete")
+    except ConfigurationError:
+        raise
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+    category = data.get("category")
+    if spans is not None and (not isinstance(category, str) or not category.strip()):
+        raise ConfigurationError(
+            f"{owner} requires a non-empty string 'category' when spans is configured"
+        )
+    if category is not None and (not isinstance(category, str) or not category.strip()):
+        raise ConfigurationError(f"{owner} category must be a non-empty string")
+
+
+def _config_scalar_bytes(value: object) -> int:
+    """A deterministic work-size estimate for one scalar in a resolved definition."""
+
+    if isinstance(value, str):
+        return len(value.encode("utf-8", errors="surrogatepass"))
+    if value is None:
+        return 4
+    if isinstance(value, bool):
+        return 4 if value else 5
+    if isinstance(value, int):
+        # Estimate decimal digits without constructing an attacker-sized decimal string.
+        digits = max(1, (abs(value).bit_length() * 30_103) // 100_000 + 1)
+        return digits + (1 if value < 0 else 0)
+    if isinstance(value, float):
+        return 24
+    return 16
+
+
+def _charge_resolved_model_output(
+    value: object,
+    remaining_values: int,
+    remaining_bytes: int,
+) -> tuple[int, int]:
+    """Charge logical values and scalar/key bytes before retaining a resolved output."""
+
+    value_count = 0
+    byte_count = 0
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, dict | list | tuple):
+            continue
+        if isinstance(current, dict):
+            byte_count += sum(_config_scalar_bytes(key) for key in current)
+            children = current.values()
+        else:
+            children = current
+        for child in children:
+            value_count += 1
+            if value_count > remaining_values:
+                raise ConfigurationError(
+                    "Resolved model configurations exceed the aggregate limit of "
+                    f"{MAX_RESOLVED_MODEL_CONFIG_VALUES} values"
+                )
+            if isinstance(child, dict | list | tuple):
+                stack.append(child)
+            else:
+                byte_count += _config_scalar_bytes(child)
+            if byte_count > remaining_bytes:
+                raise ConfigurationError(
+                    "Resolved model configurations exceed the aggregate limit of "
+                    f"{MAX_RESOLVED_MODEL_CONFIG_BYTES} bytes"
+                )
+    return value_count, byte_count
+
+
+def _resolve_model_definitions(document: dict) -> tuple[dict[str, dict], bool]:
+    """Resolve model/template inheritance without mutating the caller's document."""
+
+    raw_models = document.get("models")
+    uses_inheritance = "model_templates" in document or (
+        isinstance(raw_models, dict)
+        and any(isinstance(value, dict) and "extends" in value for value in raw_models.values())
+    )
+    if not uses_inheritance:
+        # Preserve the original path, diagnostics, and accepted limits for configurations that do
+        # not opt into inheritance.
+        if not raw_models:
+            return {}, False
+        if not isinstance(raw_models, dict):
+            raise ConfigurationError("Configuration field 'models' must be a mapping")
+        for name, value in raw_models.items():
+            if not isinstance(value, dict):
+                raise ValueError(f"Model '{name}' config must be a mapping")
+        return dict(raw_models), False
+
+    templates = _named_model_block(document, "model_templates")
+    models = _named_model_block(document, "models")
+    if len(templates) + len(models) > MAX_MODEL_CONFIG_DEFINITIONS:
+        raise ConfigurationError(
+            "Configuration defines more than "
+            f"{MAX_MODEL_CONFIG_DEFINITIONS} models and model templates"
+        )
+
+    duplicates = sorted(set(templates) & set(models))
+    if duplicates:
+        raise ConfigurationError(
+            "Model and model template names must be unique; defined in both blocks: "
+            + ", ".join(repr(name) for name in duplicates)
+        )
+
+    definitions = {**templates, **models}
+    _validate_model_config_bounds(definitions)
+    for name, data in templates.items():
+        _validate_model_template(name, data)
+    for name, data in models.items():
+        _reject_unknown_fields(
+            data,
+            set(_INFERENCE_MODEL_FIELDS) | {"extends"},
+            f"Inference model {name!r}",
+        )
+        if "extends" in data and (
+            not isinstance(data["extends"], str) or not data["extends"].strip()
+        ):
+            raise ConfigurationError(f"Inference model {name!r} extends must be a non-empty string")
+
+    resolved: dict[str, dict] = {}
+    resolved_depths: dict[str, int] = {}
+    resolved_value_count = 0
+    resolved_byte_count = 0
+    environment_cache: dict[str, str | None] = {}
+    resolving: list[str] = []
+
+    def resolve(name: str) -> dict:
+        nonlocal resolved_byte_count, resolved_value_count
+        cached = resolved.get(name)
+        if cached is not None:
+            return cached
+        if name in resolving:
+            cycle = resolving[resolving.index(name) :] + [name]
+            raise ConfigurationError(
+                f"Model or template {name!r} is part of an extends cycle: "
+                + " -> ".join(repr(item) for item in cycle)
+            )
+        resolving.append(name)
+        try:
+            data = definitions[name]
+            parent_name = data.get("extends")
+            parent: dict = {}
+            ancestry_depth = 1
+            if parent_name is not None:
+                if parent_name not in definitions:
+                    raise ConfigurationError(
+                        f"Model or template {name!r} extends unknown model or template "
+                        f"{parent_name!r}"
+                    )
+                resolved_parent = resolve(parent_name)
+                ancestry_depth = resolved_depths[parent_name] + 1
+                if ancestry_depth > MAX_MODEL_CONFIG_INHERITANCE_DEPTH:
+                    raise ConfigurationError(
+                        f"Model or template {name!r} exceeds the inheritance limit of "
+                        f"{MAX_MODEL_CONFIG_INHERITANCE_DEPTH}"
+                    )
+                # Alias metadata describes one name and is intentionally never inherited.
+                parent = {
+                    key: value for key, value in resolved_parent.items() if key != "description"
+                }
+            expanded_data = _expand_model_environment_references(
+                name,
+                data,
+                template=name in templates,
+                environment_cache=environment_cache,
+            )
+            result = _merge_model_definition(parent, expanded_data)
+            value_charge, byte_charge = _charge_resolved_model_output(
+                result,
+                MAX_RESOLVED_MODEL_CONFIG_VALUES - resolved_value_count,
+                MAX_RESOLVED_MODEL_CONFIG_BYTES - resolved_byte_count,
+            )
+            _validate_resolved_model_semantics(name, result, template=name in templates)
+            resolved_value_count += value_charge
+            resolved_byte_count += byte_charge
+            resolved[name] = result
+            resolved_depths[name] = ancestry_depth
+            return result
+        finally:
+            resolving.pop()
+
+    # Resolve every definition so an invalid unused template cannot hide a cycle or bad parent.
+    for name in sorted(definitions):
+        resolve(name)
+    return {name: resolved[name] for name in models}, True
+
+
 def _parse_inference_model(
     model_name: str,
     data: dict,
+    *,
+    resolve_environment: bool = True,
 ) -> InferenceModelConfig:
     """Parse one configured inference model."""
 
     owner = f"Inference model '{model_name}'"
-    _reject_unknown_fields(
-        data,
-        {
-            "description",
-            "adapter",
-            "model",
-            "endpoint",
-            "aws_profile",
-            "region",
-            "category",
-            "tokens",
-            "score",
-            "classify",
-            "spans",
-            "complete",
-        },
-        owner,
+    _reject_unknown_fields(data, set(_INFERENCE_MODEL_FIELDS), owner)
+    tokens = (
+        _parse_input_tokens(
+            model_name,
+            data["tokens"],
+            resolve_environment=resolve_environment,
+        )
+        if "tokens" in data
+        else None
     )
-    tokens = _parse_input_tokens(model_name, data["tokens"]) if "tokens" in data else None
-    score = _parse_score_config(model_name, data["score"]) if "score" in data else None
+    score = (
+        _parse_score_config(
+            model_name,
+            data["score"],
+            resolve_environment=resolve_environment,
+        )
+        if "score" in data
+        else None
+    )
     classify = _parse_classify_config(model_name, data["classify"]) if "classify" in data else None
     spans = _parse_span_config(model_name, data["spans"]) if "spans" in data else None
     complete = _parse_complete_config(model_name, data["complete"]) if "complete" in data else None
@@ -642,13 +1214,27 @@ def _parse_inference_model(
         adapter=adapter,
         model=cast(
             str,
-            _resolve_environment_reference(_required_string(data, "model", owner), owner),
+            _configured_environment_value(
+                _required_string(data, "model", owner),
+                owner,
+                resolve_environment=resolve_environment,
+            ),
         ),
-        endpoint=_resolve_environment_reference(_optional_string(data, "endpoint", owner), owner),
-        aws_profile=_resolve_environment_reference(
-            _optional_string(data, "aws_profile", owner), owner
+        endpoint=_configured_environment_value(
+            _optional_string(data, "endpoint", owner),
+            owner,
+            resolve_environment=resolve_environment,
         ),
-        region=_resolve_environment_reference(_optional_string(data, "region", owner), owner),
+        aws_profile=_configured_environment_value(
+            _optional_string(data, "aws_profile", owner),
+            owner,
+            resolve_environment=resolve_environment,
+        ),
+        region=_configured_environment_value(
+            _optional_string(data, "region", owner),
+            owner,
+            resolve_environment=resolve_environment,
+        ),
         tokens=tokens,
         score=score,
         category=category,
@@ -658,10 +1244,15 @@ def _parse_inference_model(
     )
 
 
-def _parse_complete_config(model_name: str, value: object) -> CompleteConfig:
+def _parse_complete_config(
+    model_name: str,
+    value: object,
+    *,
+    owner: str | None = None,
+) -> CompleteConfig:
     """Parse one alias's completion settings: the JSON Schema its replies must match."""
 
-    owner = f"Inference model '{model_name}' complete"
+    owner = owner or f"Inference model '{model_name}' complete"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     _reject_unknown_fields(value, {"response_schema"}, owner)
@@ -673,10 +1264,15 @@ def _parse_complete_config(model_name: str, value: object) -> CompleteConfig:
         raise ValueError(f"{owner} response_schema {exc}") from exc
 
 
-def _parse_classify_config(model_name: str, value: object) -> ClassifyConfig:
+def _parse_classify_config(
+    model_name: str,
+    value: object,
+    *,
+    owner: str | None = None,
+) -> ClassifyConfig:
     """Parse the classifier head exposed by one logical model alias."""
 
-    owner = f"Inference model '{model_name}' classify"
+    owner = owner or f"Inference model '{model_name}' classify"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
@@ -714,10 +1310,15 @@ def _parse_classify_labels(value: object, owner: str) -> tuple[tuple[str, str | 
     return tuple(labels)
 
 
-def _parse_span_config(model_name: str, value: object) -> SpanConfig:
+def _parse_span_config(
+    model_name: str,
+    value: object,
+    *,
+    owner: str | None = None,
+) -> SpanConfig:
     """Parse the span output class exposed by one logical alias."""
 
-    owner = f"Inference model '{model_name}' spans"
+    owner = owner or f"Inference model '{model_name}' spans"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
@@ -728,10 +1329,16 @@ def _parse_span_config(model_name: str, value: object) -> SpanConfig:
     return SpanConfig(class_index=class_index)
 
 
-def _parse_input_tokens(model_name: str, value: object) -> InputTokensConfig:
+def _parse_input_tokens(
+    model_name: str,
+    value: object,
+    *,
+    owner: str | None = None,
+    resolve_environment: bool = True,
+) -> InputTokensConfig:
     """Parse the tokenizer endpoint/model and response count field for one model."""
 
-    owner = f"Inference model '{model_name}' tokens"
+    owner = owner or f"Inference model '{model_name}' tokens"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
@@ -742,16 +1349,30 @@ def _parse_input_tokens(model_name: str, value: object) -> InputTokensConfig:
     _reject_unknown_fields(extraction, {"count"}, f"{owner} extraction")
     return InputTokensConfig(
         adapter=_required_string(fields, "adapter", owner),
-        endpoint=_resolve_environment_reference(_optional_string(fields, "endpoint", owner), owner),
+        endpoint=_configured_environment_value(
+            _optional_string(fields, "endpoint", owner),
+            owner,
+            resolve_environment=resolve_environment,
+        ),
         count_field=_required_string(extraction, "count", f"{owner} extraction"),
-        model=_resolve_environment_reference(_optional_string(fields, "model", owner), owner),
+        model=_configured_environment_value(
+            _optional_string(fields, "model", owner),
+            owner,
+            resolve_environment=resolve_environment,
+        ),
     )
 
 
-def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
+def _parse_score_config(
+    model_name: str,
+    value: object,
+    *,
+    owner: str | None = None,
+    resolve_environment: bool = True,
+) -> ScoreConfig:
     """Parse one model score prompt and its optional adapter settings."""
 
-    owner = f"Inference model '{model_name}' score"
+    owner = owner or f"Inference model '{model_name}' score"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
@@ -825,8 +1446,10 @@ def _parse_score_config(model_name: str, value: object) -> ScoreConfig:
         negative_token=negative_token,
         positive_token=positive_token,
         probabilities_field=probabilities_field,
-        calibration=_resolve_environment_reference(
-            _optional_string(fields, "calibration", owner), owner
+        calibration=_configured_environment_value(
+            _optional_string(fields, "calibration", owner),
+            owner,
+            resolve_environment=resolve_environment,
         ),
         reasoning_max_tokens=reasoning_max_tokens,
         explanation_max_tokens=explanation_max_tokens,

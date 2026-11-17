@@ -60,3 +60,43 @@ rule authors can select the right model. Descriptions are human-facing metadata:
 not change provider requests, model-result cache keys, or compiled-policy model digests.
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
+
+## Model templates and inheritance
+
+Use `model_templates` to share reviewed provider and operation settings without creating a runtime
+alias. A model or template can use `extends` with one other model or template:
+
+```yaml
+model_templates:
+  scored_model:
+    adapter: application_adapter
+    score:
+      message_builder: constitution
+      boundary_seed: 7
+      tokens:
+        negative: "0"
+        positive: "1"
+
+models:
+  policy_score:
+    extends: scored_model
+    model: synthetic/policy-score
+    description: Synthetic policy score used by the example.
+    score:
+      boundary_seed: 11
+```
+
+Declaration order does not matter. Nested mappings merge recursively and the child value wins.
+Setting a field or section to `null` removes the inherited value. `description` belongs to one
+runtime alias, cannot appear in a template, and is not inherited when one model extends another.
+Template and model names share one namespace. Unknown parents, duplicate names, inheritance cycles,
+unknown fields, and malformed sections fail configuration loading, including errors in templates
+that no model uses.
+
+Resolution does not mutate the parsed mapping. It is bounded to 256 total model/template
+definitions, 32 inheritance levels, 16 nested container levels, 20,000 aggregate source values,
+20,000 aggregate logical values, and 1,000,000 aggregate scalar/key bytes across all resolved
+definitions after environment references expand. Each referenced environment variable is read once
+before inheritance fanout is charged. Templates are load-time configuration only; after
+resolution, models use the same strict validation and immutable runtime representation as fully
+written-out aliases.
