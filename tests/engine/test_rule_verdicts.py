@@ -167,6 +167,53 @@ _VERDICTS = [
         id="fullword-inside-a-word",
     ),
     pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "--force" fullword'),
+        _conv(_user("git push --force origin main")),
+        True,
+        id="fullword-starting-and-ending-with-punctuation",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "--force" fullword'),
+        _conv(_user("git push x--forcey")),
+        False,
+        id="fullword-punctuation-literal-inside-a-word",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "rm -rf /" fullword'),
+        _conv(_user("rm -rf /")),
+        True,
+        id="fullword-ending-in-punctuation-at-end-of-text",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "rm -rf /" fullword'),
+        _conv(_user("rm -rf /tmp/cache")),
+        False,
+        id="fullword-ending-in-punctuation-followed-by-a-word",
+    ),
+    pytest.param(
+        _rule(
+            "count([m for m in user_messages if m.content contains $w]) == 2",
+            '$w = "$HOME" fullword',
+        ),
+        _conv(_user("echo $HOME"), _user("cd $HOME/bin"), _user("echo x$HOME")),
+        True,
+        id="fullword-starting-with-punctuation",
+    ),
+    pytest.param(
+        # Word characters are ASCII, as in RE2's \b and \B, so an adjacent
+        # non-ASCII letter does not count as touching the literal.
+        _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),
+        _conv(_user("caféñ")),
+        True,
+        id="fullword-non-ascii-letter-is-not-a-word-character",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),
+        _conv(_user("cafés")),
+        False,
+        id="fullword-ascii-letter-after-non-ascii-literal-end",
+    ),
+    pytest.param(
         _rule("any m in user_messages where m.content contains $s", '$s = "secret" base64'),
         _conv(_user(f"payload {base64.b64encode(b'secret').decode()} end")),
         True,
@@ -1310,6 +1357,34 @@ _VERDICTS = [
         _conv(_user("start middle end")),
         True,
         id="position-arithmetic-bounds-the-distance",
+    ),
+    # "İ".lower() is two code points, so nocase literal positions and captures must be
+    # mapped back to the original text, not read off the lower-cased copy.
+    pytest.param(
+        _rule(
+            "any m in user_messages where (@end - @start) < 20",
+            '$start = "start" nocase',
+            '$end = "end" nocase',
+        ),
+        _conv(_user("start İİİİİİİİİİ end")),
+        True,
+        id="position-arithmetic-nocase-across-expanding-lowercase",
+    ),
+    pytest.param(
+        _rule("any m in user_messages where @kw == 2", '$kw = "secret" nocase'),
+        _conv(_user("İ SECRET")),
+        True,
+        id="position-absolute-nocase-after-expanding-lowercase",
+    ),
+    pytest.param(
+        _rule(
+            "any m in user_messages where ($k in m.content as tok) "
+            "and any r in tool_responses where r.content contains tok",
+            '$k = "api_key=" nocase',
+        ),
+        _conv(_user("İ API_KEY=abc"), _call("x"), _response("c1", "API_KEY=")),
+        True,
+        id="capture-nocase-after-expanding-lowercase",
     ),
     pytest.param(
         _rule("any m in user_messages where #cmds >= 3", '$cmds = ["sudo", "rm"]'),
