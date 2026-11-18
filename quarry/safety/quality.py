@@ -19,6 +19,9 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from enum import StrEnum
+from importlib import import_module
 
 from quarry.engine.atoms import AtomDomain, AtomSpec, Cost
 from quarry.engine.contracts import CompiledRuleArtifact
@@ -30,6 +33,33 @@ from quarry.types.rules import DSLRule
 
 _MAX_COUNT_CASES = 32
 _COUNT_OPS = frozenset({"=", "==", "!=", ">", "<", ">=", "<="})
+_MAX_FORMAL_SOLVER_CHECKS = 4096
+_MAX_FORMAL_STATES = 1024
+_MAX_FORMAL_TIMEOUT_MS = 2000
+
+
+class MatchabilityAnswer(StrEnum):
+    """Possible answers from the bounded formal verifier."""
+
+    YES = "yes"
+    NO = "no"
+    UNKNOWN = "unknown"
+
+
+class MatchabilityBasis(StrEnum):
+    """The abstraction that established a matchability answer."""
+
+    ABSTRACT_DFA = "abstract-dfa"
+    CONTENT_MODEL = "content-model"
+
+
+@dataclass(frozen=True, slots=True)
+class MatchabilityResult:
+    """One bounded formal matchability result."""
+
+    answer: MatchabilityAnswer
+    basis: MatchabilityBasis | None = None
+    reason: str | None = None
 
 
 def _constant_count_value(spec: AtomSpec) -> bool | None:
@@ -189,14 +219,24 @@ def _has_event_anchor(artifact: CompiledRuleArtifact) -> bool:
     )
 
 
+def _constant_verdict(artifact: CompiledRuleArtifact) -> bool | None:
+    """Prove a constant match verdict from abstract DFA and collection-count facts."""
+    cases = [_with_constant_closed_parts(artifact, case) for case in _count_cases(artifact)]
+    if not any(artifact.dfa.can_reject_with(case) for case in cases):
+        return False
+    if not any(artifact.dfa.can_accept_with(case) for case in cases):
+        return True
+    return None
+
+
 def quality_warnings(rule: DSLRule, artifact: CompiledRuleArtifact) -> list[ValidationWarning]:
     """Report proven constant verdicts and rules without an event/content anchor.
 
     Free atoms may take either value, so reachability can miss a constant verdict but
     cannot invent one. Warnings do not change compilation or scan decisions.
     """
-    cases = [_with_constant_closed_parts(artifact, case) for case in _count_cases(artifact)]
-    if not any(artifact.dfa.can_reject_with(case) for case in cases):
+    verdict = _constant_verdict(artifact)
+    if verdict is False:
         return [
             ValidationWarning(
                 Severity.HIGH,
@@ -208,11 +248,7 @@ def quality_warnings(rule: DSLRule, artifact: CompiledRuleArtifact) -> list[Vali
     # A broad condition can intentionally admit candidates for a collect clause; the
     # collector may still yield no output. Likewise, a per-binding DFA may reject for
     # every binding even when a conversation supplies no candidate binding at all.
-    if (
-        rule.collect is None
-        and artifact.capture_plan is None
-        and not any(artifact.dfa.can_accept_with(case) for case in cases)
-    ):
+    if rule.collect is None and artifact.capture_plan is None and verdict is True:
         return [
             ValidationWarning(
                 Severity.HIGH,
@@ -232,3 +268,71 @@ def quality_warnings(rule: DSLRule, artifact: CompiledRuleArtifact) -> list[Vali
             )
         ]
     return []
+
+
+def verify_matchability(
+    artifact: CompiledRuleArtifact,
+    *,
+    max_solver_checks: int = 128,
+    max_states: int = 64,
+    timeout_ms: int = 250,
+) -> MatchabilityResult:
+    """Try to prove that a compiled rule cannot match in a bounded content model.
+
+    The optional solver is imported only for this explicit check. Missing dependencies,
+    unsupported constructs, feasible paths, exhausted limits, and internal failures all
+    return UNKNOWN. This first slice does not claim YES until witness replay is available.
+    """
+    limits = {
+        "max_solver_checks": max_solver_checks,
+        "max_states": max_states,
+        "timeout_ms": timeout_ms,
+    }
+    if any(type(value) is not int or value <= 0 for value in limits.values()):
+        return MatchabilityResult(
+            MatchabilityAnswer.UNKNOWN,
+            reason="formal verification limits must be positive integers",
+        )
+
+    try:
+        z3 = import_module("z3")
+        from quarry.safety._matchability import verify
+
+        return verify(
+            artifact,
+            z3,
+            max_solver_checks=min(max_solver_checks, _MAX_FORMAL_SOLVER_CHECKS),
+            max_states=min(max_states, _MAX_FORMAL_STATES),
+            timeout_ms=min(timeout_ms, _MAX_FORMAL_TIMEOUT_MS),
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name == "z3" or (exc.name and exc.name.startswith("z3.")):
+            return MatchabilityResult(
+                MatchabilityAnswer.UNKNOWN,
+                reason="formal verification requires the 'verification' optional dependency",
+            )
+        return MatchabilityResult(
+            MatchabilityAnswer.UNKNOWN,
+            reason="formal verification could not load safely",
+        )
+    except Exception:
+        return MatchabilityResult(
+            MatchabilityAnswer.UNKNOWN,
+            reason="formal verification failed safely",
+        )
+
+
+def matchability_warning(
+    rule: DSLRule,
+    artifact: CompiledRuleArtifact,
+    result: MatchabilityResult,
+) -> ValidationWarning | None:
+    """Convert a bounded NO proof into an advisory without duplicating static checks."""
+    if result.answer is not MatchabilityAnswer.NO or _constant_verdict(artifact) is False:
+        return None
+    reason = result.reason or "no feasible matching trace was found"
+    return ValidationWarning(
+        Severity.HIGH,
+        f"Rule '{rule.name}' cannot match in the bounded string-message model: {reason}.",
+        "Review contradictory message-content predicates or verify the rule on intended inputs.",
+    )

@@ -28,6 +28,7 @@ import pytest
 
 from quarry.cli import format_results, scan_command
 from quarry.integrations import model_inference
+from quarry.safety.quality import MatchabilityAnswer, MatchabilityBasis, MatchabilityResult
 from quarry.scanner import DSLScanner
 from quarry.types.rules import ScanResult
 
@@ -156,6 +157,36 @@ class TestCLI:
         assert result.returncode in [0, 1]
         output = orjson.loads(result.stdout)
         assert output[0]["completion_state"] == "complete"
+
+    def test_validate_only_reports_a_formal_no_as_an_advisory(
+        self, tmp_path, temp_config_file, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            "quarry.cli.verify_matchability",
+            lambda _artifact: MatchabilityResult(
+                MatchabilityAnswer.NO,
+                basis=MatchabilityBasis.CONTENT_MODEL,
+                reason="synthetic conflict",
+            ),
+        )
+        exit_code = scan_command(
+            SimpleNamespace(
+                config=temp_config_file,
+                target=tmp_path,
+                no_limits=False,
+                recursive=False,
+                verbose=False,
+                batch=False,
+                validate_only=True,
+                output_format="human",
+                explain=False,
+                show_timing=False,
+                output=None,
+            )
+        )
+
+        assert exit_code == 1
+        assert "cannot match in the bounded string-message model" in capsys.readouterr().out
 
     def test_cli_scan_loads_configured_inference_backend(self, tmp_path, monkeypatch, capsys):
         """Run a hybrid rule through the CLI with a stub adapter."""
