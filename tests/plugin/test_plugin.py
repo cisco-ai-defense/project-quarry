@@ -302,12 +302,13 @@ async def test_plugin_reference_compile_and_scan_work_as_one_public_flow():
     assert non_matching["matched"] is False
 
 
-def test_reference_publishes_model_alias_operations_and_optional_descriptions(
+def test_reference_publishes_model_alias_operations_and_optional_display_metadata(
     tmp_path, monkeypatch
 ):
     head = {
         **SCORE_MODEL,
         "model": "head-v1",
+        "display_name": "Multi-purpose Classifier",
         "description": "Primary model for every supported operation.",
         "classify": {"class_index": 1},
         "tokens": {"adapter": "fake", "endpoint": None, "extraction": {"count": "count"}},
@@ -317,6 +318,7 @@ def test_reference_publishes_model_alias_operations_and_optional_descriptions(
     judge = {
         **SCORE_MODEL,
         "model": "judge-v1",
+        "display_name": "Policy Judge",
         "description": "Constitution judge; 1.0 means the policy is violated.",
     }
     plain = {"adapter": "fake", "model": "plain-v1"}
@@ -324,7 +326,7 @@ def test_reference_publishes_model_alias_operations_and_optional_descriptions(
         tmp_path,
         monkeypatch,
         _HeadAdapter(),
-        {"head": head, "judge": judge, "plain": plain},
+        {"plain": plain, "judge": judge, "head": head},
     )
 
     default_search = plugin.reference(action="search", query="model")
@@ -342,14 +344,21 @@ def test_reference_publishes_model_alias_operations_and_optional_descriptions(
                 "classify",
                 "spans",
             ],
+            "display_name": "Multi-purpose Classifier",
             "description": "Primary model for every supported operation.",
         },
         "judge": {
             "operations": ["complete", "score"],
+            "display_name": "Policy Judge",
             "description": "Constitution judge; 1.0 means the policy is violated.",
         },
         "plain": {"operations": ["complete"]},
     }
+    assert list(response["model_aliases"]) == ["head", "judge", "plain"]
+    rendered = json.dumps(response["model_aliases"], sort_keys=True)
+    assert json.loads(rendered) == response["model_aliases"]
+    assert "head-v1" not in rendered
+    assert "judge-v1" not in rendered
     assert plugin.reference(action="index", limit=1)["model_aliases"] == response["model_aliases"]
     assert "model_aliases" not in plugin.reference(action="index", limit=1, include_models=False)
 
@@ -2683,6 +2692,7 @@ async def test_a_search_then_get_workflow_stays_inside_its_reference_budget(tmp_
         f"alias_{index}": {
             "adapter": "fake",
             "model": f"model-{index}",
+            "display_name": (f"Model {index} " + "display label " * 10)[:100].rstrip(),
             "description": (f"Purpose of alias {index}. " + "Detailed model guidance. " * 30)[:500],
         }
         for index in range(10)
@@ -2794,6 +2804,7 @@ def test_host_manifests_start_the_same_server_and_keep_metadata_aligned():
     assert "Add parentheses when a condition mixes" in skill
     assert "include_precedence: true" in skill
     assert "include_models: true" in skill
+    assert "optional display name or description" in skill
     assert "runtime_config_version" in skill
     assert 'A missing key means "not applicable"' in skill
 
@@ -2809,3 +2820,55 @@ async def test_a_caller_changing_a_scan_result_does_not_change_the_next_scan():
 
     assert second["compilation"]["rule_names"] == ["r"]
     assert first["matched"] is second["matched"] is True
+
+
+def test_reference_publishes_model_alias_operations_and_optional_descriptions(
+    tmp_path, monkeypatch
+):
+    head = {
+        **SCORE_MODEL,
+        "model": "head-v1",
+        "description": "Primary model for every supported operation.",
+        "classify": {"class_index": 1},
+        "tokens": {"adapter": "fake", "endpoint": None, "extraction": {"count": "count"}},
+        "category": "EMAIL",
+        "spans": {"class_index": 1},
+    }
+    judge = {
+        **SCORE_MODEL,
+        "model": "judge-v1",
+        "description": "Constitution judge; 1.0 means the policy is violated.",
+    }
+    plain = {"adapter": "fake", "model": "plain-v1"}
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _HeadAdapter(),
+        {"head": head, "judge": judge, "plain": plain},
+    )
+
+    default_search = plugin.reference(action="search", query="model")
+    response = plugin.reference(action="search", query="model", include_models=True)
+
+    assert "model_aliases" not in default_search
+    assert response["runtime_config_version"] == 2
+    assert response["model_aliases"] == {
+        "head": {
+            "operations": [
+                "complete",
+                "score",
+                "input_tokens",
+                "split",
+                "classify",
+                "spans",
+            ],
+            "description": "Primary model for every supported operation.",
+        },
+        "judge": {
+            "operations": ["complete", "score"],
+            "description": "Constitution judge; 1.0 means the policy is violated.",
+        },
+        "plain": {"operations": ["complete"]},
+    }
+    assert plugin.reference(action="index", limit=1)["model_aliases"] == response["model_aliases"]
+    assert "model_aliases" not in plugin.reference(action="index", limit=1, include_models=False)

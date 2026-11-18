@@ -44,6 +44,8 @@ MAX_CLASSIFY_LABELS = 255
 
 # Model descriptions are returned by the plugin reference tool, so bound each configured value.
 MAX_MODEL_DESCRIPTION_LENGTH = 500
+# Display names are single-line labels in the same response, so keep them compact and printable.
+MAX_MODEL_DISPLAY_NAME_LENGTH = 100
 
 # Model templates are untrusted configuration input. These limits bound both the inheritance walk
 # and the recursive merge before provider settings are parsed into immutable runtime objects.
@@ -94,6 +96,7 @@ _CONFIG_FIELDS = frozenset(
 _INFERENCE_MODEL_FIELDS = frozenset(
     {
         "description",
+        "display_name",
         "adapter",
         "model",
         "endpoint",
@@ -357,11 +360,11 @@ class QuarryConfig:
     """Configuration for rules and integrations.
 
     Deeply immutable after construction: rule paths and texts are tuples, and models,
-    descriptions, prompts, and rate-limit definitions are read-only mappings of frozen values.
-    One configuration graph is built once and safely shared by reference across parallel work.
-    Per-scan variants come from ``dataclasses.replace`` changing only the rule source, which
-    shares the immutable models/descriptions/prompts/limits by identity. Mutable runtime
-    services (the shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
+    display metadata, prompts, and rate-limit definitions are read-only mappings of frozen
+    values. One configuration graph is built once and safely shared by reference across parallel
+    work. Per-scan variants come from ``dataclasses.replace`` changing only the rule source, which
+    shares the immutable models/metadata/prompts/limits by identity. Mutable runtime services (the
+    shared ``LLMRateLimiter``, scan-local scanner state) live outside this graph.
     """
 
     quarry_rules_paths: tuple[Path, ...] = ()
@@ -387,6 +390,8 @@ class QuarryConfig:
     # closed at load unless a real backend is registered; True opts into the dependency-free
     # keyword/lexical STUBS (local dev/testing only, never a production model).
     allow_stub_probers: bool = False
+    # Kept last to preserve positional construction of every pre-existing configuration field.
+    model_display_names: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Detach caller-provided containers into immutable form and pick timeout defaults."""
@@ -404,8 +409,9 @@ class QuarryConfig:
         object.__setattr__(self, "quarry_rule_texts", _frozen_tuple(self.quarry_rule_texts))
         object.__setattr__(self, "models", _frozen_mapping(self.models))
         object.__setattr__(self, "model_descriptions", _frozen_mapping(self.model_descriptions))
+        object.__setattr__(self, "model_display_names", _frozen_mapping(self.model_display_names))
         # Validate here, not only while parsing a mapping: hosts may construct or replace the
-        # config directly, and descriptions are included in plugin reference responses.
+        # config directly, and display metadata is included in plugin reference responses.
         for model_name, description in self.model_descriptions.items():
             if not isinstance(description, str) or not description:
                 raise ConfigurationError(
@@ -415,6 +421,26 @@ class QuarryConfig:
                 raise ConfigurationError(
                     f"Inference model '{model_name}' description must be at most "
                     f"{MAX_MODEL_DESCRIPTION_LENGTH} characters"
+                )
+        for model_name, display_name in self.model_display_names.items():
+            if not isinstance(display_name, str) or not display_name:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' display_name must be a non-empty string"
+                )
+            if len(display_name) > MAX_MODEL_DISPLAY_NAME_LENGTH:
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' display_name must be at most "
+                    f"{MAX_MODEL_DISPLAY_NAME_LENGTH} characters"
+                )
+            if display_name != display_name.strip():
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' display_name must not have leading or "
+                    "trailing whitespace"
+                )
+            if not display_name.isprintable():
+                raise ConfigurationError(
+                    f"Inference model '{model_name}' display_name must contain only printable "
+                    "characters"
                 )
         object.__setattr__(self, "judge_prompts", _frozen_mapping(self.judge_prompts))
         object.__setattr__(self, "llm_rate_limits", _frozen_mapping(self.llm_rate_limits))
@@ -508,6 +534,7 @@ class QuarryConfig:
 
         models: dict[str, InferenceModelConfig] = {}
         model_descriptions: dict[str, str] = {}
+        model_display_names: dict[str, str] = {}
         resolved_models, environment_resolved = _resolve_model_definitions(document)
         for model_name, model_data in resolved_models.items():
             models[model_name] = _parse_inference_model(
@@ -518,6 +545,9 @@ class QuarryConfig:
             description = model_data.get("description")
             if description is not None:
                 model_descriptions[model_name] = description
+            display_name = model_data.get("display_name")
+            if display_name is not None:
+                model_display_names[model_name] = display_name
             if config_version == 1 and models[model_name].complete is not None:
                 raise ValueError(
                     f"Inference model '{model_name}' complete is only supported by config_version 2"
@@ -600,6 +630,7 @@ class QuarryConfig:
             quarry_rules_paths=rules_paths,
             models=models,
             model_descriptions=model_descriptions,
+            model_display_names=model_display_names,
             judge_prompts=judge_prompts,
             llm_rate_limits=llm_rate_limits,
             safety_limits=safety_limits,
@@ -1139,7 +1170,9 @@ def _resolve_model_definitions(document: dict) -> tuple[dict[str, dict], bool]:
                     )
                 # Alias metadata describes one name and is intentionally never inherited.
                 parent = {
-                    key: value for key, value in resolved_parent.items() if key != "description"
+                    key: value
+                    for key, value in resolved_parent.items()
+                    if key not in {"description", "display_name"}
                 }
             expanded_data = _expand_model_environment_references(
                 name,

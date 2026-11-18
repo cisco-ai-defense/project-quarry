@@ -262,6 +262,124 @@ def test_from_mapping_rejects_a_non_mapping_with_valueerror(document, tmp_path):
         QuarryConfig.from_mapping(document, tmp_path)
 
 
+def test_model_display_metadata_is_parsed_beside_but_not_into_model_settings(tmp_path):
+    described = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "models": {
+                "judge": {
+                    "model": "openai/judge",
+                    "display_name": "Policy Judge",
+                    "description": "Scores policy violations.",
+                }
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+    plain = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "models": {"judge": {"model": "openai/judge"}},
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert described.model_display_names == {"judge": "Policy Judge"}
+    assert described.model_descriptions == {"judge": "Scores policy violations."}
+    assert described.models == plain.models
+
+
+def test_model_display_metadata_is_immutable_and_validated_on_replacement(tmp_path):
+    config = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "models": {
+                "judge": {
+                    "model": "openai/judge",
+                    "display_name": "Policy Judge",
+                    "description": "Scores policy violations.",
+                }
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    with pytest.raises(TypeError):
+        config.model_display_names["judge"] = "changed"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        config.model_descriptions["judge"] = "changed"  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="non-empty string"):
+        QuarryConfig(model_display_names={"judge": 3})  # type: ignore[dict-item]
+    with pytest.raises(ConfigurationError, match="non-empty string"):
+        QuarryConfig(model_descriptions={"judge": 3})  # type: ignore[dict-item]
+    with pytest.raises(ConfigurationError, match="at most 100 characters"):
+        replace(config, model_display_names={"judge": "x" * 101})
+    with pytest.raises(ConfigurationError, match="non-empty string"):
+        replace(config, model_descriptions={"judge": ""})
+    with pytest.raises(ConfigurationError, match="at most 500 characters"):
+        replace(config, model_descriptions={"judge": "x" * 501})
+
+
+@pytest.mark.parametrize(
+    ("display_name", "error"),
+    [
+        pytest.param("", "non-empty string", id="empty"),
+        pytest.param(" Friendly model", "leading or trailing whitespace", id="leading-space"),
+        pytest.param("Friendly model ", "leading or trailing whitespace", id="trailing-space"),
+        pytest.param("Friendly\nmodel", "printable characters", id="line-break"),
+        pytest.param("x" * 101, "at most 100 characters", id="too-long"),
+        pytest.param(3, "non-empty string", id="not-a-string"),
+    ],
+)
+def test_invalid_model_display_names_are_rejected(tmp_path, display_name, error):
+    with pytest.raises(ConfigurationError, match=error):
+        QuarryConfig.from_mapping(
+            {
+                "config_version": 2,
+                "models": {
+                    "judge": {
+                        "model": "openai/judge",
+                        "display_name": display_name,
+                    }
+                },
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("description", "error"),
+    [
+        pytest.param("", "description must be a non-empty string", id="empty"),
+        pytest.param(3, "description must be a non-empty string", id="not-a-string"),
+        pytest.param(
+            "x" * 501,
+            "description must be at most 500 characters",
+            id="too-long",
+        ),
+    ],
+)
+def test_invalid_model_descriptions_are_rejected(tmp_path, description, error):
+    with pytest.raises(ConfigurationError, match=error):
+        QuarryConfig.from_mapping(
+            {
+                "config_version": 2,
+                "models": {
+                    "judge": {
+                        "model": "openai/judge",
+                        "description": description,
+                    }
+                },
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
 def test_model_descriptions_are_parsed_beside_but_not_into_model_settings(tmp_path):
     described = QuarryConfig.from_mapping(
         {
@@ -312,32 +430,3 @@ def test_model_descriptions_are_immutable_and_validated_on_replacement(tmp_path)
         replace(config, model_descriptions={"judge": ""})
     with pytest.raises(ConfigurationError, match="at most 500 characters"):
         replace(config, model_descriptions={"judge": "x" * 501})
-
-
-@pytest.mark.parametrize(
-    ("description", "error"),
-    [
-        pytest.param("", "description must be a non-empty string", id="empty"),
-        pytest.param(3, "description must be a non-empty string", id="not-a-string"),
-        pytest.param(
-            "x" * 501,
-            "description must be at most 500 characters",
-            id="too-long",
-        ),
-    ],
-)
-def test_invalid_model_descriptions_are_rejected(tmp_path, description, error):
-    with pytest.raises(ConfigurationError, match=error):
-        QuarryConfig.from_mapping(
-            {
-                "config_version": 2,
-                "models": {
-                    "judge": {
-                        "model": "openai/judge",
-                        "description": description,
-                    }
-                },
-            },
-            tmp_path,
-            require_rules=False,
-        )
