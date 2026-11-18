@@ -200,6 +200,8 @@ def _shape_from_public_type(public_type: str) -> _ValueShape | None:
 def _expression_shape(node: ConditionNode, scopes: dict[str, _ValueShape]) -> _ValueShape | None:
     if isinstance(node, Identifier):
         return scopes.get(node.name) or _surface_shape(node.name)
+    if isinstance(node, FilterComprehension):
+        return _expression_shape(node.collection, scopes)
     if isinstance(node, FunctionCall):
         if node.name == "_slice" and node.args:
             return _expression_shape(node.args[0], scopes)

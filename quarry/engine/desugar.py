@@ -876,8 +876,10 @@ class Desugarer:
         )
 
     def reads(self, node, scope) -> set[str]:
-        """The scope variables a leaf test reads, explicitly or implicitly. The variable of a
-        map comprehension in the leaf hides a scope variable with the same name."""
+        """Find enclosing reads, keeping collection sources outside their own binder.
+
+        Every comprehension body hides an enclosing variable of the same name.
+        """
         innermost = scope[-1].name if scope else None
         found: set[str] = set()
 
@@ -902,8 +904,10 @@ class Desugarer:
             ):
                 visit(n.right, nested, names)
                 return
-            comprehension = hasattr(n, "variable") and hasattr(n, "collection")
-            body = names - {n.variable} if isinstance(n, MapComprehension) else names
+            comprehension = isinstance(
+                n, (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension)
+            )
+            body = names - {n.variable} if comprehension else names
             for field_name in condition_child_fields(n):
                 value = getattr(n, field_name)
                 inner = comprehension and field_name != "collection"

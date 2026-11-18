@@ -2258,16 +2258,22 @@ def build_model_result_evidence(
     # A collection used to construct a judge's input is part of that input. Its
     # consuming judge still owns the measured score. Only value-level questions
     # outside model calls replace child measurements with aggregate evidence.
-    aggregate = counted = False
+    aggregate = quantified = False
     pending = [] if expression is None else [expression]
     while pending:
         node = pending.pop()
         if node.kind in {"model_call", "map", "message_map", "message_select"}:
             continue
-        aggregate |= node.kind in {"call_count", "call_any", "call_all"}
-        counted |= node.kind == "call_count"
+        if node.kind in {"call_count", "call_any", "call_all"}:
+            aggregate = True
+            quantified |= node.kind in {"call_any", "call_all"}
+            # The outer collection operation owns its result. Its source and
+            # predicate may contain other counts or quantifiers with other roles.
+            continue
         pending.extend(node.children)
-    message_aggregate = aggregate and (event is not None or not counted)
+    message_aggregate = aggregate and (
+        event is not None or quantified or (expression is not None and expression.kind != "compare")
+    )
     if aggregate:
         operation = "boolean_expression" if message_aggregate else "numeric_expression"
         expression_value = matched if message_aggregate else expression_value
