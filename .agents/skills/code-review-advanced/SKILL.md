@@ -286,6 +286,22 @@ Lead with demonstrated findings, ordered by impact. For each, give:
 - The expected contract, actual outcome, and concrete user impact.
 - Evidence inspected or executed and a focused regression scenario.
 
+### Explain findings and fixes with simple examples
+
+Write review comments in plain, informal language. Show the issue with a small input or a
+short sequence of events so a contributor can understand it without reconstructing the
+entire implementation.
+
+When suggesting a fix, include a minimal example of the change when it makes the fix clearer.
+Use the actual function and variable names, keep code snippets focused, and explain why the
+change prevents the demonstrated failure. A short before/after snippet or pseudocode is
+enough; label pseudocode and distinguish an illustrative suggestion from a verified patch.
+State one simple regression case and its expected outcome.
+
+For example: "With stock 5, reserving [3, 3] rejects the batch but leaves stock at 2. Validate
+the whole batch using a local remaining-stock value, then update the stored stock only after
+all items pass. The same rejected batch should leave stock at 5."
+
 Deduplicate findings with the same cause. Keep unresolved hypotheses and missing evidence
 separate from defects; a missing test alone does not establish a bug. Finish with the revision,
 areas and passes covered, relevant exclusions, and validation actually performed. If no
