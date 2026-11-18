@@ -30,11 +30,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
 
+from pydantic import TypeAdapter, ValidationError
+
+from quarry.decision_schema import DecisionPathPayload, DecisionTreePayload
 from quarry.engine.atoms import AtomDomain, AtomSpec, ModelExpression
 from quarry.engine.decision import (
     COLLECT,
@@ -59,6 +63,14 @@ DECISION_TREE_SCHEMA_VERSION = 1
 # check its scan never answered, or its scan failed at a check.
 UNKNOWN = "unknown"
 ERROR = "error"
+_MAX_FLOW_PATHS = 100_000
+_MAX_FLOW_STEPS = 100_000
+_MAX_FLOW_WORK_UNITS = 2_000_000
+_MAX_FLOW_NESTING = 128
+_MAX_FLOW_SCALAR_BYTES = 16_000_000
+_FLOW_BYTES_PER_WORK_UNIT = 64
+_TREE_ADAPTER = TypeAdapter(DecisionTreePayload)
+_PATH_ADAPTER = TypeAdapter(DecisionPathPayload)
 # Where a model is served does not change what it answers, so it is not part of a node's ID.
 _MODEL_LOCATION = {"endpoint", "aws_profile", "region"}
 _MIRRORED = {">": "<", ">=": "<=", "<": ">", "<=": ">=", "=": "=", "!=": "!="}
@@ -508,7 +520,7 @@ def path_report(
     recorder: ScanRecord | None,
     *,
     matched: bool | None,
-    conversation: dict[str, Any],
+    conversation: dict[str, Any] | None,
     parameter_digest: str,
     explain: bool,
     explore_rate: float,
@@ -519,7 +531,8 @@ def path_report(
         tree: The scanned rule's tree under the scan's configuration.
         recorder: The scan's observed checks; None for a rule with one whole-rule node.
         matched: The verdict, or None when the scan did not complete.
-        conversation: The scanned conversation, whose hash selects exploration.
+        conversation: Validated inputs whose hash selects exploration, or None when no safe
+            digest is available.
         parameter_digest: The digest of the parameter values the scan used.
         explain: Whether score entries list every chunk.
         explore_rate: The exploration rate the scan used.
@@ -551,7 +564,7 @@ def path_report(
         if key == COLLECT and matched is not None:
             # The condition held; the collect block decides whether anything matched.
             path.append({"node": COLLECT, "outcome": matched})
-    digest = conversation_sha256(conversation)
+    digest = None if conversation is None else conversation_sha256(conversation)
     report: dict[str, Any] = {
         "tree_sha256": tree.report["tree_sha256"],
         "config_sha256": tree.config_sha256,
@@ -560,7 +573,7 @@ def path_report(
         "leaf": None if matched is None else MATCH if matched else NO_MATCH,
         "path": path,
     }
-    if explore_rate > 0:
+    if explore_rate > 0 and digest is not None:
         selected = explores(digest, explore_rate)
         report["exploration"] = {
             "rate": explore_rate,
@@ -576,6 +589,14 @@ class _Answer:
     outcome: bool | None
     # A score or number node's decision value, which a moved threshold compares again.
     value: float | None
+
+
+@dataclass(frozen=True)
+class _AnswerMaps:
+    """Recorded answers by exact step key and by stable node ID."""
+
+    exact: dict[str, _Answer]
+    stable: dict[str, _Answer]
 
 
 def _answered_steps(path: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -594,16 +615,24 @@ def decision_scores(path: Mapping[str, Any]) -> dict[str, float | None]:
     }
 
 
-def _answers(path: Mapping[str, Any]) -> dict[str, _Answer]:
-    """The checks a path answered, by node ID: its steps and the checks exploration scored."""
+def _answers(path: Mapping[str, Any], index: int) -> _AnswerMaps:
+    """Index consistent answers without collapsing repeated step occurrences."""
 
-    answers: dict[str, _Answer] = {}
+    exact: dict[str, _Answer] = {}
+    stable: dict[str, _Answer] = {}
     for entry in _answered_steps(path):
-        node_id = entry["node"].split("~", 1)[0]
+        step_key = entry["node"]
+        node_id = step_key.split("~", 1)[0]
         measured = entry.get("score") or entry.get("number")
         value = None if measured is None else measured["value"]
-        answers[node_id] = _Answer(entry["outcome"], value)
-    return answers
+        answer = _Answer(entry["outcome"], value)
+        if step_key in exact and exact[step_key] != answer:
+            raise ValueError(f"path {index} has conflicting answers for one exact step")
+        if node_id in stable and stable[node_id] != answer:
+            raise ValueError(f"path {index} has conflicting answers for one stable node")
+        exact[step_key] = answer
+        stable[node_id] = answer
+    return _AnswerMaps(exact, stable)
 
 
 def _applied_thresholds(
@@ -622,7 +651,13 @@ def _applied_thresholds(
         parameter = bound["parameter"] if isinstance(bound, dict) else None
         for key in (node["id"], parameter):
             if key is not None and key in thresholds:
-                applied[node["id"]] = float(thresholds[key])
+                try:
+                    threshold = float(thresholds[key])
+                except (ValueError, OverflowError) as exc:
+                    raise ValueError("flow thresholds must be finite numbers") from exc
+                if not math.isfinite(threshold):
+                    raise ValueError("flow thresholds must be finite numbers")
+                applied[node["id"]] = threshold
                 used.add(key)
                 break
     unknown = sorted(set(thresholds) - used)
@@ -631,6 +666,352 @@ def _applied_thresholds(
             f"thresholds name no score or number node or parameter of the tree: {unknown}"
         )
     return applied
+
+
+def _is_sequence(value: object) -> TypeGuard[list[object] | tuple[object, ...]]:
+    """Whether a value is an exact built-in JSON-like sequence."""
+
+    return type(value) in (list, tuple)
+
+
+@dataclass(frozen=True)
+class _FlowCost:
+    """Aggregate preflight work and scalar-byte costs."""
+
+    work_units: int
+    scalar_bytes: int
+
+
+@dataclass
+class _TraversalFrame:
+    """One active exact built-in container iterator."""
+
+    identity: int | None
+    children: Iterator[object]
+    depth: int
+
+
+def _dict_children(value: dict[object, object]) -> Iterator[object]:
+    """Yield exact-dict keys and values without allocating a child collection."""
+
+    for key, item in dict.items(value):
+        yield key
+        yield item
+
+
+def _children(value: object) -> Iterator[object] | None:
+    """Return a non-overridable iterator for an accepted exact container."""
+
+    if type(value) is dict:
+        return _dict_children(cast(dict[object, object], value))
+    if type(value) is list:
+        return list.__iter__(cast(list[object], value))
+    if type(value) is tuple:
+        return tuple.__iter__(value)
+    return None
+
+
+def _utf8_width(character: str) -> int:
+    codepoint = ord(character)
+    if 0xD800 <= codepoint <= 0xDFFF:
+        raise ValueError("flow request contains text that is not valid UTF-8")
+    return 1 if codepoint <= 0x7F else 2 if codepoint <= 0x7FF else 3 if codepoint <= 0xFFFF else 4
+
+
+def _integer_json_bytes(value: int) -> int:
+    """Conservatively bound the integer's decimal JSON bytes without stringifying it."""
+
+    bits = int.bit_length(value)
+    digits = 1 if bits == 0 else (bits * 30_103 + 99_999) // 100_000
+    return digits + (1 if int.__lt__(value, 0) else 0)
+
+
+def _request_cost(
+    values: tuple[object, ...],
+    *,
+    work_limit: int,
+    byte_limit: int,
+    initial_work: int = 0,
+) -> _FlowCost:
+    """Charge nested values with depth-sized iterator frames and no custom hooks."""
+
+    work_units = initial_work
+    scalar_bytes = 0
+    text_blocks = 0
+
+    def check_work() -> None:
+        if work_units > work_limit:
+            raise ValueError("flow request exceeds the structural work limit")
+
+    def charge_scalar_bytes(size: int) -> None:
+        nonlocal scalar_bytes, text_blocks, work_units
+        next_bytes = scalar_bytes + size
+        if next_bytes > byte_limit:
+            raise ValueError("flow request exceeds the aggregate scalar-byte limit")
+        next_blocks = (next_bytes + _FLOW_BYTES_PER_WORK_UNIT - 1) // (_FLOW_BYTES_PER_WORK_UNIT)
+        work_units += next_blocks - text_blocks
+        text_blocks = next_blocks
+        scalar_bytes = next_bytes
+        check_work()
+
+    check_work()
+    active: set[int] = set()
+    frames = [_TraversalFrame(None, tuple.__iter__(values), -1)]
+    while frames:
+        frame = frames[-1]
+        try:
+            value = next(frame.children)
+        except StopIteration:
+            frames.pop()
+            if frame.identity is not None:
+                active.remove(frame.identity)
+            continue
+
+        depth = frame.depth + 1
+        work_units += 1
+        check_work()
+
+        value_type = type(value)
+        if value_type is str:
+            for character in str.__iter__(cast(str, value)):
+                charge_scalar_bytes(_utf8_width(character))
+            continue
+        if value_type is bytes:
+            charge_scalar_bytes(bytes.__len__(cast(bytes, value)))
+            continue
+        if value_type is int:
+            charge_scalar_bytes(_integer_json_bytes(cast(int, value)))
+            continue
+        if value_type is float:
+            if not math.isfinite(cast(float, value)):
+                raise ValueError("flow request contains a non-finite number")
+            continue
+        if value_type in (type(None), bool):
+            continue
+
+        children = _children(value)
+        if children is None:
+            raise ValueError("flow request contains an unsupported value type")
+        if depth >= _MAX_FLOW_NESTING:
+            raise ValueError("flow request exceeds the nesting limit")
+        identity = id(value)
+        if identity in active:
+            raise ValueError("flow request contains a cyclic value")
+        active.add(identity)
+        frames.append(_TraversalFrame(identity, children, depth))
+    return _FlowCost(work_units, scalar_bytes)
+
+
+def _flow_request_cost(
+    tree: object,
+    paths: Sequence[object],
+    labels: object,
+    thresholds: object,
+    *,
+    work_limit: int,
+    byte_limit: int,
+) -> _FlowCost:
+    """Account for request structure plus the maximum work of every tree walk."""
+
+    raw_nodes = dict.get(tree, "nodes") if type(tree) is dict else None
+    node_count = dict.__len__(raw_nodes) if type(raw_nodes) is dict else 0
+    return _request_cost(
+        (tree, paths, labels, thresholds),
+        work_limit=work_limit,
+        byte_limit=byte_limit,
+        initial_work=len(paths) * node_count,
+    )
+
+
+def _preflight_flow_request(
+    tree: object,
+    paths: object,
+    labels: object,
+    thresholds: object,
+) -> None:
+    """Apply cheap cardinality and aggregate-work bounds before typed validation."""
+
+    if not _is_sequence(paths):
+        raise ValueError("flow paths must be a sequence")
+    path_count = len(paths)
+    if not 1 <= path_count <= _MAX_FLOW_PATHS:
+        raise ValueError(f"flow counting requires between 1 and {_MAX_FLOW_PATHS} paths")
+    if labels is not None:
+        if not _is_sequence(labels):
+            raise ValueError("flow labels must be a sequence")
+        if len(labels) != path_count:
+            raise ValueError(f"{len(labels)} labels for {path_count} paths")
+
+    if type(tree) is dict:
+        raw_nodes = dict.get(tree, "nodes")
+        if type(raw_nodes) is dict and not 1 <= dict.__len__(raw_nodes) <= _MAX_FLOW_STEPS:
+            raise ValueError(f"tree must contain between 1 and {_MAX_FLOW_STEPS} steps")
+
+    for index, path in enumerate(paths):
+        if type(path) is not dict:
+            continue
+        raw_steps = dict.get(path, "path")
+        exploration = dict.get(path, "exploration")
+        stored_steps = len(raw_steps) if _is_sequence(raw_steps) else 0
+        if type(exploration) is dict:
+            off_path = dict.get(exploration, "off_path")
+            failed = dict.get(exploration, "failed")
+            stored_steps += len(off_path) if _is_sequence(off_path) else 0
+            stored_steps += len(failed) if _is_sequence(failed) else 0
+        if stored_steps > _MAX_FLOW_STEPS:
+            raise ValueError(f"path {index} exceeds the {_MAX_FLOW_STEPS}-step limit")
+
+    _flow_request_cost(
+        tree,
+        paths,
+        labels,
+        thresholds,
+        work_limit=_MAX_FLOW_WORK_UNITS,
+        byte_limit=_MAX_FLOW_SCALAR_BYTES,
+    )
+
+
+def _validated_tree(tree: Mapping[str, Any]) -> DecisionTreePayload:
+    """Validate one bounded, acyclic decision tree and return its typed payload."""
+
+    try:
+        validated = _TREE_ADAPTER.validate_python(tree)
+    except ValidationError as exc:
+        raise ValueError("tree is not a valid decision tree") from exc
+    if _tree_sha256(validated) != validated["tree_sha256"]:
+        raise ValueError("the tree's tree_sha256 is not the hash of its content")
+
+    nodes = validated["nodes"]
+    if not nodes or len(nodes) > _MAX_FLOW_STEPS:
+        raise ValueError(f"tree must contain between 1 and {_MAX_FLOW_STEPS} steps")
+    reserved = sorted(
+        {key for key in nodes if key in (MATCH, NO_MATCH)}
+        | {node["id"] for node in nodes.values() if node["id"] in (MATCH, NO_MATCH)}
+    )
+    if reserved:
+        raise ValueError(f"tree uses reserved leaf names as decision nodes: {reserved}")
+    root = validated["root"]
+    if root not in nodes:
+        raise ValueError("the tree root does not name one of its steps")
+
+    following: dict[str, tuple[str, ...]] = {}
+    occurrences: dict[str, set[int]] = {}
+    for key, node in nodes.items():
+        node_id = node["id"]
+        if "~" in node_id:
+            raise ValueError("tree stable node ids cannot contain occurrence separators")
+        occurrence = 0
+        if key != node_id:
+            prefix = f"{node_id}~"
+            suffix = key[len(prefix) :] if key.startswith(prefix) else ""
+            if (
+                not suffix
+                or suffix[0] == "0"
+                or any(character not in "0123456789" for character in suffix)
+            ):
+                raise ValueError("tree step keys must use canonical occurrence suffixes")
+            occurrence = int(suffix)
+        occurrences.setdefault(node_id, set()).add(occurrence)
+        branches = tuple(
+            target for target in (node["true"], node["false"]) if target not in (MATCH, NO_MATCH)
+        )
+        missing = sorted(target for target in branches if target not in nodes)
+        if missing:
+            raise ValueError(f"tree step {key!r} names missing branches: {missing}")
+        following[key] = branches
+
+    for _node_id, indexes in sorted(occurrences.items()):
+        if indexes != set(range(len(indexes))):
+            raise ValueError("tree has non-contiguous repeated occurrence indexes")
+
+    reachable: set[str] = set()
+    pending = [root]
+    while pending:
+        key = pending.pop()
+        if key in reachable:
+            continue
+        reachable.add(key)
+        pending.extend(following[key])
+    unreachable = sorted(set(nodes) - reachable)
+
+    incoming = {key: 0 for key in nodes}
+    for branches in following.values():
+        for target in branches:
+            incoming[target] += 1
+    ready = sorted(key for key, count in incoming.items() if count == 0)
+    visited = 0
+    while ready:
+        key = ready.pop()
+        visited += 1
+        for target in following[key]:
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                ready.append(target)
+    if visited != len(nodes):
+        raise ValueError("the tree's edges loop")
+    if unreachable:
+        raise ValueError(f"tree contains unreachable steps: {unreachable}")
+    return validated
+
+
+def _validated_path(path: Mapping[str, Any], index: int) -> DecisionPathPayload:
+    """Validate one bounded decision path without assuming which tree produced it."""
+
+    try:
+        validated = _PATH_ADAPTER.validate_python(path)
+    except ValidationError as exc:
+        raise ValueError(f"path {index} is not a valid decision path") from exc
+    exploration = validated.get("exploration", {})
+    stored_steps = (
+        len(validated["path"])
+        + len(exploration.get("off_path", ()))
+        + len(exploration.get("failed", ()))
+    )
+    if stored_steps > _MAX_FLOW_STEPS:
+        raise ValueError(f"path {index} exceeds the {_MAX_FLOW_STEPS}-step limit")
+    return validated
+
+
+def _validate_path_route(tree: DecisionTreePayload, path: DecisionPathPayload, index: int) -> None:
+    """Reject a same-tree path that could not have followed the tree's edges."""
+
+    nodes = tree["nodes"]
+    key = tree["root"]
+    entries = path["path"]
+    for position, entry in enumerate(entries):
+        if key in (MATCH, NO_MATCH) or entry["node"] != key:
+            raise ValueError(f"path {index} does not follow the tree at step {position}")
+        outcome = entry["outcome"]
+        if outcome is None:
+            if position != len(entries) - 1 or path["leaf"] is not None:
+                raise ValueError(f"path {index} continues after an unanswered step")
+            break
+        key = nodes[key]["true" if outcome else "false"]
+    else:
+        leaf = path["leaf"]
+        if leaf is None:
+            if key in (MATCH, NO_MATCH):
+                raise ValueError(f"path {index} omits the leaf it reached")
+        elif key != leaf:
+            raise ValueError(f"path {index} reports a leaf its steps did not reach")
+
+    valid_node_ids = {node["id"] for node in nodes.values()}
+    valid_step_keys = set(nodes)
+    exploration = path.get("exploration", {})
+    for entry in exploration.get("off_path", ()):
+        if entry["node"] not in valid_step_keys and entry["node"] not in valid_node_ids:
+            raise ValueError(f"path {index} explores a node outside the tree")
+    if any(
+        node not in valid_step_keys and node not in valid_node_ids
+        for node in exploration.get("failed", ())
+    ):
+        raise ValueError(f"path {index} names a failed node outside the tree")
+
+
+def _ordered_counts(counter: Counter[str]) -> dict[str, int]:
+    """Return label counts in deterministic lexical order."""
+
+    return {label: counter[label] for label in sorted(counter)}
 
 
 def decision_flows(
@@ -642,15 +1023,18 @@ def decision_flows(
 ) -> dict[str, Any]:
     """Count scans through a tree's steps and leaves, optionally at moved thresholds.
 
-    Each path is walked from the tree's root over the checks its scan answered. A score or
-    number node with a moved threshold compares the path's recorded value again, so a
-    threshold can move without scanning again. A walk that reaches a check its scan never
-    answered ends at ``unknown`` when a moved threshold sent it there, and at ``error``
-    otherwise, since only a failed check leaves a scan's own route unanswered.
+    Each path produced by this tree is walked from its root over the checks the scan
+    answered. A valid path produced by a different tree walks none of this tree's steps and
+    is counted under ``unmapped_paths``. A score or number node with a moved threshold
+    compares the path's recorded value again, so a threshold can move without scanning
+    again. A walk that reaches a check its scan never answered ends at ``unknown`` when a
+    moved threshold sent it there, and at ``error`` otherwise, since only a failed check
+    leaves a scan's own route unanswered.
 
     Args:
         tree: A ``tree_report``.
-        paths: The ``decision_path`` of each scan of that tree.
+        paths: Returned ``decision_path`` records. Paths from another tree are counted but
+            not projected onto this tree's steps.
         labels: One label per path, such as its ground truth; without them every path
             counts under ``all``.
         thresholds: New thresholds by node ID, or by parameter name for every node whose
@@ -658,40 +1042,45 @@ def decision_flows(
 
     Returns:
         ``tree_sha256``; the ``thresholds`` applied, by node ID; for each step reached, the
-        scans by outcome (``true``, ``false``) and label; and the scans at each leaf by
-        label.
+        scans by outcome (``true``, ``false``) and label; the scans at each leaf by label;
+        and valid paths from another tree by label under ``unmapped_paths``.
 
     Raises:
-        ValueError: A tree whose ``tree_sha256`` is not its content's hash or whose edges
-            loop, a path of another tree, a label count that is not the path count, or a
-            threshold that names no score or number node or parameter.
+        ValueError: A malformed or cyclic tree, malformed or impossible paths, a label
+            count that is not the path count, an out-of-bounds request, or a threshold that
+            names no score or number node or parameter.
     """
 
-    if _tree_sha256(tree) != tree["tree_sha256"]:
-        raise ValueError("the tree's tree_sha256 is not the hash of its content")
-    if labels is not None and len(labels) != len(paths):
-        raise ValueError(f"{len(labels)} labels for {len(paths)} paths")
-    applied = _applied_thresholds(tree, thresholds or {})
-    nodes = tree["nodes"]
+    _preflight_flow_request(tree, paths, labels, thresholds)
+    if labels is not None and any(not isinstance(label, str) for label in labels):
+        raise ValueError("flow labels must be strings")
+
+    checked_tree = _validated_tree(tree)
+    applied = _applied_thresholds(checked_tree, thresholds or {})
+    nodes = checked_tree["nodes"]
     steps: dict[str, dict[str, Counter[str]]] = {}
     leaves: dict[str, Counter[str]] = {
         leaf: Counter() for leaf in (MATCH, NO_MATCH, UNKNOWN, ERROR)
     }
+    unmapped_paths: Counter[str] = Counter()
     for index, path in enumerate(paths):
-        if path["tree_sha256"] != tree["tree_sha256"]:
-            raise ValueError(
-                f"path {index} walked tree {path['tree_sha256']}, not {tree['tree_sha256']}"
-            )
         label = "all" if labels is None else labels[index]
-        answers = _answers(path)
-        key, rerouted, walked = tree["root"], False, 0
+        checked_path = _validated_path(path, index)
+        if checked_path["tree_sha256"] != checked_tree["tree_sha256"]:
+            unmapped_paths[label] += 1
+            continue
+        _validate_path_route(checked_tree, checked_path, index)
+        answers = _answers(checked_path, index)
+        key, rerouted, walked = checked_tree["root"], False, 0
         while key not in (MATCH, NO_MATCH):
             # A tree is a diagram without cycles, so a walk visits each step at most once.
             walked += 1
             if walked > len(nodes):
                 raise ValueError(f"the tree's edges loop at step {key}")
             node = nodes[key]
-            answer = answers.get(node["id"])
+            answer = answers.exact.get(key)
+            if answer is None:
+                answer = answers.stable.get(node["id"])
             outcome = None if answer is None else answer.outcome
             if answer is not None and node["id"] in applied and answer.value is not None:
                 form = node.get("score_form") or node["number_form"]
@@ -706,13 +1095,14 @@ def decision_flows(
             key = node["true" if outcome else "false"]
         leaves[key][label] += 1
     return {
-        "tree_sha256": tree["tree_sha256"],
-        "thresholds": applied,
+        "tree_sha256": checked_tree["tree_sha256"],
+        "thresholds": {key: applied[key] for key in sorted(applied)},
         "steps": {
-            key: {outcome: dict(counter) for outcome, counter in counts.items()}
-            for key, counts in steps.items()
+            key: {outcome: _ordered_counts(counter) for outcome, counter in counts.items()}
+            for key, counts in sorted(steps.items())
         },
-        "leaves": {leaf: dict(counter) for leaf, counter in leaves.items()},
+        "leaves": {leaf: _ordered_counts(counter) for leaf, counter in leaves.items()},
+        "unmapped_paths": _ordered_counts(unmapped_paths),
     }
 
 
