@@ -105,6 +105,70 @@ def test_compiled_policy_checks_input_declaration():
         load_compiled_policy(policy.to_bytes(), runtime_config=changed)
 
 
+def test_declarations_accept_descriptions_and_reject_rule_reserved_field_names():
+    from quarry.inputs import parse_inputs
+    from quarry.types.exceptions import ConfigurationError
+
+    declaration = parse_inputs(
+        {
+            "memory.writes": {
+                "description": "Writes recorded by the host",
+                "content": [{"name": "body", "description": "Written text"}],
+                "facts": {
+                    "metadata": {
+                        "type": "object",
+                        "description": "Extra metadata",
+                        "fields": {"label": {"type": "string", "description": "A label"}},
+                    }
+                },
+            }
+        }
+    )["memory.writes"]
+    assert declaration.describe()["description"] == "Writes recorded by the host"
+    assert declaration.describe()["content"][0]["description"] == "Written text"
+    assert declaration.describe()["facts"]["metadata"]["fields"]["label"]["description"] == "A label"
+    with pytest.raises(ConfigurationError, match="reserved by the rule language"):
+        parse_inputs({"memory.writes": {"facts": {"right_after": {"type": "string"}}}})
+
+
+def test_declared_events_count_toward_timeline_limit():
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=('rule "R"\ncondition: count(memory.writes) > 0',),
+            inputs=INPUTS,
+        ),
+        limits=SafetyLimits(rule_timeout=None, max_timeline_items=1),
+    )
+    result = scanner.scan_data({"memory": {"writes": [ITEM, {"id": "w2", "content": "y"}]}})
+    assert "timeline items; limit is 1" in result.validation_error
+
+
+def test_cross_section_until_requires_a_timeline():
+    condition = (
+        '(any w in memory.writes where w.content == "x") until '
+        '(any r in cache.reads where r.content == "y")'
+    )
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(f'rule "R"\ncondition: {condition}',),
+            inputs={
+                "memory.writes": {"content": ["content"]},
+                "cache.reads": {"content": ["content"]},
+            },
+        ),
+        limits=SafetyLimits(rule_timeout=None),
+    )
+    result = scanner.scan_data(
+        {
+            "memory": {"writes": [{"id": "w1", "content": "x"}]},
+            "cache": {"reads": [{"id": "r1", "content": "y"}]},
+        }
+    )
+    assert result.completion_state == "incomplete"
+
+
 def test_adapter_receives_only_read_sections():
     class Sample(InputAdapter):
         name = "sample"

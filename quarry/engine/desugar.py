@@ -560,7 +560,7 @@ class Desugarer:
             if release_surface in extension or sustained_surfaces & extension:
                 self.ordering_sources.append(source or node)
             ambient = (
-                sustained_surfaces & (conversation | (extension - {release_surface}))
+                (sustained_surfaces & conversation) | (extension - {release_surface})
                 if release_surface in extension
                 else sustained_surfaces & extension
             )
