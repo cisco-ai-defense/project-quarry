@@ -1247,7 +1247,7 @@ class QuarryPlugin:
         }
 
     def _model_aliases(self) -> dict[str, dict[str, Any]]:
-        """List configured aliases with their operations and optional descriptions."""
+        """List configured aliases with their operations and optional display metadata."""
 
         config = self._runtime_config
         if config is None:
@@ -1279,6 +1279,8 @@ class QuarryPlugin:
                     if configured
                 ]
             }
+            if alias in config.model_display_names:
+                entry["display_name"] = config.model_display_names[alias]
             if alias in config.model_descriptions:
                 entry["description"] = config.model_descriptions[alias]
             aliases[alias] = entry

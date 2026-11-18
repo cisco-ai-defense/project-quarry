@@ -43,6 +43,7 @@ A model alias names an adapter, model, and the operations a rule may use. Here i
 ```yaml
 models:
   guard:
+    display_name: Policy Judge
     description: Policy judge; 1.0 means the conversation violates the supplied policy.
     adapter: litellm
     model: ${MODEL_ID}
@@ -54,10 +55,12 @@ models:
         positive: "1"
 ```
 
-`description` is optional and limited to 500 characters. Use it to explain what the alias is for
-and what its output means. The agent plugin returns it beside the alias's supported operations so
-rule authors can select the right model. Descriptions are human-facing metadata: changing one does
-not change provider requests, model-result cache keys, or compiled-policy model digests.
+`display_name` is an optional printable, single-line label of at most 100 characters.
+`description` is optional and limited to 500 characters; use it to explain what the alias is for
+and what its output means. The agent plugin returns this metadata beside the alias's supported
+operations so rule authors can select the right model. Display metadata is not provider
+configuration: changing it does not change provider requests, model-result cache keys, or
+compiled-policy model digests. Do not put credentials or other secrets in display metadata.
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
 
@@ -117,8 +120,9 @@ models:
 ```
 
 Declaration order does not matter. Nested mappings merge recursively and the child value wins.
-Setting a field or section to `null` removes the inherited value. `description` belongs to one
-runtime alias, cannot appear in a template, and is not inherited when one model extends another.
+Setting a field or section to `null` removes the inherited value. `display_name` and `description`
+belong to one runtime alias, cannot appear in a template, and are not inherited when one model
+extends another. Display metadata is literal text; environment references are not expanded in it.
 Template and model names share one namespace. Unknown parents, duplicate names, inheritance cycles,
 unknown fields, and malformed sections fail configuration loading, including errors in templates
 that no model uses.
