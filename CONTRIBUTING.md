@@ -27,19 +27,6 @@ cannot turn a correct verdict into a timeout. Deadline tests should configure a 
 explicitly, use controlled delayed work, and assert the resulting status or work stopped.
 Avoid narrow elapsed-time assertions in required CI tests; measure throughput separately.
 
-## Advanced Code Review
-
-Use [code-review-advanced](.github/skills/code-review-advanced/SKILL.md) for interacting edge
-cases, implicit state machines, races, partial failures, retries, and cancellation. It has one
-entry point with focused checklists loaded as needed. For example: `Use $code-review-advanced
-to find all implicit state machines in this codebase and review their transitions.` Findings
-should identify a reachable trigger, the violated contract, and user impact.
-
-The skill lives in `.github/skills/code-review-advanced/` for Copilot review. The
-`.agents/skills/code-review-advanced` entry is a relative directory symlink for Codex discovery;
-it contains no second copy. Edit the canonical files under `.github/skills/`. Check out with
-symlink support for both discovery paths to work. Only the user may merge pull requests.
-
 ## Other Ways to Contribute
 
 We welcome anyone that wants to contribute to Project Quarry to triage and reply to open issues to help troubleshoot and fix existing bugs. Here is what you can do:
