@@ -310,9 +310,26 @@ def source_mapping_for(
     if end > output_end:
         raise ValueError("transformed range is outside message content")
     ranges: list[ContentSourceRange] = []
+    range_set: set[ContentSourceRange] = set()
     covered = start
     unmapped = False
+    work = 0
+
+    def charge_work(amount: int = 1) -> None:
+        nonlocal work
+        work = min(MAX_TRANSFORM_WORK + 1, work + amount)
+        if work > MAX_TRANSFORM_WORK:
+            raise ValueError(
+                f"transformed source mapping exceeds {MAX_TRANSFORM_WORK} work units"
+            )
+        if work % 256 == 0 or work == amount:
+            from quarry.safety.timer import raise_if_evaluation_expired
+
+            raise_if_evaluation_expired()
+
+    charge_work(0)
     for segment in segments:
+        charge_work()
         low, high = max(start, segment.start), min(end, segment.end)
         if low >= high:
             continue
@@ -341,6 +358,7 @@ def source_mapping_for(
                 ),
             )
         for source in sources:
+            charge_work()
             last = ranges[-1] if ranges else None
             if (
                 last is not None
@@ -349,7 +367,7 @@ def source_mapping_for(
                 and last.end == source.start
                 and last.message_end == source.message_start
             ):
-                ranges[-1] = ContentSourceRange(
+                merged = ContentSourceRange(
                     last.message_index,
                     last.part_index,
                     last.start,
@@ -357,8 +375,12 @@ def source_mapping_for(
                     last.message_start,
                     source.message_end,
                 )
-            elif source not in ranges:
+                range_set.discard(last)
+                ranges[-1] = merged
+                range_set.add(merged)
+            elif source not in range_set:
                 ranges.append(source)
+                range_set.add(source)
     if covered < end:
         unmapped = True
     return tuple(ranges), unmapped

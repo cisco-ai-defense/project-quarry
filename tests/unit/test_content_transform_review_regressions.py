@@ -14,7 +14,13 @@ from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.safety.limits import SafetyLimits
 from quarry.types.messages import Messages
 from quarry.types.results import Score, Span
-from quarry.types.transforms import ContentTransform, TransformOperation
+from quarry.types.transforms import (
+    ContentSourceRange,
+    ContentTransform,
+    ProvenanceSegment,
+    TransformOperation,
+    source_mapping_for,
+)
 from tests.unit.model_fakes import ModelAdapter, model_entry
 
 
@@ -158,3 +164,37 @@ async def test_promotion_refuses_a_foreign_bound_message_instead_of_reading_curr
     context = SimpleNamespace(conversation=SimpleNamespace(messages=current))
     with pytest.raises(ValueError, match="owning selection"):
         await evaluate_model_expression(expression, context, bindings={"m": foreign[0]})
+
+
+def test_source_mapping_deduplicates_large_segment_sets_with_bounded_checks(monkeypatch):
+    import quarry.safety.timer as timer
+
+    checks = []
+    monkeypatch.setattr(timer, "raise_if_evaluation_expired", lambda: checks.append(True))
+    segments = tuple(
+        ProvenanceSegment(
+            index,
+            index + 1,
+            (ContentSourceRange(index, None, 0, 1, 0, 1),),
+        )
+        for index in range(8_192)
+    )
+
+    ranges, unmapped = source_mapping_for(segments, 0, len(segments))
+
+    assert len(ranges) == len(segments)
+    assert not unmapped
+    assert len(checks) >= 64
+
+
+def test_source_mapping_stops_after_its_work_budget(monkeypatch):
+    import quarry.types.transforms as transforms
+
+    monkeypatch.setattr(transforms, "MAX_TRANSFORM_WORK", 2)
+    segments = tuple(
+        ProvenanceSegment(index, index + 1, (ContentSourceRange(0, None, index, index + 1, index, index + 1),))
+        for index in range(3)
+    )
+
+    with pytest.raises(ValueError, match="source mapping exceeds 2 work units"):
+        source_mapping_for(segments, 0, len(segments))
