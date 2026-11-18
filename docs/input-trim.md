@@ -79,3 +79,7 @@ Prepared policies bind each trim to its exact consuming alias, operation and
 policy/tool/threshold operands. Loaders reject forged owners, context shapes and
 non-closed budget expressions. Compiler 29 requires recompiling policies from
 earlier compiler versions; the serialized envelope remains format 11.
+
+Trimmed inputs obey normal exact call/result-link validation. A cut that removes a
+tool result's originating call fails before the consuming request. Partial text
+cuts and moved context do not grant split's flattened-score-evidence exemption.

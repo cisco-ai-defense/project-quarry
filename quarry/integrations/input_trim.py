@@ -46,7 +46,7 @@ async def trim_messages(
             consumed.add(matches.pop())
         await budget.checkpoint()
     body = [position for position in range(len(messages)) if position not in consumed]
-    empty = messages[:0]
+    empty = messages._view_positions(())
 
     async def view(parts):
         budget.add("queries", len(parts) + 1)
@@ -55,9 +55,14 @@ async def trim_messages(
         variants = tuple(part[0] for part in ordered)
         selected = messages._view_ordinals(message.message_index for message in variants)
         selected._install_variants(variants)
-        object.__setattr__(selected, "_chunk", any(part._chunk for part in ordered))
+        # A trim is an ordinary model request. It must not inherit the orphan-result
+        # exemption reserved for split chunks that score builders flatten into text.
         if context is not None and context:
-            return await Messages._combine_async([context, selected]) if selected else context
+            return (
+                await Messages._combine_async([context, selected])
+                if selected
+                else context._view_positions(range(len(context)))
+            )
         return selected if selected else empty
 
     whole = await view({position: messages[position : position + 1] for position in body})
@@ -81,7 +86,6 @@ async def trim_messages(
             async def prefix(length, position=position, prepared=prepared):
                 part = messages[position : position + 1]
                 part._install_variants((prepared.segment(0, length),))
-                object.__setattr__(part, "_chunk", True)
                 return part
 
             low, high, best = 1, len(message.content) - 1, 0
