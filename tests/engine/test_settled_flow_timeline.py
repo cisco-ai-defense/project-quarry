@@ -80,3 +80,53 @@ def test_settled_flow_does_not_hide_a_live_flow_timeline_fault(problem):
     assert result.completion_state == "incomplete"
     assert result.rule_matches == ["Settled"]
     assert set(result.evaluation_errors) == {"Live", "Mixed"}
+
+
+@pytest.mark.parametrize(
+    "problem", ["list-subclass", "entry-subclass", "entry-key", "value-subclass", "unread-key"]
+)
+def test_malformed_clock_objects_fail_only_the_flow(problem):
+    class BadList(list):
+        def __iter__(self):
+            raise AssertionError("timeline list hook ran")
+
+    class BadDict(dict):
+        def get(self, *args):
+            raise AssertionError("timeline entry hook ran")
+
+    class BadKey:
+        def __hash__(self):
+            return hash("rogue" if problem == "unread-key" else "input")
+
+        def __eq__(self, other):
+            raise AssertionError("timeline key equality hook ran")
+
+    class BadString(str):
+        def __hash__(self):
+            raise AssertionError("timeline value hash hook ran")
+
+    config = QuarryConfig(
+        config_version=2,
+        inputs={**INPUTS, "audit.records": {"facts": {"kind": {"type": "string"}}}},
+        safety_limits=SafetyLimits(rule_timeout=None),
+        quarry_rule_texts=(
+            f'rule "Live" condition: {LIVE}',
+            'rule "Constant" condition: true',
+        ),
+    )
+    data = _data("valid")
+    if problem == "list-subclass":
+        data["timeline"] = BadList(data["timeline"])
+    elif problem == "entry-subclass":
+        data["timeline"][0] = BadDict(data["timeline"][0])
+    elif problem == "entry-key":
+        data["timeline"][0] = {BadKey(): 0}
+    elif problem == "value-subclass":
+        data["timeline"][-1]["input"] = BadString("memory.writes")
+    else:
+        data["audit"] = {BadKey(): []}
+        data["timeline"].insert(1, {"input": "audit.rogue", "id": "r"})
+
+    result = DSLScanner(config).scan_data(data)
+    assert result.rule_matches == ["Constant"]
+    assert set(result.evaluation_errors) == {"Live"}

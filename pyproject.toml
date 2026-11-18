@@ -20,7 +20,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cisco-project-quarry"
-version = "0.1.0"
+version = "0.1.1"
 description = "Detection DSL for AI agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -50,6 +50,9 @@ quarry = "quarry.cli:main"
 quarry-mcp = "quarry.plugin.server:main"
 
 [project.optional-dependencies]
+verification = [
+    "z3-solver==5.4.1.0",
+]
 inference = [
     "aiohttp>=3.14.4",
     "boto3==1.43.123",
@@ -84,6 +87,7 @@ dev = [
     "twine==7.0.0",
     "ty==0.0.95",
     "tiktoken==0.14.0",
+    "z3-solver==5.4.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

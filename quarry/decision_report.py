@@ -511,7 +511,7 @@ def path_report(
     recorder: ScanRecord | None,
     *,
     matched: bool | None,
-    conversation: dict[str, Any],
+    conversation: dict[str, Any] | None,
     parameter_digest: str,
     explain: bool,
     explore_rate: float,
@@ -522,7 +522,8 @@ def path_report(
         tree: The scanned rule's tree under the scan's configuration.
         recorder: The scan's observed checks; None for a rule with one whole-rule node.
         matched: The verdict, or None when the scan did not complete.
-        conversation: The scanned conversation, whose hash selects exploration.
+        conversation: Validated inputs whose hash selects exploration, or None when no safe
+            digest is available.
         parameter_digest: The digest of the parameter values the scan used.
         explain: Whether score entries list every chunk.
         explore_rate: The exploration rate the scan used.
@@ -554,7 +555,7 @@ def path_report(
         if key == COLLECT and matched is not None:
             # The condition held; the collect block decides whether anything matched.
             path.append({"node": COLLECT, "outcome": matched})
-    digest = conversation_sha256(conversation)
+    digest = None if conversation is None else conversation_sha256(conversation)
     report: dict[str, Any] = {
         "tree_sha256": tree.report["tree_sha256"],
         "config_sha256": tree.config_sha256,
@@ -563,7 +564,7 @@ def path_report(
         "leaf": None if matched is None else MATCH if matched else NO_MATCH,
         "path": path,
     }
-    if explore_rate > 0:
+    if explore_rate > 0 and digest is not None:
         selected = explores(digest, explore_rate)
         report["exploration"] = {
             "rate": explore_rate,
@@ -581,15 +582,31 @@ class _Answer:
     value: float | None
 
 
+def _answered_steps(path: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return every answered path and exploration step in report order."""
+
+    return [*path["path"], *path.get("exploration", {}).get("off_path", ())]
+
+
+def decision_scores(path: Mapping[str, Any]) -> dict[str, float | None]:
+    """Project the score values needed for threshold analysis from a decision path."""
+
+    return {
+        entry["node"]: entry["score"]["value"]
+        for entry in _answered_steps(path)
+        if "score" in entry
+    }
+
+
 def _answers(path: Mapping[str, Any]) -> dict[str, _Answer]:
     """The checks a path answered, by node ID: its steps and the checks exploration scored."""
 
-    entries = [*path["path"], *path.get("exploration", {}).get("off_path", ())]
     answers: dict[str, _Answer] = {}
-    for entry in entries:
+    for entry in _answered_steps(path):
+        node_id = entry["node"].split("~", 1)[0]
         measured = entry.get("score") or entry.get("number")
         value = None if measured is None else measured["value"]
-        answers[entry["node"].split("~", 1)[0]] = _Answer(entry["outcome"], value)
+        answers[node_id] = _Answer(entry["outcome"], value)
     return answers
 
 
