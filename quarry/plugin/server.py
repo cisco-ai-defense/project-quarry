@@ -253,10 +253,11 @@ async def quarry_scan(
     conversations: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=MAX_SCAN_BATCH)]
     | None = None,
     parameters: dict[str, ParameterValue] | None = None,
-    explain: bool | Literal["support"] = True,
+    explain: bool | Literal["support"] | None = None,
     visualize: bool = False,
     config_version: Literal[1, 2] | None = None,
     explore_rate: Annotated[float, Field(ge=0, le=1)] = 0.0,
+    verbosity: Literal["compact", "full"] | None = None,
 ) -> dict[str, Any]:
     """Compile one Quarry rule once and scan one conversation or an ordered batch.
 
@@ -266,13 +267,16 @@ async def quarry_scan(
     skipped, or failed evaluation remains explicit and fails closed. Set ``visualize`` only
     when drawing the rule graph; it returns per-check runtime data that grows with the
     conversation. ``explain`` true explains every atom of the rule, matched or not, which
-    can call models; ``"support"`` returns only a match's minimal support, with no
-    further evaluation.
+    can call models; ``"support"`` returns only a match's minimal support, with no further
+    evaluation.
 
-    Each complete result of a one-rule text has a ``decision_path``: the conversation's
-    SHA-256, the tree nodes it reached with their outcomes and model scores, and its leaf.
-    ``explore_rate`` is the fraction of conversations, selected by that hash, whose path
-    also scores the nodes it skipped.
+    One ``conversation`` defaults to ``verbosity="full"`` and includes its decision path and
+    explanation, preserving the detailed response contract. A ``conversations`` batch defaults
+    to ``compact``: every result retains its verdict, diagnostics, matches, and
+    ``decision_scores``, but omits its decision path and does not compute explanations unless
+    ``explain`` is passed. Use ``verbosity="full"`` when batch paths are needed.
+    ``explore_rate`` is the fraction of conversations, selected by hash, whose path also scores
+    the nodes it skipped.
 
     Scans reuse the model results this server already has for the same model and input,
     so a rescan, or one that moves only a threshold, makes no new model call. A result
@@ -288,6 +292,7 @@ async def quarry_scan(
         visualize=visualize,
         config_version=config_version,
         explore_rate=explore_rate,
+        verbosity=verbosity,
     )
 
 
