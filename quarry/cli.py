@@ -182,6 +182,8 @@ def format_results(
                 result_dict["detailed_matches"] = [
                     match.to_dict() for match in result.detailed_matches
                 ]
+            if result.logical_reads is not None:
+                result_dict["logical_reads"] = result.logical_reads
             output.append(result_dict)
 
         return orjson.dumps(output, option=orjson.OPT_INDENT_2).decode()
@@ -439,6 +441,11 @@ def format_results(
 
 def scan_command(args):
     """Handle the scan subcommand."""
+    logical_reads = getattr(args, "logical_reads", False)
+    if logical_reads and args.output_format != "json":
+        print("[ERROR] --logical-reads requires --output-format json", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    read_options = {"logical_reads": True} if logical_reads else {}
     # The human report prints while it is formatted, so it cannot be redirected to a file.
     if args.output and args.output_format == "human":
         print(
@@ -549,7 +556,7 @@ def scan_command(args):
 
     results = []
     if args.target.is_file():
-        results = [scanner.scan_file(args.target, enable_explain=args.explain)]
+        results = [scanner.scan_file(args.target, enable_explain=args.explain, **read_options)]
     elif args.target.is_dir():
         pattern = "**/*.json" if args.recursive else "*.json"
         files = sorted(args.target.glob(pattern))
@@ -573,7 +580,7 @@ def scan_command(args):
 
             for json_file in files:
                 progress.console.print(f"[dim]├─[/dim] {json_file.name}")
-                result = scanner.scan_file(json_file, enable_explain=args.explain)
+                result = scanner.scan_file(json_file, enable_explain=args.explain, **read_options)
                 results.append(result)
                 progress.update(task, advance=1)
     else:
@@ -682,6 +689,11 @@ Examples:
         "--explain",
         action="store_true",
         help="Enable detailed match tracing and capture information",
+    )
+    scan_parser.add_argument(
+        "--logical-reads",
+        action="store_true",
+        help="Include bounded logical input-read reports in JSON results",
     )
     scan_parser.add_argument(
         "--no-limits", action="store_true", help="Disable safety limits (for testing)"

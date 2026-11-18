@@ -34,6 +34,7 @@ from quarry.engine.contracts import CompiledRuleArtifact
 from quarry.input_registry import InputRegistry
 from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
+from quarry.integrations.read_results import collect_read_reports, transfer_result_scope
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.timer import (
@@ -330,15 +331,18 @@ class CompiledPolicy:
         *,
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
+        logical_reads: bool = False,
     ) -> ScanResult:
         """Execute one conversation without parsing or compiling the rule again."""
-
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
         return asyncio.run(
             self.scan_async(
                 conversation,
                 parameters,
                 explain=explain,
                 deadline_seconds=deadline_seconds,
+                **({"logical_reads": True} if logical_reads else {}),
             )
         )
 
@@ -349,15 +353,18 @@ class CompiledPolicy:
         *,
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
+        logical_reads: bool = False,
     ) -> ScanResult:
         """Asynchronous form of :meth:`scan`."""
-
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
         return (
             await self.scan_many_async(
                 (conversation,),
                 parameters,
                 explain=explain,
                 deadline_seconds=deadline_seconds,
+                **({"logical_reads": True} if logical_reads else {}),
             )
         )[0]
 
@@ -368,15 +375,18 @@ class CompiledPolicy:
         *,
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
+        logical_reads: bool = False,
     ) -> list[ScanResult]:
         """Run an ordered batch through this already compiled policy."""
-
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
         return asyncio.run(
             self.scan_many_async(
                 conversations,
                 parameters,
                 explain=explain,
                 deadline_seconds=deadline_seconds,
+                **({"logical_reads": True} if logical_reads else {}),
             )
         )
 
@@ -390,6 +400,7 @@ class CompiledPolicy:
         deadline_seconds: float | None = None,
         decision_paths: bool = False,
         explore_rate: float = 0.0,
+        logical_reads: bool = False,
     ) -> list[ScanResult]:
         """Run an ordered batch on one event loop under one optional wall-clock deadline.
 
@@ -399,7 +410,47 @@ class CompiledPolicy:
         ``decision_paths`` returns the rule's grounded decision-tree checks in
         ``ScanResult.decision_paths``. ``explore_rate`` selects that fraction of
         conversations, by content hash, whose path also grounds checks it skipped.
+
+        ``logical_reads=True`` attaches each conversation's bounded scalar read snapshot
+        after native evidence cleanup. This adds no model/tokenizer work. Reference token
+        coverage requires explicit host-provided maps in a ``model_read_usage`` session;
+        a borrowed session remains live and its snapshots say ``finalized=False``.
         """
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
+        if not logical_reads:
+            return await self._scan_many_async(
+                conversations,
+                parameters,
+                explain=explain,
+                record_traces=record_traces,
+                deadline_seconds=deadline_seconds,
+                decision_paths=decision_paths,
+                explore_rate=explore_rate,
+            )
+        with collect_read_reports() as reports:
+            results = await self._scan_many_async(
+                conversations,
+                parameters,
+                explain=explain,
+                record_traces=record_traces,
+                deadline_seconds=deadline_seconds,
+                decision_paths=decision_paths,
+                explore_rate=explore_rate,
+            )
+        return reports.attach(results)
+
+    async def _scan_many_async(
+        self,
+        conversations: Sequence[dict[str, Any]],
+        parameters: Mapping[str, object] | None = None,
+        *,
+        explain: ExplainLevel = False,
+        record_traces: bool = False,
+        deadline_seconds: float | None = None,
+        decision_paths: bool = False,
+        explore_rate: float = 0.0,
+    ) -> list[ScanResult]:
 
         if not conversations:
             raise ValueError("conversations must not be empty")
@@ -443,7 +494,9 @@ class CompiledPolicy:
                     if remaining is not None and remaining <= 0:
                         if self._scanner.limits.fail_on_timeout:
                             raise_if_evaluation_expired()
-                        results.append(self._timeout_result(scan_time=result.scan_time))
+                        timeout = self._timeout_result(scan_time=result.scan_time)
+                        transfer_result_scope(result, timeout)
+                        results.append(timeout)
                         results.extend(
                             self._timeout_result() for _ in range(index + 1, len(conversations))
                         )

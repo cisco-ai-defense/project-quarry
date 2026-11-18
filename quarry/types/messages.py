@@ -43,6 +43,7 @@ from quarry.language.metadata import (
 )
 from quarry.types.exceptions import ConversationValidationError, EvaluationError, InvalidInputError
 from quarry.types.message_links import LinkEvent, resolve_links
+from quarry.types.read_observations import _text_read_observer
 from quarry.types.results import InputText, Span
 from quarry.types.transforms import (
     ContentSourcePart,
@@ -476,6 +477,18 @@ class Message(OpenAIObject):
     _rewrite_source: Message | None = PrivateAttr(default=None)
     _rewrite_content_changed: bool = PrivateAttr(default=False)
 
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        result = super().model_copy(update=update, deep=deep)
+        observer = _text_read_observer.get()
+        if observer is not None:
+            if update is None:
+                observer.copied(self, result)
+            else:
+                # The operation which establishes the new text supplies its exact map.
+                # Unknown host mappings are never inspected again for optional accounting.
+                observer.copy_updated(self, result, update)
+        return result
+
     @property
     def digest(self) -> bytes:
         """The digest of this message's wire form, computed on first use."""
@@ -590,6 +603,9 @@ class Message(OpenAIObject):
         object.__setattr__(segment, "_provenance", provenance)
         if not isinstance(self.source_content, str):
             object.__setattr__(segment, "_rewrite_content_changed", True)
+        observer = _text_read_observer.get()
+        if observer is not None:
+            observer.sliced(self, segment, start, end, text)
         return segment
 
     def _can_split_text(self) -> bool:
@@ -701,6 +717,9 @@ class Message(OpenAIObject):
         object.__setattr__(transformed, "_message_index", self.message_index)
         object.__setattr__(transformed, "_segment", None)
         object.__setattr__(transformed, "_provenance", provenance)
+        observer = _text_read_observer.get()
+        if observer is not None:
+            observer.derived(self, transformed, updated_source)
         return transformed
 
     def _readable_for_rewrite(self) -> bool:
@@ -813,6 +832,16 @@ class ToolCall(OpenAIObject):
     _call_index: int = PrivateAttr(default=-1)
     _id_error: str | None = PrivateAttr(default=None)
     _response_error: str | None = PrivateAttr(default=None)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        result = super().model_copy(update=update, deep=deep)
+        observer = _text_read_observer.get()
+        if observer is not None:
+            if update is None:
+                observer.copied(self, result)
+            else:
+                observer.copy_updated(self, result, update)
+        return result
 
     def guard_read(self, field: str) -> None:
         error = (
@@ -2340,6 +2369,9 @@ class Messages(Sequence[MessageType]):
             object.__setattr__(replacement, "_synthetic_identity", original._synthetic_identity)
             anchor = original._rewrite_source or self._root._items[ordinal]
             object.__setattr__(replacement, "_rewrite_source", anchor)
+            observer = _text_read_observer.get()
+            if observer is not None:
+                observer.copied(original, replacement)
             object.__setattr__(
                 replacement,
                 "_rewrite_content_changed",
@@ -3908,6 +3940,10 @@ class Messages(Sequence[MessageType]):
             if provenance is None:
                 provenance = (ProvenanceSegment(0, len(content), (), "whole"),) if content else ()
             object.__setattr__(new_message, "_provenance", provenance)
+            if type(identity) is object:
+                observer = _text_read_observer.get()
+                if observer is not None:
+                    observer.authored(new_message, content)
             additions.append(new_message)
         root = self._from_items(
             (*self._root._items, *additions),
@@ -3960,6 +3996,9 @@ class Messages(Sequence[MessageType]):
             int.from_bytes(input_key("located-message", role, origin_key(origin)), "big"),
         )
         object.__setattr__(message, "_synthetic_identity", identity)
+        observer = _text_read_observer.get()
+        if observer is not None:
+            observer.located(message, message.source_content, origin)
         return cls._from_items((message,), None, 100, source_root=None, origins=(origin,))
 
     def to_openai_messages(self) -> list[dict[str, Any]]:

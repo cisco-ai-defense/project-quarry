@@ -18,7 +18,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import islice
@@ -87,6 +87,20 @@ from quarry.integrations.model_expression import (
 )
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.rate_limiter import LLMRateLimiter
+from quarry.integrations.read_operations import model_field_input
+from quarry.integrations.read_results import (
+    collect_read_reports,
+    record_result_scope,
+    record_scan_scope,
+    transfer_result_scope,
+)
+from quarry.integrations.read_usage import (
+    grounding_read_observer,
+    new_read_scope,
+    read_usage_scope,
+    resume_read_usage,
+    retain_read_usage,
+)
 from quarry.integrations.resources import ResourceManager, ResourcePreparationError
 from quarry.language.runtime import (
     rejected_call_guidance,
@@ -166,7 +180,9 @@ class _DeferredEvidence:
         if finish is None:
             raise RuntimeError("Deferred evidence has already finished or been closed")
         try:
-            return await finish(result)
+            finished = await finish(result)
+            transfer_result_scope(result, finished)
+            return finished
         finally:
             self.close()
             del finish, self
@@ -1047,6 +1063,7 @@ class DSLScanner:
                         check,
                         nested_input,
                         async_detector=grounded,
+                        read_observer=grounding_read_observer(),
                         async_collector=self._make_async_collector(
                             nested_ctx, regex_backend=regex_backend
                         ),
@@ -1181,6 +1198,7 @@ class DSLScanner:
                             plan.artifact,
                             child_input,
                             async_detector=grounded_child,
+                            read_observer=grounding_read_observer(),
                             async_collector=self._make_async_collector(
                                 child, regex_backend=regex_backend
                             ),
@@ -1327,11 +1345,25 @@ class DSLScanner:
             if name == "model_scan":
                 # Forward the compiler-folded threshold + class_index (output index). None
                 # threshold lets model_scan apply its own default; class_index defaults to 1.
-                return bool(await model_scan(rule_ctx, arg, text, spec.threshold, spec.class_index))
+                field = (
+                    spec.value_expr_key.split(":", 1)[1]
+                    if spec.value_expr_key.startswith("field:")
+                    else "content"
+                )
+                with model_field_input(arg, event, field, text, spec.selector):
+                    return bool(
+                        await model_scan(rule_ctx, arg, text, spec.threshold, spec.class_index)
+                    )
             if name == "model_score":
                 # class_index selects which output the score is read from; the comparator
                 # (op/number) is the threshold folded in by the compiler.
-                score = await model_score(rule_ctx, arg, text, spec.class_index)
+                field = (
+                    spec.value_expr_key.split(":", 1)[1]
+                    if spec.value_expr_key.startswith("field:")
+                    else "content"
+                )
+                with model_field_input(arg, event, field, text, spec.selector):
+                    score = await model_score(rule_ctx, arg, text, spec.class_index)
                 # A bare model_score atom (no comparator) is truthy on a positive score;
                 # a comparison atom carries op/number folded in by the compiler.
                 if spec.op and spec.number is not None:
@@ -1546,8 +1578,12 @@ class DSLScanner:
         enable_explain: ExplainLevel = False,
         rules_subset: set[str] | None = None,
         deadline_seconds: float | None = None,
+        *,
+        logical_reads: bool = False,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (sync wrapper)."""
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
         return asyncio.run(
             self.scan_data_async(
                 data,
@@ -1555,6 +1591,7 @@ class DSLScanner:
                 enable_explain,
                 rules_subset,
                 deadline_seconds,
+                **({"logical_reads": True} if logical_reads else {}),
             )
         )
 
@@ -1565,6 +1602,8 @@ class DSLScanner:
         enable_explain: ExplainLevel = False,
         rules_subset: set[str] | None = None,
         deadline_seconds: float | None = None,
+        *,
+        logical_reads: bool = False,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (async).
 
@@ -1572,7 +1611,31 @@ class DSLScanner:
         (e.g. derived from an incoming gRPC ``grpc-timeout``). Each rule's effective timeout
         is ``min(per_rule_timeout, remaining_deadline)``; once the deadline is exhausted the
         remaining rules time out immediately rather than starting doomed work.
+
+        ``logical_reads=True`` attaches a bounded scalar input-read snapshot, separate
+        from physical usage and verdict completeness. A caller-owned accounting session
+        remains live; its report snapshot explicitly retains ``finalized=False``.
         """
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
+        if logical_reads:
+            with collect_read_reports() as reports:
+                result = await self._scan_data_with_deadline_async(
+                    data, file_path, enable_explain, rules_subset, deadline_seconds
+                )
+            return reports.attach([result])[0]
+        return await self._scan_data_with_deadline_async(
+            data, file_path, enable_explain, rules_subset, deadline_seconds
+        )
+
+    async def _scan_data_with_deadline_async(
+        self,
+        data: dict[str, Any],
+        file_path: Path | None,
+        enable_explain: ExplainLevel,
+        rules_subset: set[str] | None,
+        deadline_seconds: float | None,
+    ) -> ScanResult:
         with scan_deadline(deadline_seconds), scan_scope(cache_policy=self.config.model_cache):
             return await self._scan_data_async(
                 data,
@@ -1627,9 +1690,17 @@ class DSLScanner:
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Close rule value ownership on success, failures and cancellation."""
-        with ExitStack() as value_lifetimes:
-            return await self._scan_data_with_values_async(
+        read_scope = new_read_scope()
+        record_scan_scope(read_scope)
+        # ContextVar tokens belong to this task; only value owners may be transferred
+        # to deferred evidence through value_lifetimes.pop_all().
+        with (
+            read_usage_scope(None, scope=read_scope) if read_scope is not None else nullcontext(),
+            ExitStack() as value_lifetimes,
+        ):
+            result = await self._scan_data_with_values_async(
                 data,
+                read_scope=read_scope,
                 file_path=file_path,
                 enable_explain=enable_explain,
                 record_traces=record_traces,
@@ -1641,12 +1712,15 @@ class DSLScanner:
                 deferred_evidence=deferred_evidence,
                 value_lifetimes=value_lifetimes,
             )
+        record_result_scope(result, read_scope)
+        return result
 
     async def _scan_data_with_values_async(
         self,
         data: dict[str, Any],
         *,
         value_lifetimes: ExitStack,
+        read_scope: int | None,
         file_path: Path | None,
         enable_explain: ExplainLevel,
         record_traces: bool,
@@ -2041,7 +2115,10 @@ class DSLScanner:
                 # Version 1 preserves its separate external-inference budget. Version 2 uses
                 # one optional rule-wide budget for local work, limiter waits, retries, and
                 # provider calls. The inspection deadline remains an independent upper bound.
-                with evaluation_deadline(rule_timeout, f"Rule {rule_name} timeout"):
+                with (
+                    evaluation_deadline(rule_timeout, f"Rule {rule_name} timeout"),
+                    read_usage_scope(rule_name, scope=read_scope),
+                ):
                     selectors = artifact.read_surfaces
                     if faulty := sorted(selectors & part_faults.keys()):
                         raise part_faults[faulty[0]]
@@ -2106,6 +2183,7 @@ class DSLScanner:
                                 artifact,
                                 evaluation_input,
                                 async_detector=detector,
+                                read_observer=grounding_read_observer(),
                                 async_collector=collector,
                                 warnings=warnings,
                                 regex_backend=regex_backend,
@@ -2281,11 +2359,12 @@ class DSLScanner:
             async def one(res) -> None:
                 exec_result = res["exec_result"]
                 try:
-                    if exec_result.refine is not None:
-                        exec_result = await exec_result.refine(remaining_evaluation_time)
-                        res["exec_result"] = exec_result
-                    if explores(res):
-                        await exec_result.explore(full, remaining_evaluation_time)
+                    with read_usage_scope(res["rule_name"], scope=read_scope, phase="evidence"):
+                        if exec_result.refine is not None:
+                            exec_result = await exec_result.refine(remaining_evaluation_time)
+                            res["exec_result"] = exec_result
+                        if explores(res):
+                            await exec_result.explore(full, remaining_evaluation_time)
                 except Exception as error:
                     logger.debug(f'[EVIDENCE] stopped: rule="{res["rule_name"]}" error="{error}"')
 
@@ -2380,9 +2459,12 @@ class DSLScanner:
             # The caller runs the evidence once every verdict of its request is final, as
             # part of this scan.
             scan = current_scan()
+            read_owner = retain_read_usage()
+            if read_owner is not None:
+                value_lifetimes.callback(read_owner.close)
 
             async def finish(result: ScanResult) -> ScanResult:
-                with scan_scope(scan):
+                with scan_scope(scan), resume_read_usage(read_owner):
                     await gather_evidence()
                 return replace(result, decision_paths=decision_path_records(), **evidence())
 
@@ -2408,8 +2490,24 @@ class DSLScanner:
         conversations: list[dict[str, Any]],
         file_path: Path,
         enable_explain: ExplainLevel = False,
+        *,
+        logical_reads: bool = False,
     ) -> ScanResult:
         """Scan multiple conversations from a batch file."""
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
+        if not logical_reads:
+            return self._scan_batch_data(conversations, file_path, enable_explain)
+        with collect_read_reports() as reports:
+            result = self._scan_batch_data(conversations, file_path, enable_explain)
+        return reports.attach_combined(result)
+
+    def _scan_batch_data(
+        self,
+        conversations: list[dict[str, Any]],
+        file_path: Path,
+        enable_explain: ExplainLevel,
+    ) -> ScanResult:
         start_time = datetime.now()
         all_matches = []
         all_outputs = {}
@@ -2538,8 +2636,19 @@ class DSLScanner:
             explanations=all_evidence or None,
         )
 
-    def scan_file(self, json_path: Path, enable_explain: ExplainLevel = False) -> ScanResult:
+    def scan_file(
+        self, json_path: Path, enable_explain: ExplainLevel = False, *, logical_reads: bool = False
+    ) -> ScanResult:
         """Scan a single JSON file with loaded rules."""
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
+        if not logical_reads:
+            return self._scan_file(json_path, enable_explain)
+        with collect_read_reports() as reports:
+            result = self._scan_file(json_path, enable_explain)
+        return reports.attach_combined(result)
+
+    def _scan_file(self, json_path: Path, enable_explain: ExplainLevel) -> ScanResult:
         start_time = datetime.now()
 
         if self.verbose:
@@ -2571,9 +2680,11 @@ class DSLScanner:
             )
 
     def scan_directory(
-        self, directory: Path, enable_explain: ExplainLevel = False
+        self, directory: Path, enable_explain: ExplainLevel = False, *, logical_reads: bool = False
     ) -> list[ScanResult]:
         """Scan all JSON files in a directory."""
+        if type(logical_reads) is not bool:
+            raise ValueError("logical_reads must be a boolean")
         results = []
         pattern = "**/*.json" if self.recursive else "*.json"
         files = sorted(directory.glob(pattern))
@@ -2586,5 +2697,9 @@ class DSLScanner:
         for i, json_file in enumerate(files, 1):
             if not self.verbose:
                 print(f"[{i}/{len(files)}] {json_file.name}", flush=True)
-            results.append(self.scan_file(json_file, enable_explain))
+            results.append(
+                self.scan_file(json_file, enable_explain, logical_reads=True)
+                if logical_reads
+                else self.scan_file(json_file, enable_explain)
+            )
         return results

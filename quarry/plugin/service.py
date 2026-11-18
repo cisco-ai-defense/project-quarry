@@ -625,6 +625,7 @@ class QuarryPlugin:
         visualize: bool = False,
         config_version: int | None = None,
         explore_rate: float = 0.0,
+        logical_reads: bool = False,
     ) -> dict[str, Any]:
         """Compile one rule once and scan one conversation or an ordered batch.
 
@@ -639,10 +640,15 @@ class QuarryPlugin:
         conversation's hash, the tree nodes it reached with their outcomes and scores,
         and its leaf. ``explore_rate`` selects that fraction of conversations, by hash,
         whose path also evaluates every node it skipped.
+
+        ``logical_reads`` adds each conversation's bounded input-read snapshot without
+        extra model/tokenizer work. Accounting completeness does not alter verdict status.
         """
 
         if (conversation is None) == (conversations is None):
             raise PluginInputError("provide exactly one of conversation or conversations")
+        if type(logical_reads) is not bool:
+            raise PluginInputError("logical_reads must be a boolean")
         if conversations is not None and not 1 <= len(conversations) <= MAX_SCAN_BATCH:
             raise PluginInputError(
                 f"conversations must contain between 1 and {MAX_SCAN_BATCH} items"
@@ -715,6 +721,7 @@ class QuarryPlugin:
                 record_traces=visualize,
                 decision_paths=True,
                 explore_rate=float(explore_rate),
+                **({"logical_reads": True} if logical_reads else {}),
             )
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
@@ -794,6 +801,8 @@ class QuarryPlugin:
             },
             "diagnostics": self._scan_diagnostics(result),
         }
+        if result.logical_reads is not None:
+            payload["logical_reads"] = result.logical_reads
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,

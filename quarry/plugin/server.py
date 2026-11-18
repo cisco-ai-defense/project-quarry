@@ -28,7 +28,7 @@ import pydantic_core
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, InputRequiredResult, TextContent, ToolAnnotations
-from pydantic import Field, StrictFloat, StrictInt, StrictStr
+from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 from quarry.decision_report import decision_flows
 from quarry.plugin.service import (
@@ -257,6 +257,7 @@ async def quarry_scan(
     visualize: bool = False,
     config_version: Literal[1, 2] | None = None,
     explore_rate: Annotated[float, Field(ge=0, le=1)] = 0.0,
+    logical_reads: StrictBool = False,
 ) -> dict[str, Any]:
     """Compile one Quarry rule once and scan one conversation or an ordered batch.
 
@@ -274,6 +275,10 @@ async def quarry_scan(
     ``explore_rate`` is the fraction of conversations, selected by that hash, whose path
     also scores the nodes it skipped.
 
+    ``logical_reads`` adds a bounded scalar input-read report per result, separate from
+    physical usage. It performs no extra model/tokenizer work; reference text tokens
+    remain unavailable without explicit host-provided maps.
+
     Scans reuse the model results this server already has for the same model and input,
     so a rescan, or one that moves only a threshold, makes no new model call. A result
     expires ``model_cache.ttl_seconds`` (default 12 hours) after its last use; completed
@@ -289,6 +294,7 @@ async def quarry_scan(
         visualize=visualize,
         config_version=config_version,
         explore_rate=explore_rate,
+        **({"logical_reads": True} if logical_reads else {}),
     )
 
 
