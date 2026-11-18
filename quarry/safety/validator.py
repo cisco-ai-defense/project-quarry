@@ -255,7 +255,9 @@ def _is_extension_collection(node: ConditionNode, extension_event_surfaces: froz
 
 
 def _scopes_from_ancestors(
-    ancestors: tuple[ConditionNode, ...], extension_event_surfaces: frozenset[str] = frozenset()
+    ancestors: tuple[ConditionNode, ...],
+    extension_event_surfaces: frozenset[str] = frozenset(),
+    node: ConditionNode | None = None,
 ) -> dict[str, _ValueShape]:
     scopes: dict[str, _ValueShape] = {}
     comprehension_types = (
@@ -264,8 +266,11 @@ def _scopes_from_ancestors(
         FilterComprehension,
         MapComprehension,
     )
-    for ancestor in ancestors:
+    for index, ancestor in enumerate(ancestors):
         if not isinstance(ancestor, comprehension_types):
+            continue
+        child = ancestors[index + 1] if index + 1 < len(ancestors) else node
+        if child is ancestor.collection:
             continue
         collection = _expression_shape(ancestor.collection, scopes)
         if collection is not None and collection.element is not None:
@@ -1239,7 +1244,7 @@ class RuleValidator:
             ):
                 self._check_field_access(
                     current,
-                    _scopes_from_ancestors(visit.ancestors, self.extension_event_surfaces),
+                    _scopes_from_ancestors(visit.ancestors, self.extension_event_surfaces, current),
                     errors,
                 )
 

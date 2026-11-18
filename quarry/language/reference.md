@@ -713,14 +713,14 @@ Surfaces are bare names. Do not add `()`.
 | Surface | Type | Item fields | What it contains |
 |---|---|---|---|
 | `assistant_messages` | `collection<message>` | `content`, `refusal`, `role`, `tool_calls` | Assistant-role messages from this value, in its current order. |
-| `developer_messages` | `collection<message>` | `content`, `role` | Developer-role messages from this value, in its current order. |
-| `messages` | `collection<message>` | `content`, `role` | All messages in the inspected conversation, in chronological order. |
-| `system_messages` | `collection<message>` | `content`, `role` | System-role messages from this value, in its current order. |
+| `developer_messages` | `collection<message>` | `content`, `role`, `tool_calls` | Developer-role messages from this value, in its current order. |
+| `messages` | `collection<message>` | `content`, `role`, `tool_calls` | All messages in the inspected conversation, in chronological order. |
+| `system_messages` | `collection<message>` | `content`, `role`, `tool_calls` | System-role messages from this value, in its current order. |
 | `system_prompt` | `string` | — | Text content of the leading system message. |
 | `tool_calls` | `collection<tool_call>` | `arguments`, `id`, `name`, `raw_arguments`, `response`, `type` | Assistant tool calls in chronological order. |
-| `tool_responses` | `collection<tool_response>` | `call`, `content`, `id`, `name`, `result`, `role`, `tool_call_id` | Tool-result messages linked to assistant calls by `tool_call_id`. |
+| `tool_responses` | `collection<tool_response>` | `call`, `content`, `id`, `name`, `result`, `role`, `tool_call_id`, `tool_calls` | Tool-result messages linked to assistant calls by `tool_call_id`. |
 | `tools` | `collection<tool_definition>` | `description`, `name`, `parameters`, `type` | Tools offered to the model in the inspected request. |
-| `user_messages` | `collection<message>` | `content`, `role`, `tool_call_id` | User-role messages from this value, in its current order. |
+| `user_messages` | `collection<message>` | `content`, `role`, `tool_call_id`, `tool_calls` | User-role messages from this value, in its current order. |
 
 ### Surface fields
 
@@ -731,13 +731,16 @@ Only the fields listed here are supported for rule authoring.
 | `assistant_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `assistant_messages` | `refusal` | `string \| null` | Assistant refusal text when supplied by the provider; otherwise null. |
 | `assistant_messages` | `role` | `string` | OpenAI message role. |
-| `assistant_messages` | `tool_calls` | `collection<tool_call>` | Calls emitted with this assistant message. Use the `tool_calls` surface to iterate over calls; this field can be measured with `len(...)`. |
+| `assistant_messages` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 | `developer_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `developer_messages` | `role` | `string` | OpenAI message role. |
+| `developer_messages` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 | `messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `messages` | `role` | `string` | OpenAI message role. |
+| `messages` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 | `system_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `system_messages` | `role` | `string` | OpenAI message role. |
+| `system_messages` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 | `tool_calls` | `arguments` | `object` | Decoded JSON arguments. Read a key with a path such as `call.arguments.command`, or all values with `call.arguments.*`. |
 | `tool_calls` | `id` | `string` | Provider-assigned tool-call ID. |
 | `tool_calls` | `name` | `string` | Exact called function name. |
@@ -751,6 +754,7 @@ Only the fields listed here are supported for rule authoring.
 | `tool_responses` | `result` | `string` | Tool-result text; alias for `content`. |
 | `tool_responses` | `role` | `string` | OpenAI message role. |
 | `tool_responses` | `tool_call_id` | `string` | ID of the call this message answers. |
+| `tool_responses` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 | `tools` | `description` | `string` | Description shown to the model. |
 | `tools` | `name` | `string` | Exact offered function name. |
 | `tools` | `parameters` | `object` | JSON Schema for the function arguments. |
@@ -758,6 +762,7 @@ Only the fields listed here are supported for rule authoring.
 | `user_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `user_messages` | `role` | `string` | OpenAI message role. |
 | `user_messages` | `tool_call_id` | `string \| null` | Optional sender-supplied call ID. |
+| `user_messages` | `tool_calls` | `collection<tool_call>` | Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors. |
 
 ## Operator precedence
 
@@ -940,7 +945,7 @@ before and after `for`.
 
 Grammar: `filter_comp: "[" IDENTIFIER "for" IDENTIFIER "in" or_expr ["if" or_expr] "]"`
 
-Examples: [examples/filter-count.rule](examples/filter-count.rule), [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend)
+Examples: [examples/filter-count.rule](examples/filter-count.rule), [examples/message-composition.rule](examples/message-composition.rule) (requires a configured backend), [examples/message-local-call-count.rule](examples/message-local-call-count.rule)
 
 ### flow-after
 

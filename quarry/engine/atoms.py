@@ -164,6 +164,10 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "as_messages": (1, 1),
     "binding": (0, 0),
     "call_texts": (1, 1),
+    "call_count": (1, 1),
+    "call_filter": (2, 2),
+    "call_any": (2, 2),
+    "call_all": (2, 2),
     "compare": (2, 2),
     "concat": (2, MAX_MODEL_EXPRESSION_FANOUT),
     "conditional": (3, 3),
@@ -223,6 +227,7 @@ _NONE_VALUE_KINDS = frozenset(
         "and",
         "as_messages",
         "call_texts",
+        "call_count",
         "concat",
         "conditional",
         "extract_span",
@@ -303,6 +308,9 @@ def validate_model_expression(expression: ModelExpression) -> None:
             raise ValueError(f"invalid message selector {node.value!r}")
         if node.kind in {
             "binding",
+            "call_filter",
+            "call_any",
+            "call_all",
             "map",
             "message_map",
             "message_select",
@@ -393,6 +401,46 @@ def validate_model_expression(expression: ModelExpression) -> None:
     pending = [(expression, None, -1)]
     while pending:
         node, parent, position = pending.pop()
+        if node.kind in {"call_count", "call_filter", "call_any", "call_all"}:
+            source = node.children[0]
+            while source.kind in {"slice", "call_filter"}:
+                if source.kind == "slice" and any(
+                    bound.kind != "literal"
+                    or (bound.value is not None and type(bound.value) is not int)
+                    for bound in source.children[1:]
+                ):
+                    raise ValueError("local call slices require literal integer bounds")
+                source = source.children[0]
+            if source.kind != "field" or source.value != "tool_calls":
+                raise ValueError("a local call source must read message-owned tool_calls")
+            if source.children[0].kind not in {"binding", "index", "model_call"}:
+                raise ValueError("a local call source requires a message owner")
+            predicates = list(node.children[1:])
+            while predicates:
+                predicate = predicates.pop()
+                if predicate.kind == "literal":
+                    if type(predicate.value) is not bool:
+                        raise ValueError("a local call predicate must be Boolean")
+                elif predicate.kind in {"and", "or", "not"} or predicate.kind == "conditional":
+                    predicates.extend(predicate.children)
+                elif predicate.kind not in {
+                    "compare",
+                    "string_compare",
+                    "text_equals",
+                    "field",
+                    "index",
+                    "refused",
+                    "if_refused",
+                    "call_any",
+                    "call_all",
+                }:
+                    raise ValueError("a local call predicate must be Boolean")
+            if (
+                node.kind == "call_all"
+                and node.children[0].kind != "call_filter"
+                and model_expression_requires_model(node.children[1])
+            ):
+                raise ValueError("an unfiltered all call body cannot call a model")
         if node.kind == "trim":
             parts = node.value.split("\x1f") if type(node.value) is str else ()
             if (

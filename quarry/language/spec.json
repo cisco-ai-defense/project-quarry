@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-29",
+  "compiler_version": "compiler-30",
   "examples": [
     {
       "checks": [],
@@ -231,6 +231,26 @@
       "id": "example:message-composition",
       "requires_backend": true,
       "rule_path": "examples/message-composition.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/message-local-call-count.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/message-local-call-count.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:filter-comprehension",
+        "surface:messages",
+        "surface:tool_calls"
+      ],
+      "id": "example:message-local-call-count",
+      "requires_backend": false,
+      "rule_path": "examples/message-local-call-count.rule"
     },
     {
       "checks": [
@@ -3156,7 +3176,7 @@
           "type": "string"
         },
         {
-          "description": "Calls emitted with this assistant message. Use the `tool_calls` surface to iterate over calls; this field can be measured with `len(...)`.",
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
           "name": "tool_calls",
           "type": "collection<tool_call>"
         }
@@ -3191,11 +3211,17 @@
           "description": "OpenAI message role.",
           "name": "role",
           "type": "string"
+        },
+        {
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
         }
       ],
       "fields": [
         "content",
-        "role"
+        "role",
+        "tool_calls"
       ],
       "id": "surface:developer_messages",
       "kind": "surface",
@@ -3221,11 +3247,17 @@
           "description": "OpenAI message role.",
           "name": "role",
           "type": "string"
+        },
+        {
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
         }
       ],
       "fields": [
         "content",
-        "role"
+        "role",
+        "tool_calls"
       ],
       "id": "surface:messages",
       "kind": "surface",
@@ -3251,11 +3283,17 @@
           "description": "OpenAI message role.",
           "name": "role",
           "type": "string"
+        },
+        {
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
         }
       ],
       "fields": [
         "content",
-        "role"
+        "role",
+        "tool_calls"
       ],
       "id": "surface:system_messages",
       "kind": "surface",
@@ -3374,6 +3412,11 @@
           "description": "ID of the call this message answers.",
           "name": "tool_call_id",
           "type": "string"
+        },
+        {
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
         }
       ],
       "fields": [
@@ -3383,7 +3426,8 @@
         "name",
         "result",
         "role",
-        "tool_call_id"
+        "tool_call_id",
+        "tool_calls"
       ],
       "id": "surface:tool_responses",
       "kind": "surface",
@@ -3456,12 +3500,18 @@
           "description": "Optional sender-supplied call ID.",
           "name": "tool_call_id",
           "type": "string | null"
+        },
+        {
+          "description": "Calls owned by an assistant message. Missing on other readable roles; identity filters over a missing collection have no survivors.",
+          "name": "tool_calls",
+          "type": "collection<tool_call>"
         }
       ],
       "fields": [
         "content",
         "role",
-        "tool_call_id"
+        "tool_call_id",
+        "tool_calls"
       ],
       "id": "surface:user_messages",
       "kind": "surface",

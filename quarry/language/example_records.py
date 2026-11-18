@@ -566,6 +566,31 @@ condition:
         backend_required=True,
     ),
     ExampleRecord(
+        id="example:message-local-call-count",
+        rule_text='rule "One local lookup" condition: any m in messages where count([c for c in m.tool_calls if c.name == "lookup"]) == 1',
+        covered_item_ids=(
+            "surface:messages",
+            "surface:tool_calls",
+            "construct:filter-comprehension",
+        ),
+        matching={
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "synthetic plan",
+                    "tool_calls": [
+                        {
+                            "id": "synthetic-call",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ]
+        },
+        non_matching={"messages": [{"role": "user", "content": "synthetic request"}]},
+    ),
+    ExampleRecord(
         id="example:message-composition",
         rule_text="""rule "Selected model input"
 variables:

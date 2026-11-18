@@ -1,0 +1,1 @@
+rule "One local lookup" condition: any m in messages where count([c for c in m.tool_calls if c.name == "lookup"]) == 1

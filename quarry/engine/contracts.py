@@ -43,9 +43,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission changes invalidate earlier artifacts.
-# Compiler-28 retains computed message frames and grouped map values. Format 11
-# carries their child plans; earlier saved policies require source recompilation.
-COMPILER_VERSION = "compiler-29"
+# Compiler-30 adds message-owned call values, scoped aggregate conditions and their
+# prepared graph checks. Format 11 remains; older artifacts require source recompilation.
+COMPILER_VERSION = "compiler-30"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64
