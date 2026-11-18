@@ -56,7 +56,7 @@ from quarry.plugin.visualization import (
     build_runtime_attribution,
     build_visualization_bundle,
 )
-from quarry.policy import bind_prepared_policy
+from quarry.policy import _validated_sample, bind_prepared_policy
 from quarry.prepared import PreparedRuleCache
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import Complexity, RuleValidator
@@ -426,6 +426,7 @@ class QuarryPlugin:
             config = self._runtime_config
             response["runtime_config_version"] = config.config_version if config is not None else 1
             response["model_aliases"] = self._model_aliases()
+        response["inputs"] = self._inputs()
         # The table is the same on every call and is what an author reads once, before writing
         # anything, so it rides along with the browsing action and is asked for explicitly
         # anywhere else. Repeating it on every search and every get charged the caller for it
@@ -718,14 +719,27 @@ class QuarryPlugin:
                 details=verbosity == "full",
                 include_explanations=bool(explain) or verbosity == "full",
             )
+            if result.validation_error is not None:
+                report_input = None
+            elif scanner.input_registry.declarations or scanner.input_adapters:
+                report_input = _validated_sample(
+                    item,
+                    artifact.read_surfaces,
+                    policy._adapter_hashes,
+                    artifact.orders_input_items,
+                    scanner.limits,
+                    scanner.input_registry,
+                )
+            else:
+                report_input = item
             path = path_report(
                 tree,
                 (result.decision_paths or {}).get(rule_name),
                 matched=rule_name in result.rule_matches if result.is_complete else None,
-                conversation=item,
+                conversation=report_input,
                 parameter_digest=result.parameter_digest,
                 explain=bool(explain),
-                explore_rate=float(explore_rate),
+                explore_rate=0.0 if result.validation_error is not None else float(explore_rate),
             )
             if verbosity == "full":
                 payload["decision_path"] = path
@@ -1301,6 +1315,26 @@ class QuarryPlugin:
                 entry["description"] = config.model_descriptions[alias]
             aliases[alias] = entry
         return aliases
+
+    def _inputs(self) -> dict[str, dict[str, Any]]:
+        """Describe configured sections and the adapters that fill them."""
+
+        from quarry.inputs import load_input_adapters
+
+        config = self._runtime_config
+        if config is None:
+            return {}
+        adapters, declarations = load_input_adapters(config.adapters, config.inputs)
+        filled_by = {
+            section: key for key, adapter in adapters.items() for section in adapter.sections
+        }
+        listed = {}
+        for section, declaration in sorted(declarations.items()):
+            entry = declaration.describe()
+            if section in filled_by:
+                entry["adapter"] = filled_by[section]
+            listed[section] = entry
+        return listed
 
     def _deprecation_warnings_from_text(self, rule_text: str) -> list[dict[str, Any]]:
         warnings = []
