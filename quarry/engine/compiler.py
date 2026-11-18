@@ -2365,10 +2365,18 @@ class _Compiler:
             children = tuple(
                 (ModelExpression("absent"), None)
                 if arg is None
+                else self._lower_trim_input(arg, scope, node.alias, node.operation)
+                if position == 0 and isinstance(arg, FunctionCall) and arg.name == "_trim"
                 else self._lower_model_expression(arg, scope)
-                for arg in arguments
+                for position, arg in enumerate(arguments)
             )
             expressions = self._validate_model_call(node, arguments, children)
+            if expressions and expressions[0].kind == "trim":
+                selected = expressions[0]
+                expressions = (
+                    ModelExpression("trim", selected.value, (*selected.children, *expressions[1:])),
+                    *expressions[1:],
+                )
             result_type = (
                 self._completion_types.get(node.alias, node.result_type)
                 if node.operation == "complete"
@@ -2976,6 +2984,88 @@ class _Compiler:
         ):
             return node.value
         raise UnsupportedConstruct("message indexes must be integer literals")
+
+    @dsl_compiler_form(
+        name="trim",
+        return_type="model_input",
+        syntax='trim(messages[, size][, context=messages][, from="end"|"start"][, cut_keep="start"|"none"])',
+    )
+    def _bind_trim(
+        self,
+        messages: Annotated[object, DSLParameter(accepted_types=("model_input",))],
+        size: Annotated[
+            object | None, DSLParameter(accepted_types=("integer",), required=False, minimum=1)
+        ] = None,
+        context: Annotated[
+            object | None, DSLParameter(accepted_types=("model_input",), required=False)
+        ] = None,
+        direction: Annotated[
+            str, DSLParameter(name="from", allowed_values=("end", "start"))
+        ] = "end",
+        cut_keep: Annotated[str, DSLParameter(allowed_values=("start", "none"))] = "start",
+    ):
+        """Select one oldest/newest bounded input for score, classify, complete or spans.
+
+        A written size uses the split tokenizer's message units. Without a size the
+        consuming operation requires max_input_tokens and counts its request framing,
+        score policy and offered tools. Context is kept at the front with native origins.
+        cut_keep="start" admits a fitting text prefix at the cut; "none" keeps whole messages.
+        """
+        return messages, size, context, direction, cut_keep
+
+    def _lower_trim_input(self, node, scope, alias, operation):
+        if operation not in {"score", "classify", "complete", "spans"}:
+            raise UnsupportedConstruct(
+                "trim() must be the messages operand of score/classify/complete/spans"
+            )
+        if len(node.args) != 6:
+            raise UnsupportedConstruct("invalid trim() argument shape")
+        source, size, context, direction, cut_keep, written = node.args
+        if not isinstance(written, Literal) or type(written.value) is not bool:
+            raise UnsupportedConstruct("invalid trim() size admission")
+        if not written.value and (not isinstance(size, Literal) or size.value is not None):
+            raise UnsupportedConstruct("invalid implicit trim() size admission")
+        if (
+            not isinstance(direction, Literal)
+            or type(direction.value) is not str
+            or direction.value not in {"start", "end"}
+        ):
+            raise UnsupportedConstruct('trim() from must be "start" or "end"')
+        if (
+            not isinstance(cut_keep, Literal)
+            or type(cut_keep.value) is not str
+            or cut_keep.value not in {"start", "none"}
+        ):
+            raise UnsupportedConstruct('trim() cut_keep must be "start" or "none"')
+        messages, kind = self._lower_model_expression(source, scope)
+        messages, kind = _convert(messages, kind, {"Messages"})
+        if kind != "Messages":
+            raise UnsupportedConstruct("trim() input must be Messages")
+        size_expression = ModelExpression("absent")
+        if written.value:
+            from quarry.engine.atoms import validate_trim_size
+
+            size_expression, kind = self._lower_model_expression(size, scope)
+            if kind != "int":
+                raise UnsupportedConstruct("trim() size must be an integer")
+            if size_expression.kind == "literal" and (
+                type(size_expression.value) is not int or size_expression.value <= 0
+            ):
+                raise UnsupportedConstruct("trim() size must be positive")
+            try:
+                validate_trim_size(size_expression, alias)
+            except ValueError as error:
+                raise UnsupportedConstruct(str(error)) from error
+        context_expression = ModelExpression("absent")
+        if not isinstance(context, Literal) or context.value is not None:
+            context_expression, kind = self._lower_model_expression(context, scope)
+            context_expression, kind = _convert(context_expression, kind, {"Messages"})
+            if kind != "Messages":
+                raise UnsupportedConstruct("trim() context must be Messages")
+        value = "\x1f".join((alias, operation, direction.value, cut_keep.value))
+        return ModelExpression(
+            "trim", value, (messages, size_expression, context_expression)
+        ), "Messages"
 
     @staticmethod
     def _validate_model_call(

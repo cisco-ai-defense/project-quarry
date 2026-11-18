@@ -125,6 +125,12 @@ def _expression_collector(requirements: dict[str, set[Any]]):
             alias, operation = value.split("\x1f", 1)
             _record_model_requirement(requirements, alias, operation)
             requirements["model_operations"].add((alias, operation))
+        elif expression.kind == "trim":
+            alias, operation, _direction, _cut = expression.value.split("\x1f")
+            _record_model_requirement(requirements, alias, "input_tokens")
+            requirements["model_operations"].add((alias, "input_tokens"))
+            if expression.children[1].kind == "absent":
+                requirements["model_trim_limits"].add((alias, operation))
         elif expression.kind in {"local_transform", "model_transform"}:
             is_model = expression.kind == "model_transform"
             _name, alias = adapter_transform_reference_parts(expression.value, is_model)
@@ -154,6 +160,7 @@ def requirements_from_specs(specs) -> dict[str, set[Any]]:
         "transforms": set(),
         "functions": set(),
         "model_operations": set(),
+        "model_trim_limits": set(),
     }
 
     collect_expression = _expression_collector(requirements)
@@ -279,6 +286,7 @@ class ResourceManager:
             # gate in _validate_required_resources).
             "functions": set(),
             "model_operations": set(),
+            "model_trim_limits": set(),
         }
 
         self.requires_model_inference = False
@@ -346,6 +354,20 @@ class ResourceManager:
                 self.requires_model_inference = True
                 for call in model_calls:
                     _record_model_requirement(requirements, call.alias, call.operation)
+                    if (
+                        call.args
+                        and isinstance(call.args[0], FunctionCall)
+                        and call.args[0].name == "_trim"
+                    ):
+                        _record_model_requirement(requirements, call.alias, "input_tokens")
+                        requirements["model_operations"].add((call.alias, "input_tokens"))
+                        args = call.args[0].args
+                        if (
+                            len(args) == 6
+                            and isinstance(args[-1], Literal)
+                            and args[-1].value is False
+                        ):
+                            requirements["model_trim_limits"].add((call.alias, call.operation))
 
             text_refs = self._extract_text_ref_names_from_calls(function_calls)
             if text_refs:
@@ -427,6 +449,7 @@ class ResourceManager:
                     )
 
             missing_score = sorted(
+                # Normal operation capabilities stay required independently of trimming.
                 model_name
                 for model_name in requirements.get("llm_score_models", set())
                 if model_name in inference_models and inference_models[model_name].score is None
@@ -447,6 +470,13 @@ class ResourceManager:
                     "Rules require input-token configuration for inference models: "
                     + ", ".join(missing_tokens)
                 )
+            for alias, operation in sorted(requirements.get("model_trim_limits", ())):
+                if alias in inference_models:
+                    section = getattr(inference_models[alias], operation, None)
+                    if section is None or section.max_input_tokens is None:
+                        errors.append(
+                            f"Inference model '{alias}' {operation} needs max_input_tokens for trim()"
+                        )
 
             missing_classify = sorted(
                 model_name

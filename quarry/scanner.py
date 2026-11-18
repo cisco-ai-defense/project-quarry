@@ -617,7 +617,11 @@ class DSLScanner:
             declared = ResourceManager(self.config).analyze_rules({name: rules[name]})
             compiled_rules[name] = replace(
                 artifact,
-                declared_resources={key: frozenset(values) for key, values in declared.items()},
+                declared_resources={
+                    key: frozenset(values)
+                    for key, values in declared.items()
+                    if values or key != "model_trim_limits"
+                },
             )
         compiled_rules = {
             name: label_called_rule_artifact(artifact, rules[name])

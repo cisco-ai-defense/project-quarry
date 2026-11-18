@@ -209,6 +209,7 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "text_ref": (0, 0),
     "tools": (0, 0),
     "transform": (1, 1),
+    "trim": (3, 5),
     "union": (2, 2),
     "view_spans": (1, 1),
     "+": (2, 2),
@@ -387,6 +388,64 @@ def validate_model_expression(expression: ModelExpression) -> None:
         stack.append((node, depth, True))
         stack.extend((child, depth + 1, False) for child in reversed(node.children))
 
+    # Ownership is checked per occurrence, after cycle/depth/size admission. A forged
+    # graph cannot borrow another call's alias, operation, policy, tools or threshold.
+    pending = [(expression, None, -1)]
+    while pending:
+        node, parent, position = pending.pop()
+        if node.kind == "trim":
+            parts = node.value.split("\x1f") if type(node.value) is str else ()
+            if (
+                len(parts) != 4
+                or not parts[0]
+                or parts[1] not in {"score", "classify", "complete", "spans"}
+                or parts[2] not in {"start", "end"}
+                or parts[3] not in {"start", "none"}
+            ):
+                raise ValueError("invalid trim operation or selection settings")
+            if (
+                parent is None
+                or parent.kind != "model_call"
+                or position != 0
+                or parent.value != "\x1f".join(parts[:2])
+                or node.children[3:] != parent.children[1:]
+            ):
+                raise ValueError("trim must belong to its exact consuming model operation")
+            minimum, maximum = {
+                "score": (2, 3),
+                "classify": (1, 2),
+                "complete": (1, 2),
+                "spans": (2, 2),
+            }[parts[1]]
+            if not minimum <= len(parent.children) <= maximum:
+                raise ValueError("invalid consuming trim operation arguments")
+            message_kinds = {
+                "messages",
+                "message_view",
+                "message",
+                "add_message",
+                "as_messages",
+                "flatten_messages",
+                "concat",
+                "slice",
+                "message_select",
+                "binding",
+                "input_message",
+                "index",
+                "field",
+                "conditional",
+                "transform",
+                "local_transform",
+                "model_transform",
+            }
+            if node.children[0].kind not in message_kinds or (
+                node.children[2].kind != "absent" and node.children[2].kind not in message_kinds
+            ):
+                raise ValueError("trim input and context require message expressions")
+            if node.children[1].kind != "absent":
+                validate_trim_size(node.children[1], parts[0])
+        pending.extend((child, node, index) for index, child in enumerate(node.children))
+
     for mapped in message_maps:
         # Validate after the whole graph has passed its arity, cycle and size checks.
         # Prepared policies receive the same model-free-body contract as parsed rules.
@@ -495,10 +554,37 @@ def model_expression_requires_model(expression: ModelExpression) -> bool:
     pending = [expression]
     while pending:
         node = pending.pop()
-        if node.kind in {"model_call", "split_any", "model_transform"}:
+        if node.kind in {"model_call", "split_any", "model_transform", "trim"}:
             return True
         pending.extend(node.children)
     return False
+
+
+def validate_trim_size(expression: ModelExpression, alias: str) -> None:
+    """Only integer arithmetic and same-vocabulary written-text counts set a trim size."""
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind == "literal" and type(node.value) is int:
+            continue
+        if node.kind in {"+", "-", "*"}:
+            pending.extend(node.children)
+            continue
+        if (
+            node.kind == "model_call"
+            and node.value == alias + "\x1finput_tokens"
+            and len(node.children) == 1
+        ):
+            texts = list(node.children)
+            while texts:
+                text = texts.pop()
+                if text.kind not in {"message", "add_message", "literal", "text_ref", "parameter"}:
+                    raise ValueError("trim token arithmetic requires written text")
+                if text.kind == "literal" and type(text.value) is not str:
+                    raise ValueError("trim token arithmetic requires written text")
+                texts.extend(text.children)
+            continue
+        raise ValueError("trim size requires closed integer or written-text token arithmetic")
 
 
 def validate_transform_expression_graph(

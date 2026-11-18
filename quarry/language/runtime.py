@@ -37,6 +37,7 @@ INTERNAL_FUNCTION_NAMES = frozenset(
         "_string_spans",
         "_extract_windows",
         "_input_message",
+        "_trim",
     }
 )
 

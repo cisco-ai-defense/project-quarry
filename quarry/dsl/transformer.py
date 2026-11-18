@@ -128,6 +128,31 @@ def _place_extract_arguments(arguments: list, *, required: int, names: tuple[str
     return placed
 
 
+def _place_trim_arguments(arguments: list) -> list:
+    """Close trim's keyword boundary and retain whether a size was actually written."""
+    positional = []
+    named = {}
+    for argument in arguments:
+        if isinstance(argument, _NamedArgument):
+            if argument.name not in {"context", "from", "cut_keep"} or argument.name in named:
+                raise ValueError(f"unknown or repeated trim argument {argument.name!r}")
+            named[argument.name] = argument.value
+        elif named:
+            raise ValueError("positional arguments must come before named arguments")
+        else:
+            positional.append(argument)
+    if not 1 <= len(positional) <= 2:
+        raise ValueError("trim() needs messages and an optional positional size")
+    return [
+        positional[0],
+        positional[1] if len(positional) == 2 else Literal(None),
+        named.get("context", Literal(None)),
+        named.get("from", Literal("end")),
+        named.get("cut_keep", Literal("start")),
+        Literal(len(positional) == 2),
+    ]
+
+
 # Comprehension node types whose ``.variable`` binds a loop element inside their body.
 _COMPREHENSION_TYPES = (
     AnyComprehension,
@@ -918,6 +943,8 @@ class DSLTransformer(Transformer):
     def function_call(self, name, args=None):
         """Call a public Quarry function with positional arguments."""
         written = list(args or [])
+        if str(name) == "trim":
+            return FunctionCall("_trim", _place_trim_arguments(written))
         if any(isinstance(arg, _NamedArgument) for arg in written):
             if str(name) != "extract":
                 raise _positional_argument_error(written, f"{name}()")

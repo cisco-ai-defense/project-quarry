@@ -702,6 +702,26 @@ class _Renderer:
             arguments = self._node_list(node.args, "function arguments")
             if name in _NON_VALUE_IDENTIFIERS:
                 raise ConditionRenderError("function name is reserved by the DSL grammar")
+            if name == "_trim":
+                if (
+                    len(arguments) != 6
+                    or type(arguments[5]) is not Literal
+                    or type(arguments[5].value) is not bool
+                ):
+                    raise ConditionRenderError("invalid trim argument shape")
+                values = [arguments[0]]
+                if arguments[5].value:
+                    values.append(arguments[1])
+                if type(arguments[2]) is not Literal or arguments[2].value is not None:
+                    values.append(_KeywordArgument("context", arguments[2]))
+                values.extend(
+                    (
+                        _KeywordArgument("from", arguments[3]),
+                        _KeywordArgument("cut_keep", arguments[4]),
+                    )
+                )
+                pending.extend([("text", ")"), ("arguments", values, 0, depth), ("text", "trim(")])
+                return
             if name == "_string_spans":
                 if not arguments:
                     raise ConditionRenderError("string spans require a receiver")

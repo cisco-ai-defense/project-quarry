@@ -560,6 +560,12 @@ condition:
         backend_required=True,
     ),
     ExampleRecord(
+        id="example:operation-input-trim",
+        rule_text='rule "Bounded model input" condition: model("guard").classify(trim(messages, 200, from="end", cut_keep="none")) > 0.5',
+        covered_item_ids=("compiler_form:trim",),
+        backend_required=True,
+    ),
+    ExampleRecord(
         id="example:message-composition",
         rule_text="""rule "Selected model input"
 variables:

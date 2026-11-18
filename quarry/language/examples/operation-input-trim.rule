@@ -1,0 +1,1 @@
+rule "Bounded model input" condition: model("guard").classify(trim(messages, 200, from="end", cut_keep="none")) > 0.5
