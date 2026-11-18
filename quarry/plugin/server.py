@@ -31,6 +31,13 @@ from mcp.types import CallToolResult, InputRequiredResult, TextContent, ToolAnno
 from pydantic import Field, StrictFloat, StrictInt, StrictStr
 
 from quarry.decision_report import decision_flows
+from quarry.plugin.contracts import (
+    CompileResponse,
+    DecisionFlowResponse,
+    DecisionTreeResponse,
+    ReferenceResponse,
+    ScanResponse,
+)
 from quarry.plugin.service import (
     MAX_FLOW_LABEL_CHARS,
     MAX_FLOW_PATHS,
@@ -135,7 +142,7 @@ async def quarry_reference(
     verbosity: Literal["compact", "full"] | None = None,
     include_precedence: bool | None = None,
     include_models: bool | None = None,
-) -> dict[str, Any]:
+) -> ReferenceResponse:
     """Discover the installed Quarry language and configured input sections.
 
     Use ``search`` with plain words to find relevant features, ``get`` with exact IDs
@@ -166,7 +173,7 @@ async def quarry_reference(
     ``index``; pass ``include_precedence=true`` to read it alongside any other action.
     """
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         _service.reference,
         action=action,
         query=query,
@@ -178,6 +185,7 @@ async def quarry_reference(
         include_precedence=include_precedence,
         include_models=include_models,
     )
+    return cast(ReferenceResponse, response)
 
 
 @mcp.tool(annotations=_LOCAL_READ_ONLY)
@@ -185,7 +193,7 @@ async def quarry_compile(
     rule_text: Annotated[str, Field(max_length=MAX_RULE_TEXT_CHARS)],
     config_version: Literal[1, 2] | None = None,
     visualize: bool = False,
-) -> dict[str, Any]:
+) -> CompileResponse:
     """Validate and compile one complete Quarry rule without scanning data.
 
     The response identifies the failed stage, structured diagnostics, deprecations,
@@ -194,19 +202,20 @@ async def quarry_compile(
     configuration is controlled by the server.
     """
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         _service.compile,
         rule_text=rule_text,
         config_version=config_version,
         visualize=visualize,
     )
+    return cast(CompileResponse, response)
 
 
 @mcp.tool(annotations=_LOCAL_READ_ONLY)
 async def quarry_decision_tree(
     rule_text: Annotated[str, Field(max_length=MAX_RULE_TEXT_CHARS)],
     config_version: Literal[1, 2] | None = None,
-) -> dict[str, Any]:
+) -> DecisionTreeResponse:
     """Return one Quarry rule's decision tree without scanning data.
 
     Each node is one check of the rule, keyed by a stable ID, with its label, its kind
@@ -216,11 +225,12 @@ async def quarry_decision_tree(
     ``decision_path`` names the nodes it reached and the tree's ``tree_sha256``.
     """
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         _service.decision_tree,
         rule_text=rule_text,
         config_version=config_version,
     )
+    return cast(DecisionTreeResponse, response)
 
 
 @mcp.tool(annotations=_LOCAL_READ_ONLY)
@@ -229,21 +239,23 @@ async def quarry_decision_flows(
     paths: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=MAX_FLOW_PATHS)],
     labels: list[Annotated[str, Field(max_length=MAX_FLOW_LABEL_CHARS)]] | None = None,
     thresholds: dict[str, Annotated[float, Field(allow_inf_nan=False)]] | None = None,
-) -> dict[str, Any]:
+) -> DecisionFlowResponse:
     """Count scans through one rule's decision tree, optionally at moved thresholds.
 
-    ``tree`` is the rule's decision tree and ``paths`` the ``decision_path`` of each scan
-    of it; every path must carry the tree's ``tree_sha256``. ``labels`` gives one label per
-    path, such as its ground truth. ``thresholds`` moves score or number thresholds, keyed
-    by node ID or by parameter name, and re-walks each path over its recorded values
-    without scanning again. Returns the scans by outcome and label at each step, and by
-    label at each leaf: match, no_match, unknown (a moved threshold reached a check the
-    scan never answered) and error (the scan failed at a check).
+    ``tree`` is the rule's decision tree and ``paths`` are returned ``decision_path``
+    records. A valid path from a different tree, such as one scanned before the rule
+    changed, is counted by label under ``unmapped_paths`` and walks no step in this tree.
+    ``labels`` gives one label per path, such as its ground truth. ``thresholds`` moves score
+    or number thresholds, keyed by node ID or by parameter name, and re-walks each path over
+    its recorded values without scanning again. Returns the scans by outcome and label at
+    each step, and by label at each leaf: match, no_match, unknown (a moved threshold
+    reached a check the scan never answered) and error (the scan failed at a check).
     """
 
-    return await asyncio.to_thread(
+    response = await asyncio.to_thread(
         decision_flows, tree, paths, labels=labels, thresholds=thresholds
     )
+    return cast(DecisionFlowResponse, response)
 
 
 @mcp.tool(annotations=_SCAN_READ_ONLY)
@@ -258,7 +270,7 @@ async def quarry_scan(
     config_version: Literal[1, 2] | None = None,
     explore_rate: Annotated[float, Field(ge=0, le=1)] = 0.0,
     verbosity: Literal["compact", "full"] | None = None,
-) -> dict[str, Any]:
+) -> ScanResponse:
     """Compile one Quarry rule once and scan one conversation or an ordered batch.
 
     Supply every value declared by the rule in one ``parameters`` map. Unmarked declarations
@@ -283,7 +295,7 @@ async def quarry_scan(
     expires ``model_cache.ttl_seconds`` (default 12 hours) after its last use.
     """
 
-    return await _service.scan(
+    response = await _service.scan(
         rule_text=rule_text,
         conversation=conversation,
         conversations=conversations,
@@ -294,6 +306,7 @@ async def quarry_scan(
         explore_rate=explore_rate,
         verbosity=verbosity,
     )
+    return cast(ScanResponse, response)
 
 
 def main() -> None:

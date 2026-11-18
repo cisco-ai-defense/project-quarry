@@ -25,10 +25,12 @@ from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import TypeAdapter
 
 from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
 from quarry.decision_report import decision_scores, telemetry_record
+from quarry.plugin.contracts import DecisionFlowResponse
 from quarry.plugin.server import mcp
 from quarry.plugin.service import QuarryPlugin
 from quarry.types.exceptions import LLMError
@@ -511,10 +513,14 @@ condition:
     ).structured_content
     assert counted["leaves"]["error"] == {"all": 1}
 
-    # Paths map onto one tree only; a threshold must name a score or number node.
-    other = [{**paths[0], "tree_sha256": "0" * 64}]
-    with pytest.raises(ToolError, match="walked tree"):
-        await mcp.call_tool("quarry_decision_flows", {"tree": tree, "paths": other})
+    # A path that claims this tree must still follow its edges; a threshold must name a
+    # score or number node.
+    impossible = {
+        **paths[0],
+        "path": [{**paths[0]["path"][0], "node": "t:missing"}, *paths[0]["path"][1:]],
+    }
+    with pytest.raises(ToolError, match="does not follow"):
+        await mcp.call_tool("quarry_decision_flows", {"tree": tree, "paths": [impossible]})
     with pytest.raises(ToolError, match="name no score or number node"):
         await flows(thresholds={"missing": 1})
     # A tree must be the one its hash names, and a walk cannot loop.
@@ -533,6 +539,73 @@ condition:
     looped = [{**paths[0], "tree_sha256": looping["tree_sha256"]}]
     with pytest.raises(ToolError, match="edges loop"):
         await mcp.call_tool("quarry_decision_flows", {"tree": looping, "paths": looped})
+
+
+@pytest.mark.asyncio
+async def test_flows_count_a_returned_path_from_an_earlier_rule_tree() -> None:
+    plugin = QuarryPlugin()
+    conversation = {
+        "messages": [
+            {"role": "user", "content": "first synthetic turn"},
+            {"role": "assistant", "content": "second synthetic turn"},
+        ]
+    }
+
+    async def artifacts(minimum: int) -> tuple[dict, dict]:
+        rule = f'rule "Message volume"\ncondition:\n    len(messages) > {minimum}\n'
+        (tree,) = plugin.decision_tree(rule_text=rule)["decision_tree"].values()
+        result = await plugin.scan(rule_text=rule, conversation=conversation, explain=False)
+        return tree, result["decision_path"]
+
+    current_tree, current_path = await artifacts(1)
+    _, earlier_path = await artifacts(2)
+    assert current_path["tree_sha256"] != earlier_path["tree_sha256"]
+
+    counted = (
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {
+                "tree": current_tree,
+                "paths": [earlier_path, current_path],
+                "labels": ["baseline", "current"],
+            },
+        )
+    ).structured_content
+
+    root = current_tree["root"]
+    assert counted["unmapped_paths"] == {"baseline": 1}
+    assert counted["steps"] == {
+        root: {"true": {"current": 1}, "false": {}},
+    }
+    assert counted["leaves"] == {
+        "match": {"current": 1},
+        "no_match": {},
+        "unknown": {},
+        "error": {},
+    }
+    assert TypeAdapter(DecisionFlowResponse).validate_python(counted) == counted
+
+    malformed = dict(earlier_path)
+    del malformed["conversation_sha256"]
+    with pytest.raises(ToolError, match="not a valid decision path"):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {"tree": current_tree, "paths": [malformed]},
+        )
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {"tree": current_tree, "paths": []},
+        )
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {
+                "tree": current_tree,
+                "paths": [current_path],
+                "labels": ["x" * 201],
+            },
+        )
 
 
 @pytest.mark.asyncio
