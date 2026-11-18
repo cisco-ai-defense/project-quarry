@@ -179,6 +179,17 @@ The optional `if` filter runs before the projection, so excluded items are not t
 constructed. The projection and filter cannot call a model. Nested maps preserve lexical scope;
 source-backed items keep their selected content, source coordinates, and tool links.
 
+Filters over repeated items may reuse a completed pure scalar expression when it reads
+neither an item binder nor a parameter. Reuse stays within the selected evaluation frame
+and regex backend. Nested binders keep their lexical scope; unreached operands stay
+unreached, and model or host callbacks retain every required invocation. Cached comparison
+evidence belongs to that expression, including an absent value, operator, or threshold.
+Logical reads remain attributed to each reader. Optional value storage is bounded across
+a rule's child frames and released when evaluation finishes; when it cannot admit a value,
+the filter evaluates normally. A singleton filter avoids this optional cache setup.
+With registered tool-call types, only expressions derived from literals are eligible;
+native-value reads still invoke the registered semantic guards and properties.
+
 `max_comprehension_size` limits both source and output items when safety limits are enabled.
 Each map also has fixed caps of 10,000 source/output items and 2,000,000 retained text characters,
 including when configurable limits are disabled. The existing 256 constructed-message limit
