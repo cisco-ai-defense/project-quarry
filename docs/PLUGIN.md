@@ -7,8 +7,15 @@ The Quarry plugin gives Codex, Claude Code, and other MCP hosts the same five re
 | `quarry_reference` | Searches the installed language catalog and returns full records with tested examples. | It does not invent syntax or search the web. |
 | `quarry_compile` | Runs a complete rule through Quarry's parse, validation, link, resource, and compile path, and reports validity, diagnostics, metadata, parameters, and required capabilities. `visualize` adds the static source graph. | It does not save the rule or return its decision tree; `quarry_decision_tree` does. |
 | `quarry_decision_tree` | Compiles a rule and returns its decision tree: each check, its stable ID, and where its true and false outcomes lead. | It does not scan; a scan's `decision_path` names the checks it reached. |
-| `quarry_decision_flows` | Counts scans' `decision_path`s through one rule's tree, by step outcome and leaf, optionally by label and at moved score or number thresholds. | It does not scan again; a moved threshold that reaches a check a scan never answered counts as `unknown`. |
+| `quarry_decision_flows` | Counts scans' `decision_path`s through one rule's tree, by step outcome and leaf, optionally by label and at moved score or number thresholds. | It does not scan again; a moved threshold that reaches a check a scan never answered counts as `unknown`, while a valid path from a different tree counts under `unmapped_paths` without walking this tree. |
 | `quarry_scan` | Compiles a rule and scans explicit conversation JSON. | It does not read files, sessions, or stored records. |
+
+Each tool publishes a typed MCP `outputSchema`. Decision trees and decision paths have
+versioned nested schemas; the other responses declare their stable top-level fields and typed
+verdict, failure, match, and output records. Schemas allow additive fields so a newer Quarry can
+extend a response without hiding data from an older client. The checked-in schemas live in
+`quarry/plugin/tool_schemas.json` and are regenerated with the language artifacts. Python hosts
+can import the corresponding response types from `quarry.plugin`.
 
 ## Install from the repository
 
@@ -159,7 +166,9 @@ condition:
 
 Pass all declared values in the existing `parameters` input to `quarry_scan`. For an ordered
 `conversations` batch, Quarry compiles the rule once and applies the same parameter map to every
-conversation. Text values are represented by SHA-256 in results; numeric values remain visible.
+conversation. Text values appear only as `{"redacted": true}` in parameter evidence; numeric
+values remain visible. `parameter_digest` identifies the complete effective parameter set without
+exposing its text.
 Production code can use `compile_policy` to retain the resulting `CompiledPolicy` and avoid
 compilation on the scan path. The portable plugin accepts at most 100,000 characters across all
 text parameter values in one request.
@@ -706,7 +715,7 @@ timeline attempts; tool indexes belong to nested checks.
 | `diagnostics` | Validation, timeout, truncation, or evaluation problems. |
 | `policy_digest` | Identity of the compiled policy, its fixed values, and referenced runtime configuration. |
 | `parameter_digest` | Identity of all effective parameter values for this scan. |
-| `parameter_evidence` | Numeric values and SHA-256 evidence for text, with `scan` or `policy` binding. |
+| `parameter_evidence` | Numeric values remain visible; text is represented only by `redacted: true`. Every entry names its `scan` or `policy` binding. |
 
 For an ordered batch with `visualize`, the response returns the static graph once at
 `compilation.visualization`. Each result's `visualization` is a runtime-only bundle keyed
@@ -754,7 +763,7 @@ fails instead of choosing another model.
 
 Model aliases, backend endpoints, named `text_ref` resources, safety limits, and credentials are
 server settings. Declared text parameters are tool inputs by design; they are bound into the ad hoc
-policy for that scan and represented only by SHA-256 in results.
+policy for that scan and represented only by a redacted marker in parameter evidence.
 Configured model rate limits are shared across every compile and scan handled by that server.
 Startup, reference requests, and local-only compilation do not construct unused model backends
 or inspect their credentials. A rule that uses a model alias still requires that alias's backend
@@ -776,9 +785,29 @@ a provider request or consume a model-call attempt.
 | Rule text | 100,000 characters |
 | Conversations in one batch | 1,000 |
 | Text across all parameter values | 100,000 characters |
+| Paths in one decision-flow request | 100,000 |
+| One decision-flow label | 200 characters |
+| Decision-tree nodes or stored steps in one path | 100,000 |
+| Decision-flow aggregate work | 2,000,000 units |
+| Decision-flow aggregate scalar data | 16,000,000 bytes |
+| Decision-flow nested container depth | 128 |
 
 `limit` bounds `index` and `search`. `get` and `rejected` reject `limit`; a `get` returns every
 requested ID, with duplicates collapsed in the response after enforcing the 50-ID input bound.
+
+Decision-flow preflight applies one request-wide budget before typed validation. It charges one
+work unit for every nested scalar or exact built-in container, one for every possible path/node
+walk, and one for each started 64-byte block of aggregate scalar data. Mapping keys and values both
+count. Strings use their UTF-8 size, bytes use their raw size, and integers use a conservative
+decimal JSON size derived from their bit length, including one byte for zero and the negative sign
+when present. Repeated or shared values count at every occurrence. Each explicit flow label is at
+most 200 Unicode characters; omitted labels count under `all`. The traversal retains only one
+iterator frame per nesting level. Cycles, custom container types, and requests over any listed
+limit fail without being partially counted. Non-finite numbers are rejected anywhere in the
+request, including additive fields and threshold overrides, before validation or hashing.
+Aggregate failures use the stable diagnostics `flow request exceeds the structural work limit`,
+`flow request exceeds the aggregate scalar-byte limit`, and
+`flow request exceeds the nesting limit`.
 
 Reference and compilation work run outside the MCP event loop. Scanning awaits Quarry's async
 engine directly so transport cancellation reaches the active scan. Conversation size and nesting
