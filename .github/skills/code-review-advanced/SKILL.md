@@ -1,6 +1,6 @@
 ---
 name: code-review-advanced
-description: Review a pull request or codebase for subtle correctness defects, interacting edge cases, and failure paths. Use for advanced code review and correctness audits.
+description: Review pull requests or codebases for subtle correctness defects, interacting edge cases, implicit state machines, race conditions, and failure paths. Use for advanced code review and lifecycle or concurrency audits.
 ---
 
 # Advanced code review
@@ -20,13 +20,22 @@ input or execution trace, with enough context for a maintainer to assess the imp
 
 ## Choose review passes from the actual behavior
 
-Inspect the applicable prompts in [references/review-prompts.md](references/review-prompts.md).
+Load only the checklists relevant to the requested review:
+
+- [references/review-prompts.md](references/review-prompts.md) for edge cases, partial failures,
+  retries, data contracts, cache identity, and result semantics.
+- [references/state-machines.md](references/state-machines.md) for lifecycle analysis and
+  requests to **"find all implicit state machines in this codebase"**. For that request,
+  search broadly and provide an inventory and coverage limits.
+- [references/concurrency.md](references/concurrency.md) for races, cancellation, shared work,
+  reentrancy, deadlocks, and stale publication.
+
 Use the code's contracts to choose cases; do not force every category onto every file.
 
 | Code signal | Review pass |
 | --- | --- |
-| Flags, nullable fields, counters, statuses, ownership changes | Reconstruct lifecycle states and invariants with [code-review-state-machines](../code-review-state-machines/SKILL.md). |
-| Shared state, tasks, threads, callbacks, locks, external mutations | Construct schedules with [code-review-concurrency](../code-review-concurrency/SKILL.md). |
+| Flags, nullable fields, counters, statuses, ownership changes | Reconstruct lifecycle states, transitions, and invariants. |
+| Shared state, tasks, threads, callbacks, locks, external mutations | Construct actor-by-actor schedules and inspect synchronization. |
 | Multistep writes, cleanup, rollback, restart | Interrupt between steps and inspect surviving effects and recovery. |
 | Retries, deadlines, remote calls, queues | Trace ambiguous outcomes, duplicate effects, total time and work budgets. |
 | Parsing, validation, filtering, normalization | Follow values across boundaries and combine edge conditions. |

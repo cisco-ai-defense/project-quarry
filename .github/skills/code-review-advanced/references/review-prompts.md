@@ -1,9 +1,7 @@
 # Advanced review prompts
 
-Read the sections relevant to the code under review. These are original prompts synthesized
-from the primary sources below and repository concerns; they are review heuristics, not a
-promise of exhaustive detection. A category becomes a finding only with a reachable trigger,
-a violated contract, and impact.
+Read the sections relevant to the code under review. A category becomes a finding only
+with a reachable trigger, a violated contract, and impact.
 
 ## Boundaries and interacting conditions
 
@@ -25,18 +23,17 @@ a violated contract, and impact.
   actor's work? Can cleanup fail, mask the original error, or delete recovery information?
 - Can recovery itself be interrupted and rerun? Are repeated close, abort, and delete operations
   safe under their documented contracts? Establish persistence guarantees before assuming a
-  successful write survives a crash. See [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html).
+  successful write survives a crash.
 
 ## Retries, idempotency, and budgets
 
 - Assume a remote mutation succeeded but its reply was lost. Is another attempt safe? Check
   deduplication scope, concurrent duplicate requests, the atomicity of recording a key and
   performing the effect, retention expiry, late requests, and a reused key with different
-  parameters. See [AWS idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/).
+  parameters.
 - Trace queueing, connection setup, attempts, backoff, and cleanup against the logical operation's
   deadline. Which layers retry independently? Calculate the maximum combined attempt count.
-  Can permanent errors, overload, synchronized retries, or reset deadlines multiply work? See
-  [AWS timeouts and retries](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/).
+  Can permanent errors, overload, synchronized retries, or reset deadlines multiply work?
 - Does a timeout mean the caller stopped waiting, work stopped, or the outcome is unknown?
   Inspect the actual cancellation behavior before claiming an effect was prevented.
 
@@ -45,8 +42,7 @@ a violated contract, and impact.
 - Trace raw bytes through decoding, parsing, normalization, validation, caching, and output.
   Do duplicate keys, Unicode, number precision, heterogeneous arrays, or alternate encodings
   cause two components to interpret the same input differently? Use a supported input to
-  demonstrate the disagreement. Distinguish JSON syntax from application schema. See
-  [RFC 8259, sections 4–9](https://datatracker.ietf.org/doc/html/rfc8259#section-4).
+  demonstrate the disagreement. Distinguish JSON syntax from application schema.
 - Does validation occur before every consumer that needs it, including cached and deserialized
   values? Can a valid outer container hide malformed elements or unexpected nested types?
 - Compare single/batch, sync/async, cached/uncached, CLI/SDK/plugin, and source/prepared paths
@@ -69,7 +65,7 @@ a violated contract, and impact.
 
 - Follow authorization and validation from the checked object to the object used for the
   effect. Can another actor replace a path, resource, credential context, or policy between
-  check and use? Identify the mutator and ordering. See [CWE-367](https://cwe.mitre.org/data/definitions/367.html).
+  check and use? Identify the mutator and ordering.
 - Trace invalid, unavailable, refused, timed out, cancelled, skipped, and partially evaluated
   outcomes to their consumers. Can an unknown result become success, an empty result, or a
   clean non-match? Show the consumer that makes the unsafe interpretation.
@@ -88,18 +84,3 @@ Use these as navigation hints and verify current paths and contracts at the revi
 | Public surfaces | `quarry/cli.py`, `quarry/plugin/`, `quarry/types/` | Do input validation, statuses, metadata, and errors agree across supported entry points? |
 
 Infer additional targets from the diff. These hints describe areas to inspect, not known defects.
-
-## Reasoning sources
-
-- [Google: what to look for in code review](https://google.github.io/eng-practices/review/reviewer/looking-for.html)
-  motivates functionality, edge-case, concurrency, and test-contract review.
-- [Lamport: a high-level view of TLA+](https://lamport.azurewebsites.net/tla/high-level-view.html)
-  informs initial states, transitions, invariants, liveness, and fairness assumptions in the
-  state-machine skill. Drawing a transition table does not constitute model checking.
-- [Python 3.11 asyncio tasks](https://docs.python.org/3.11/library/asyncio-task.html)
-  informs cancellation, timeout, task ownership, and structured concurrency questions in the
-  concurrency skill. Check each supported runtime and exact API before applying its semantics.
-
-The boundary-combination, cache-identity, conservation, and alternate-path prompts are our
-review synthesis. The linked sources explain the underlying concepts; they do not validate
-this skill's detection accuracy.

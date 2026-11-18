@@ -1,13 +1,7 @@
----
-name: code-review-concurrency
-description: Review race conditions, shared work, async cancellation, reentrancy, deadlocks, and stale publication using concrete execution schedules. Use for concurrency-focused code review.
----
-
 # Review concurrency and races
 
-Read repository instructions and establish the revision, review scope, supported runtimes,
-and actual concurrency model. For a PR, trace changed behavior through all access paths and
-compare base and head before labeling a defect a regression.
+Establish the actual concurrency model and trace the relevant behavior through every access
+path, including failure and cleanup paths.
 
 ## Map actors, shared state, and ordering
 
@@ -61,8 +55,7 @@ the supported runtime; use primary documentation when source is insufficient.
 
 Check that cancellation releases permits and locks exactly as required, preserves other
 waiters' ownership, and cannot report a clean result while an effect is still ambiguous.
-Use [review-prompts.md](../code-review-advanced/references/review-prompts.md) for retry budgets,
-failure atomicity, and the primary sources underlying these prompts.
+Use [review-prompts.md](review-prompts.md) for retry budgets and failure atomicity.
 
 ## Validate and report
 
@@ -73,5 +66,4 @@ race. Account for every spawned task and thread in the reproduction itself.
 Report a minimal actor-by-actor schedule, exact locations, synchronization inspected, violated
 contract, and user impact. Distinguish demonstrated deadlocks, races, and stalls from hypotheses
 requiring missing deployment facts. State whether the schedule was executed or only traced,
-which actors and paths were reviewed, and remaining limits. Do not edit or publish unless
-requested. Follow `SECURITY.md`; leave merging to the user.
+which actors and paths were reviewed, and remaining limits.

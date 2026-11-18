@@ -29,11 +29,16 @@ Avoid narrow elapsed-time assertions in required CI tests; measure throughput se
 
 ## Advanced Code Review
 
-Use the repository's [code review skills](docs/CODE_REVIEW_SKILLS.md) for deeper correctness,
-implicit state-machine, and concurrency reviews. They include prompts for interacting edge
-cases, partial failures, retries, cancellation, stale state, and concrete race schedules.
-Findings should identify a reachable trigger, the violated contract, and user impact.
-Only the user may merge pull requests.
+Use [code-review-advanced](.github/skills/code-review-advanced/SKILL.md) for interacting edge
+cases, implicit state machines, races, partial failures, retries, and cancellation. It has one
+entry point with focused checklists loaded as needed. For example: `Use $code-review-advanced
+to find all implicit state machines in this codebase and review their transitions.` Findings
+should identify a reachable trigger, the violated contract, and user impact.
+
+The skill lives in `.github/skills/code-review-advanced/` for Copilot review. The
+`.agents/skills/code-review-advanced` entry is a relative directory symlink for Codex discovery;
+it contains no second copy. Edit the canonical files under `.github/skills/`. Check out with
+symlink support for both discovery paths to work. Only the user may merge pull requests.
 
 ## Other Ways to Contribute
 

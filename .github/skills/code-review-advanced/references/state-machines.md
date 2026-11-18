@@ -1,8 +1,3 @@
----
-name: code-review-state-machines
-description: Find implicit state machines in a codebase and review lifecycle transitions, invariants, unreachable states, and progress failures. Use for state-machine inventories and lifecycle-focused code review.
----
-
 # Review implicit state machines
 
 Support the request: **"find all implicit state machines in this codebase"**.
@@ -11,8 +6,8 @@ review, model machines affected by the change and follow their interacting lifec
 
 ## Discover machines encoded in ordinary data
 
-Read repository instructions and establish the revision and scope. Search entry points and
-state mutation sites using repository navigation and text search. Look beyond named enums:
+Search entry points and state mutation sites using repository navigation and text search.
+Look beyond named enums:
 
 - Combinations of booleans, nullable fields, counters, timestamps, status strings, and sentinels.
 - Initialization, acquisition, handoff, completion, cancellation, cleanup, close, and reuse.
@@ -55,9 +50,8 @@ State the properties before looking for counterexamples:
 - Check cycles without progress, states with no reachable exit, and success reported before
   required transitions. Explain why any claimed stall persists under the stated assumptions.
 
-For interleavings, consult [code-review-concurrency](../code-review-concurrency/SKILL.md).
-For interrupted writes and retries, read the relevant sections of
-[review-prompts.md](../code-review-advanced/references/review-prompts.md).
+For interleavings, consult [concurrency.md](concurrency.md). For interrupted writes and
+retries, read the relevant sections of [review-prompts.md](review-prompts.md).
 
 ## Deliver an inventory and evidenced findings
 
@@ -70,4 +64,3 @@ and head before labeling PR regressions; keep speculative concerns separate.
 List directories, entry points, and mutation patterns searched, plus excluded or inaccessible
 areas. Say which properties were reasoned about or executed. A bounded search cannot prove
 that every implicit machine was found; an inventory or diagram alone does not prove correctness.
-Do not edit or publish a review unless requested. Follow `SECURITY.md`; leave merging to the user.
