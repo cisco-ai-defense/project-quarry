@@ -74,7 +74,7 @@ class SafetyLimits:
     # a conversation that differs from what the caller sent; raise the specific limit instead.
 
     def __post_init__(self) -> None:
-        """Reject timeout values that would silently disable deadline enforcement.
+        """Reject invalid bounds before a scanner can use this limits object.
 
         A NaN/inf/non-positive timeout makes ``min(per_rule, remaining)`` and
         ``asyncio.timeout`` never fire (or fire immediately), so a pathological rule could run
@@ -95,6 +95,12 @@ class SafetyLimits:
             or not 1 <= self.max_nesting_depth <= 100
         ):
             raise ValueError("max_nesting_depth must be an integer from 1 to 100")
+        if (
+            isinstance(self.max_total_size, bool)
+            or not isinstance(self.max_total_size, int)
+            or self.max_total_size < 0
+        ):
+            raise ValueError("max_total_size must be a non-negative integer")
         if (
             isinstance(self.max_model_calls, bool)
             or not isinstance(self.max_model_calls, int)
