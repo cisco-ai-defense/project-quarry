@@ -3793,9 +3793,8 @@ class _Compiler:
                 threshold = cls._lit_float(fc.args[2])
             if len(fc.args) > 3:
                 class_index = cls._lit_index(fc.args[3])
-        elif fc.name == "model_score":
-            if len(fc.args) > 2:
-                class_index = cls._lit_index(fc.args[2])
+        elif fc.name == "model_score" and len(fc.args) > 2:
+            class_index = cls._lit_index(fc.args[2])
         return threshold, class_index
 
     @staticmethod
