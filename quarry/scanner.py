@@ -1152,8 +1152,12 @@ class DSLScanner:
             return all(artifact.read_surfaces & surfaces for artifact in selected_artifacts)
 
         try:
-            if not isinstance(data, dict):
-                raise ConversationValidationError("A conversation must be an object")
+            if type(data) is not dict:
+                raise ConversationValidationError("A conversation must be an exact built-in object")
+            if any(type(key) is not str for key in dict.__iter__(data)):
+                raise ConversationValidationError(
+                    "Conversation keys must be exact built-in strings"
+                )
             carried = {"messages", "tools", "timeline", *self.input_registry.definitions}
             carried |= set(self.input_adapters)
             if not data:
@@ -1183,8 +1187,12 @@ class DSLScanner:
                     ]
                     if not any(section in read for section in sections_of):
                         continue
-                    if not isinstance(value, dict):
+                    if type(value) is not dict:
                         reason = f"{key!r} must be an object of its sections"
+                        input_faults.update(dict.fromkeys(sections_of, reason))
+                        continue
+                    if any(type(section_key) is not str for section_key in dict.__iter__(value)):
+                        reason = f"{key!r} section keys must be exact built-in strings"
                         input_faults.update(dict.fromkeys(sections_of, reason))
                         continue
                     for section in read:
