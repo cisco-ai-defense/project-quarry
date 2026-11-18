@@ -27,6 +27,14 @@ cannot turn a correct verdict into a timeout. Deadline tests should configure a 
 explicitly, use controlled delayed work, and assert the resulting status or work stopped.
 Avoid narrow elapsed-time assertions in required CI tests; measure throughput separately.
 
+## Advanced Code Review
+
+Use the repository's [code review skills](docs/CODE_REVIEW_SKILLS.md) for deeper correctness,
+implicit state-machine, and concurrency reviews. They include prompts for interacting edge
+cases, partial failures, retries, cancellation, stale state, and concrete race schedules.
+Findings should identify a reachable trigger, the violated contract, and user impact.
+Only the user may merge pull requests.
+
 ## Other Ways to Contribute
 
 We welcome anyone that wants to contribute to Project Quarry to triage and reply to open issues to help troubleshoot and fix existing bugs. Here is what you can do:
