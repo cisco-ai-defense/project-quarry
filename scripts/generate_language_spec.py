@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate or verify Quarry's packaged language catalog and examples."""
+"""Generate or verify Quarry's packaged language and plugin schema artifacts."""
 
 from __future__ import annotations
 
@@ -23,9 +23,11 @@ import tempfile
 from pathlib import Path
 
 from quarry.language.generate import write_language_outputs
+from quarry.plugin.contracts import write_tool_schemas
 
 ROOT = Path(__file__).resolve().parents[1]
 LANGUAGE_RELATIVE = Path("quarry/language")
+TOOL_SCHEMA_RELATIVE = Path("quarry/plugin/tool_schemas.json")
 
 
 def _output_paths(root: Path) -> set[Path]:
@@ -34,6 +36,7 @@ def _output_paths(root: Path) -> set[Path]:
     return {
         LANGUAGE_RELATIVE / "spec.json",
         LANGUAGE_RELATIVE / "reference.md",
+        TOOL_SCHEMA_RELATIVE,
         *(path.relative_to(root) for path in examples.iterdir() if path.is_file()),
     }
 
@@ -42,7 +45,9 @@ def _check() -> int:
     with tempfile.TemporaryDirectory(prefix="quarry-language-") as temporary:
         generated_root = Path(temporary)
         (generated_root / LANGUAGE_RELATIVE).mkdir(parents=True)
+        (generated_root / TOOL_SCHEMA_RELATIVE.parent).mkdir(parents=True)
         write_language_outputs(generated_root)
+        write_tool_schemas(generated_root)
         generated = _output_paths(generated_root)
         current = _output_paths(ROOT)
         stale = sorted(
@@ -61,7 +66,7 @@ def _check() -> int:
 
 
 def main() -> int:
-    """Generate or verify Quarry's packaged language catalog and examples."""
+    """Generate or verify Quarry's packaged language and plugin schemas."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--check", action="store_true", help="verify generated files without editing"
@@ -70,7 +75,8 @@ def main() -> int:
     if args.check:
         return _check()
     write_language_outputs(ROOT)
-    print("Generated Quarry language catalog, reference, and examples")
+    write_tool_schemas(ROOT)
+    print("Generated Quarry language catalog, examples, and plugin schemas")
     return 0
 
 
