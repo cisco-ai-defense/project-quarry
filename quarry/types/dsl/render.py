@@ -211,6 +211,7 @@ class _Renderer:
         self.output_size = 0
         self.parts: list[str] = []
         self.greedy_tails: set[int] = set()
+        self._preflight_remaining: int | None = None
 
     def append(self, text: str) -> None:
         if type(text) is not str:
@@ -267,11 +268,14 @@ class _Renderer:
             raise ConditionRenderError(f"{what} must be a condition node")
         return value
 
-    @staticmethod
-    def _node_list(value: object, what: str) -> list[ConditionNode]:
+    def _node_list(self, value: object, what: str) -> list[ConditionNode]:
         if type(value) is not list:
             raise ConditionRenderError(f"{what} must be a condition-node list")
         value = cast(list[object], value)
+        if self._preflight_remaining is not None and len(value) > self._preflight_remaining:
+            raise ConditionRenderError(
+                f"condition rendering exceeds {self.max_nodes} condition nodes or edges"
+            )
         for index in range(len(value)):
             if not isinstance(value[index], ConditionNode):
                 raise ConditionRenderError(f"{what}[{index}] must be a condition node")
@@ -400,6 +404,7 @@ class _Renderer:
         heights: dict[int, int] = {}
         work = 1
         try:
+            self._preflight_remaining = self.max_nodes - work
             root_children = self._children(root)
         except ConditionRenderError:
             raise
@@ -409,6 +414,7 @@ class _Renderer:
 
         while stack:
             frame = stack[-1]
+            self._preflight_remaining = self.max_nodes - work
             try:
                 child = next(frame.children)
             except StopIteration:
@@ -438,6 +444,7 @@ class _Renderer:
                 continue
 
             work += 1
+            self._preflight_remaining = self.max_nodes - work
             if work > self.max_nodes:
                 raise ConditionRenderError(
                     f"condition rendering exceeds {self.max_nodes} condition nodes or edges"
@@ -462,6 +469,7 @@ class _Renderer:
             except (TypeError, ValueError) as exc:
                 raise ConditionRenderError("condition node has malformed children") from exc
             stack.append(_PreflightFrame(child, children, edge_depth, path_depth))
+        self._preflight_remaining = None
 
     @staticmethod
     def precedence(node: ConditionNode) -> int:

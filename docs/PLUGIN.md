@@ -7,8 +7,15 @@ The Quarry plugin gives Codex, Claude Code, and other MCP hosts the same five re
 | `quarry_reference` | Searches the installed language catalog and returns full records with tested examples. | It does not invent syntax or search the web. |
 | `quarry_compile` | Runs a complete rule through Quarry's parse, validation, link, resource, and compile path, and reports validity, diagnostics, metadata, parameters, and required capabilities. `visualize` adds the static source graph. | It does not save the rule or return its decision tree; `quarry_decision_tree` does. |
 | `quarry_decision_tree` | Compiles a rule and returns its decision tree: each check, its stable ID, and where its true and false outcomes lead. | It does not scan; a scan's `decision_path` names the checks it reached. |
-| `quarry_decision_flows` | Counts scans' `decision_path`s through one rule's tree, by step outcome and leaf, optionally by label and at moved score or number thresholds. | It does not scan again; a moved threshold that reaches a check a scan never answered counts as `unknown`. |
+| `quarry_decision_flows` | Counts scans' `decision_path`s through one rule's tree, by step outcome and leaf, optionally by label and at moved score or number thresholds. | It does not scan again; a moved threshold that reaches a check a scan never answered counts as `unknown`, while a valid path from a different tree counts under `unmapped_paths` without walking this tree. |
 | `quarry_scan` | Compiles a rule and scans explicit conversation JSON. | It does not read files, sessions, or stored records. |
+
+Each tool publishes a typed MCP `outputSchema`. Decision trees and decision paths have
+versioned nested schemas; the other responses declare their stable top-level fields and typed
+verdict, failure, match, and output records. Schemas allow additive fields so a newer Quarry can
+extend a response without hiding data from an older client. The checked-in schemas live in
+`quarry/plugin/tool_schemas.json` and are regenerated with the language artifacts. Python hosts
+can import the corresponding response types from `quarry.plugin`.
 
 ## Install from the repository
 
@@ -159,7 +166,9 @@ condition:
 
 Pass all declared values in the existing `parameters` input to `quarry_scan`. For an ordered
 `conversations` batch, Quarry compiles the rule once and applies the same parameter map to every
-conversation. Text values are represented by SHA-256 in results; numeric values remain visible.
+conversation. Text values appear only as `{"redacted": true}` in parameter evidence; numeric
+values remain visible. `parameter_digest` identifies the complete effective parameter set without
+exposing its text.
 Production code can use `compile_policy` to retain the resulting `CompiledPolicy` and avoid
 compilation on the scan path. The portable plugin accepts at most 100,000 characters across all
 text parameter values in one request.
@@ -344,9 +353,29 @@ If the rule contains taxonomy labels in `metadata`, the scan copies those labels
 
 The rule author owns the metadata names and values. Quarry only preserves them.
 
+Every scan names its result `verbosity`:
+
+| Verbosity | Default for | Result contract |
+|---|---|---|
+| `full` | One `conversation` | Preserves the detailed response: `decision_path` is present and `explain` defaults to on. |
+| `compact` | A `conversations` batch | Keeps completion state, diagnostics, verdicts, matches, outputs, and `decision_scores`; omits `decision_path`, and `explain` defaults to off. |
+
+Pass `verbosity: "full"` when a batch needs paths for `quarry_decision_flows`. Pass
+`explain: true` or `"support"` with a compact scan when explanations are needed without paths.
+An explicit `explain` value always wins over its verbosity default. A single-conversation scan
+can also request `compact`; rescan an interesting batch item as one conversation to recover its
+detailed path while reusing cached model results.
+
+`decision_scores` maps each score-step ID reached by the path or exploration to the numeric value
+compared with its threshold. It keeps the full step ID, including a `~N` suffix when the same
+authored score check occurs more than once in the decision tree, so distinct steps never
+overwrite each other. It is available at both verbosity levels, so threshold analysis does not
+require retaining conversation hashes, path structure, explanation excerpts, or other bulk
+details for every batch item.
+
 ### Why a rule matched or did not
 
-With `explain` on (the default), a complete scan adds `explanations`: one entry per rule,
+With `explain` on (the default for `full`), a complete scan adds `explanations`: one entry per rule,
 matched or not, rendered from the same scan record. A match cites its supporting positions
 in `witness`. Every entry lists the rule's atoms, the actionable ones first:
 
@@ -689,16 +718,23 @@ timeline attempts; tool indexes belong to nested checks.
 | `matched` | Whether at least one rule matched. Present only after a complete scan. |
 | `matches` | Matched rule names and their authored metadata. |
 | `explanations` | Why each rule matched or did not, when `explain` is enabled: up to 16 cited steps and the rule's atoms; see [Why a rule matched or did not](#why-a-rule-matched-or-did-not). |
+| `decision_scores` | Score-step values keyed by full decision-step ID, including any `~N` suffix. Present at both verbosity levels. |
+| `decision_path` | The decision-tree checks reached and their leaf. Present only with `verbosity: "full"`. |
+| `verbosity` | `compact` or `full`, reported once for the scan response. |
 | `visualization` | Runtime attribution keyed to `compilation.visualization` by node ID. Present only when `visualize` is true. |
 | `diagnostics` | Validation, timeout, truncation, or evaluation problems. |
 | `policy_digest` | Identity of the compiled policy, its fixed values, and referenced runtime configuration. |
 | `parameter_digest` | Identity of all effective parameter values for this scan. |
-| `parameter_evidence` | Numeric values and SHA-256 evidence for text, with `scan` or `policy` binding. |
+| `parameter_evidence` | Numeric values remain visible; text is represented only by `redacted: true`. Every entry names its `scan` or `policy` binding. |
 
 For an ordered batch with `visualize`, the response returns the static graph once at
 `compilation.visualization`. Each result's `visualization` is a runtime-only bundle keyed
-by rule name, and the response-level `visualization.graphs[]` repeats those records, unchanged,
-in `executions`. `aggregate` counts executions per node. Within one execution a node counts
+by rule name. Under `compact`, its `runtime_attribution` retains `status`, `matched`,
+`attempts`, and `proof_attempt`, but omits the full trace, node-evidence list, and
+selected-node convenience view. Those views grow with a conversation or repeat an attempt;
+`verbosity: "full"` restores them for every batch result. The response-level
+`visualization.graphs[]` repeats the corresponding compact or full records in `executions`.
+`aggregate` counts executions per node. Within one execution a node counts
 once: its state is the highest observed across that execution's attempts, proof replay, and
 tool checks (`evaluated_true`, then `evaluated_false`, then `skipped`), and it adds to
 `witness_count` if any of them marks it causal. `evaluated_count`, `true_count`, and
@@ -737,7 +773,7 @@ fails instead of choosing another model.
 
 Model aliases, backend endpoints, named `text_ref` resources, safety limits, and credentials are
 server settings. Declared text parameters are tool inputs by design; they are bound into the ad hoc
-policy for that scan and represented only by SHA-256 in results.
+policy for that scan and represented only by a redacted marker in parameter evidence.
 Configured model rate limits are shared across every compile and scan handled by that server.
 
 ## Request limits
@@ -750,9 +786,29 @@ Configured model rate limits are shared across every compile and scan handled by
 | Rule text | 100,000 characters |
 | Conversations in one batch | 1,000 |
 | Text across all parameter values | 100,000 characters |
+| Paths in one decision-flow request | 100,000 |
+| One decision-flow label | 200 characters |
+| Decision-tree nodes or stored steps in one path | 100,000 |
+| Decision-flow aggregate work | 2,000,000 units |
+| Decision-flow aggregate scalar data | 16,000,000 bytes |
+| Decision-flow nested container depth | 128 |
 
 `limit` bounds `index` and `search`. `get` and `rejected` reject `limit`; a `get` returns every
 requested ID, with duplicates collapsed in the response after enforcing the 50-ID input bound.
+
+Decision-flow preflight applies one request-wide budget before typed validation. It charges one
+work unit for every nested scalar or exact built-in container, one for every possible path/node
+walk, and one for each started 64-byte block of aggregate scalar data. Mapping keys and values both
+count. Strings use their UTF-8 size, bytes use their raw size, and integers use a conservative
+decimal JSON size derived from their bit length, including one byte for zero and the negative sign
+when present. Repeated or shared values count at every occurrence. Each explicit flow label is at
+most 200 Unicode characters; omitted labels count under `all`. The traversal retains only one
+iterator frame per nesting level. Cycles, custom container types, and requests over any listed
+limit fail without being partially counted. Non-finite numbers are rejected anywhere in the
+request, including additive fields and threshold overrides, before validation or hashing.
+Aggregate failures use the stable diagnostics `flow request exceeds the structural work limit`,
+`flow request exceeds the aggregate scalar-byte limit`, and
+`flow request exceeds the nesting limit`.
 
 Reference and compilation work run outside the MCP event loop. Scanning awaits Quarry's async
 engine directly so transport cancellation reaches the active scan. Conversation size and nesting
