@@ -21,10 +21,16 @@ from __future__ import annotations
 import asyncio
 from bisect import bisect_right
 from collections.abc import Callable, Mapping
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from quarry.engine.pacing import Pacer
-from quarry.integrations.adapter_transforms import keep_transform, read_transform, transform_error
+from quarry.integrations.adapter_transforms import (
+    keep_transform,
+    read_transform,
+    transform_error,
+    transform_unit_snapshot,
+)
 from quarry.integrations.content_transforms import (
     _append_segment,
     _check_intermediate,
@@ -36,11 +42,14 @@ from quarry.integrations.content_transforms import (
     _shift_segments,
     _TransformMetrics,
 )
+from quarry.integrations.shared_transforms import TRANSFORM_BATCH_SIZE, transform_input_size
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.media import require_readable_media
 from quarry.types.messages import Messages, _project_json, _synthetic_key
 from quarry.types.transforms import (
     MAX_TRANSFORM_INPUT_CHARACTERS,
+    MAX_TRANSFORM_MAPPING_SEGMENTS,
+    MAX_TRANSFORM_OUTPUT_CHARACTERS,
     ContentSourcePart,
     ProvenanceSegment,
     slice_provenance,
@@ -105,6 +114,26 @@ async def _compose_result(
     return tuple(mapped)
 
 
+def _part_batches(parts, size):
+    iterator = iter(parts)
+    while batch := tuple(islice(iterator, size)):
+        yield batch
+
+
+def _selected_batches(selected):
+    batch = []
+    size = 0
+    for item in selected:
+        count = transform_input_size(item[1])
+        if batch and size + count > MAX_TRANSFORM_INPUT_CHARACTERS:
+            yield batch
+            batch, size = [], 0
+        batch.append(item)
+        size += count
+    if batch:
+        yield batch
+
+
 async def apply_adapter_transform(
     messages: Messages,
     backend: ModelInferenceBackend,
@@ -132,6 +161,11 @@ async def apply_adapter_transform(
         )
     output_characters = mapping_segments = 0
     overrides = {}
+    batch_transform = getattr(backend, "transform_units", None)
+    cache_identity = getattr(backend, "transform_cache_identity", None)
+    batch_enabled = (
+        callable(batch_transform) and callable(cache_identity) and cache_identity(name) is not None
+    )
     pacer = Pacer()
     for ordinal in ordinals:
         raise_if_evaluation_expired()
@@ -150,51 +184,89 @@ async def apply_adapter_transform(
         replacements = {}
         mapped = []
         offset = 0
-        for part_index, part in wire_parts:
-            meter.record(parts=1)
-            if meter._pending >= 256:
-                await meter.checkpoint()
-            if not isinstance(part, Mapping):
-                continue
-            part_type = part.get("type")
-            source_text, provenance = text_units.get(part_index, ("", ()))
-            if part_type in selected:
-                unit = _project_json(part)
-                transform_unit = (
-                    getattr(backend, "transform_message_unit", backend.transform_unit)
-                    if _message_value
-                    else backend.transform_unit
-                )
-                result = await transform_unit(name, unit)
-                # Keep the same output contract for explicitly injected backend implementations.
-                result = read_transform(keep_transform(result, unit, name), unit)
-                if _on_part is not None:
-                    _on_part()
-                context = (
-                    (
-                        ContentSourcePart(
-                            message.message_index,
-                            None if message._rewrite_content_changed else part_index,
-                        ),
+        for batch in _part_batches(wire_parts, TRANSFORM_BATCH_SIZE if batch_enabled else 1):
+            ready = {}
+            if batch_enabled:
+                selected_units = []
+                for index, part in batch:
+                    if isinstance(part, Mapping) and part.get("type") in selected:
+                        try:
+                            snapshot = transform_unit_snapshot(
+                                _project_json(part), _check_unicode=False
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise transform_error(name, "invalid_input", str(exc)) from exc
+                        selected_units.append((index, snapshot))
+                        if pacer.due():
+                            await asyncio.sleep(0)
+                for selected_batch in _selected_batches(selected_units):
+                    assert callable(batch_transform)
+                    results = await batch_transform(
+                        name, [unit for _, unit in selected_batch], _message_value=_message_value
                     )
-                    if _synthetic_key(message) is None
-                    else ()
-                )
-                transformed_map = await _compose_result(result, provenance, context, meter)
-                transformed_text = result.text
-                if (
-                    part_type != "text"
-                    or transformed_text != source_text
-                    or transformed_map != provenance
-                ):
-                    replacements[part_index] = transformed_text
-            else:
-                transformed_text, transformed_map = source_text, provenance
-            for segment in _shift_segments(transformed_map, offset):
-                _append_segment(mapped, segment)
-            offset += len(transformed_text)
-            meter.record(output=len(transformed_text))
-            _check_intermediate(offset, len(mapped))
+                    if type(results) is not list or len(results) != len(selected_batch):
+                        raise transform_error(
+                            name, "invalid_output", "invalid transform batch result"
+                        )
+                    for (index, unit), result in zip(selected_batch, results, strict=True):
+                        ready[index] = read_transform(keep_transform(result, unit, name), unit)
+                    if (
+                        sum(len(result.text) for result in ready.values())
+                        > MAX_TRANSFORM_OUTPUT_CHARACTERS
+                        or sum(len(result.runs) for result in ready.values())
+                        > MAX_TRANSFORM_MAPPING_SEGMENTS
+                    ):
+                        raise transform_error(
+                            name, "invalid_output", "transform batch exceeds its output limit"
+                        )
+            for part_index, part in batch:
+                meter.record(parts=1)
+                if meter._pending >= 256:
+                    await meter.checkpoint()
+                if not isinstance(part, Mapping):
+                    continue
+                part_type = part.get("type")
+                source_text, provenance = text_units.get(part_index, ("", ()))
+                if part_type in selected:
+                    unit = _project_json(part)
+                    transform_unit = (
+                        getattr(backend, "transform_message_unit", backend.transform_unit)
+                        if _message_value
+                        else backend.transform_unit
+                    )
+                    if batch_enabled:
+                        result = ready[part_index]
+                    else:
+                        # Preserve the same output contract for injected single-unit backends.
+                        result = await transform_unit(name, unit)
+                        result = read_transform(keep_transform(result, unit, name), unit)
+                    if _on_part is not None:
+                        _on_part()
+                    context = (
+                        (
+                            ContentSourcePart(
+                                message.message_index,
+                                None if message._rewrite_content_changed else part_index,
+                            ),
+                        )
+                        if _synthetic_key(message) is None
+                        else ()
+                    )
+                    transformed_map = await _compose_result(result, provenance, context, meter)
+                    transformed_text = result.text
+                    if (
+                        part_type != "text"
+                        or transformed_text != source_text
+                        or transformed_map != provenance
+                    ):
+                        replacements[part_index] = transformed_text
+                else:
+                    transformed_text, transformed_map = source_text, provenance
+                for segment in _shift_segments(transformed_map, offset):
+                    _append_segment(mapped, segment)
+                offset += len(transformed_text)
+                meter.record(output=len(transformed_text))
+                _check_intermediate(offset, len(mapped))
         output_characters += offset
         mapping_segments += len(mapped)
         _check_intermediate(output_characters, mapping_segments)
