@@ -1344,7 +1344,9 @@ class DSLScanner:
                     return value
                 return Grounded(
                     value=value,
-                    evidence=build_model_result_evidence(trace, matched=value, event=event),
+                    evidence=build_model_result_evidence(
+                        trace, matched=value, event=event, expression=spec.model_expression
+                    ),
                 )
             if name == "model_scan":
                 # Forward the compiler-folded threshold + class_index (output index). None

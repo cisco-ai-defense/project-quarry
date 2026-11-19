@@ -439,7 +439,7 @@ class Message(OpenAIObject):
         {"system", "developer", "user", "assistant", "tool"}
     )
     DSL_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"role", "content", "content_parts", "openai_content", "message_index"}
+        {"role", "content", "content_parts", "openai_content", "message_index", "tool_calls"}
     )
     DSL_FIELD_METADATA: ClassVar[tuple[SurfaceFieldMetadata, ...]] = (
         SurfaceFieldMetadata("role", "string", "OpenAI message role."),
@@ -447,6 +447,12 @@ class Message(OpenAIObject):
             "content",
             "string",
             "Flattened message text. For multimodal input, this contains text parts only.",
+        ),
+        SurfaceFieldMetadata(
+            "tool_calls",
+            "collection<tool_call>",
+            "Calls owned by an assistant message. Missing on other readable roles; "
+            "identity filters over a missing collection have no survivors.",
         ),
     )
     DSL_FIELD_EXCLUSIONS: ClassVar[tuple[SurfaceFieldExclusion, ...]] = (
@@ -1033,12 +1039,6 @@ class AssistantMessage(Message):
             "refusal",
             "string | null",
             "Assistant refusal text when supplied by the provider; otherwise null.",
-        ),
-        SurfaceFieldMetadata(
-            "tool_calls",
-            "collection<tool_call>",
-            "Calls emitted with this assistant message. Use the `tool_calls` surface to iterate "
-            "over calls; this field can be measured with `len(...)`.",
         ),
     )
 

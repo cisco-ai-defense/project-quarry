@@ -38,6 +38,7 @@ from quarry.engine.atoms import (
     MAX_MESSAGE_MAP_CHARACTERS,
     MAX_MESSAGE_MAP_ITEMS,
     ModelExpression,
+    model_expression_requires_model,
 )
 from quarry.engine.matchers import (
     MISSING,
@@ -180,6 +181,9 @@ def _message_free_bindings(expression: ModelExpression) -> set[str]:
                     "span_any",
                     "span_all",
                     "span_filter",
+                    "call_filter",
+                    "call_any",
+                    "call_all",
                 }
                 and index
             ):
@@ -315,6 +319,10 @@ async def evaluate_model_expression(
         )
     if kind == "literal":
         return expression.value
+    if kind in {"call_filter", "call_count", "call_any", "call_all"}:
+        return await _evaluate_local_calls(
+            expression, context, event, environment, trace, regex_backend
+        )
     if kind == "absent":
         return None
     if kind == "parameter":
@@ -754,6 +762,8 @@ async def evaluate_model_expression(
             trace=trace,
             regex_backend=regex_backend,
         )
+        if base is MISSING:
+            return MISSING
         start = expression.children[1].value
         stop = expression.children[2].value
         return base[slice(start, stop)]
@@ -1047,6 +1057,116 @@ async def evaluate_model_expression(
         return result
 
     raise ValueError(f"unknown model expression operation {kind!r}")
+
+
+async def _evaluate_local_calls(expression, context, event, environment, trace, regex_backend):
+    """Read native calls with lexical binders, bounded work and lazy membership tests."""
+
+    async def evaluate(node, bindings=environment):
+        return await evaluate_model_expression(
+            node,
+            context,
+            event=event,
+            bindings=bindings,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
+
+    kind = expression.kind
+    filters = []
+    source = expression.children[0]
+    if kind in {"call_any", "call_all"}:
+        while source.kind == "call_filter":
+            filters.append((str(source.value), source.children[1]))
+            source = source.children[0]
+        filters.reverse()
+    items = await evaluate(source)
+    if items is MISSING or items is None:
+        if kind == "call_count":
+            return MISSING
+        items = ()
+    if not isinstance(items, (list, tuple)):
+        raise TypeError("a local call source must be a native call collection")
+    # Measuring an already loaded collection does not visit its calls. Filters
+    # evaluate their bounded iteration before a count can consume the result.
+    if kind == "call_count":
+        return len(items)
+    limit = context.limits.max_comprehension_size
+    if len(items) > MAX_MESSAGE_MAP_ITEMS or (context.limits.enforce_limits and len(items) > limit):
+        raise ValueError("local call collection exceeds the comprehension limit")
+
+    variable = str(expression.value)
+    body = expression.children[1]
+    first_paid = next(
+        (
+            index
+            for index, (_, condition) in enumerate(filters)
+            if model_expression_requires_model(condition)
+        ),
+        len(filters),
+    )
+    body_first = first_paid < len(filters) and not model_expression_requires_model(body)
+    output = []
+    pacer = Pacer()
+    for position, item in enumerate(items):
+        raise_if_evaluation_expired()
+        if pacer.due():
+            await asyncio.sleep(0)
+        if not isinstance(item, ToolCall):
+            raise TypeError("a local call collection contains a non-call item")
+        item_scope = (*environment.get(_CONSTRUCTION_SCOPE, ()), id(expression), position)
+        memo = getattr(context, "message_value_memo", None)
+
+        async def predicate(node, name, item=item, item_scope=item_scope, position=position):
+            bindings = {
+                **environment,
+                name: item,
+                _CONSTRUCTION_SCOPE: item_scope,
+                _BINDING_SCOPES: {**environment.get(_BINDING_SCOPES, {}), name: item_scope},
+            }
+            if _text_read_observer.get() is not None:
+                bindings[_READ_CONSTRUCTION_SCOPE] = (
+                    *environment.get(_READ_CONSTRUCTION_SCOPE, ()),
+                    expression,
+                    position,
+                )
+            value = await evaluate(node, bindings)
+            if value is not MISSING and type(value) is not bool:
+                raise TypeError("a local call predicate must be Boolean")
+            return value is True
+
+        try:
+            selected = True
+            for name, condition in filters[:first_paid]:
+                if not await predicate(condition, name):
+                    selected = False
+                    break
+            if not selected:
+                continue
+            body_value = await predicate(body, variable) if body_first else None
+            if body_first and (
+                (kind == "call_any" and not body_value) or (kind == "call_all" and body_value)
+            ):
+                continue
+            for name, condition in filters[first_paid:]:
+                if not await predicate(condition, name):
+                    selected = False
+                    break
+            if not selected:
+                continue
+            if body_value is None:
+                body_value = await predicate(body, variable)
+            if kind == "call_filter":
+                if body_value:
+                    output.append(item)
+            elif kind == "call_any" and body_value:
+                return True
+            elif kind == "call_all" and not body_value:
+                return False
+        finally:
+            if memo is not None:
+                memo.release_scope(item_scope)
+    return output if kind == "call_filter" else kind == "call_all"
 
 
 async def _evaluate_message_selection(
@@ -2077,6 +2197,7 @@ def build_model_result_evidence(
     *,
     matched: bool,
     event=None,
+    expression: ModelExpression | None = None,
 ) -> ModelResultEvidence:
     """Convert an ephemeral evaluation trace to one fixed-size evidence item."""
 
@@ -2142,17 +2263,39 @@ def build_model_result_evidence(
     expression_value = trace.expression_value
     if expression_value is None and trace.calls:
         expression_value = trace.calls[-1][3]
+    # A collection used to construct a judge's input is part of that input. Its
+    # consuming judge still owns the measured score. Only value-level questions
+    # outside model calls replace child measurements with aggregate evidence.
+    aggregate = quantified = False
+    pending = [] if expression is None else [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind in {"model_call", "map", "message_map", "message_select"}:
+            continue
+        if node.kind in {"call_count", "call_any", "call_all"}:
+            aggregate = True
+            quantified |= node.kind in {"call_any", "call_all"}
+            # The outer collection operation owns its result. Its source and
+            # predicate may contain other counts or quantifiers with other roles.
+            continue
+        pending.extend(node.children)
+    message_aggregate = aggregate and (
+        event is not None or quantified or (expression is not None and expression.kind != "compare")
+    )
+    if aggregate:
+        operation = "boolean_expression" if message_aggregate else "numeric_expression"
+        expression_value = matched if message_aggregate else expression_value
     return ModelResultEvidence.bounded(
         operation=operation,
         models=models,
         arguments=arguments,
         expression_value=expression_value,
         score_summary=score_summary,
-        operator=trace.operator,
-        threshold=trace.threshold,
+        operator=None if message_aggregate else trace.operator,
+        threshold=None if message_aggregate else trace.threshold,
         matched=matched,
         source_path=getattr(event, "source_path", None),
-        input_span=trace.input_span if trace.split_scores is None else None,
+        input_span=trace.input_span if trace.split_scores is None and not aggregate else None,
         refusals=trace.refusals,
         judge_reasons=trace.judge_reasons,
         omitted_judge_reasons=trace.omitted_judge_reasons,

@@ -1,0 +1,18 @@
+{
+  "messages": [
+    {
+      "content": "synthetic plan",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "lookup"
+          },
+          "id": "synthetic-call",
+          "type": "function"
+        }
+      ]
+    }
+  ]
+}

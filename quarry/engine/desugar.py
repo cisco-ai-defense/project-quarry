@@ -42,6 +42,7 @@ from quarry.types.dsl import (
     AnyComprehension,
     Assignment,
     BinaryOp,
+    ConditionNode,
     FieldAccess,
     FilterComprehension,
     FunctionCall,
@@ -241,6 +242,14 @@ class Desugarer:
             return C.neg(self.cond(node.operand, scope))
         if isinstance(node, FlowOp):
             return self.flow(node, scope)
+        if self._t.local_call_condition(node):
+            reads = self.reads(node, scope)
+            if len(reads) > 1:
+                raise UnsupportedConstruct("a local call condition can read one enclosing item")
+            if reads:
+                binding = _lookup(scope, next(iter(reads)))
+                return C.Pred(node, binding.var, binding.surface)
+            return C.Static(node)
         if isinstance(node, (AnyComprehension, AllComprehension)) and not self._t.lists_spans(
             node.collection, scope
         ):
@@ -391,7 +400,7 @@ class Desugarer:
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
             chunk = self._bind(node.variable, "\x00chunks", C.Events("\x00chunks"))
             return C.ChunkQuant(q, chunk.var, node.collection, self.cond(node.condition, (chunk,)))
-        outer = _without_check_bodies(node.condition)
+        outer = self._without_local_calls(_without_check_bodies(node.condition))
         if self._t.is_chunked(outer):
             raise UnsupportedConstruct(_NESTED_CHUNKS)
         if self._t.contains_real_model_call(outer):
@@ -405,6 +414,22 @@ class Desugarer:
             self._t.check_value_body(node.condition, binding.coll.value)
         body = self.cond(self._aliased(node, binding), (*scope, binding))
         return C.Quant(q, binding.var, binding.coll, None, body)
+
+    def _without_local_calls(self, node):
+        """Local value binders validate their own calls; retain ordinary nesting checks."""
+        if self._t.local_call_aggregate(node):
+            return Literal(True)
+        changes = {}
+        for name in condition_child_fields(node):
+            child = getattr(node, name)
+            if isinstance(child, ConditionNode):
+                changes[name] = self._without_local_calls(child)
+            elif isinstance(child, (list, tuple)):
+                changes[name] = type(child)(
+                    self._without_local_calls(item) if isinstance(item, ConditionNode) else item
+                    for item in child
+                )
+        return replace(node, **changes) if changes else node
 
     def _check_model_comprehension(self, node, scope) -> None:
         """Model calls are read at one item of one non-nested ``any`` comprehension, and each
@@ -847,8 +872,10 @@ class Desugarer:
         )
 
     def reads(self, node, scope) -> set[str]:
-        """The scope variables a leaf test reads, explicitly or implicitly. The variable of a
-        map comprehension in the leaf hides a scope variable with the same name."""
+        """Find enclosing reads, keeping collection sources outside their own binder.
+
+        Every comprehension body hides an enclosing variable of the same name.
+        """
         innermost = scope[-1].name if scope else None
         found: set[str] = set()
 
@@ -873,8 +900,10 @@ class Desugarer:
             ):
                 visit(n.right, nested, names)
                 return
-            comprehension = hasattr(n, "variable") and hasattr(n, "collection")
-            body = names - {n.variable} if isinstance(n, MapComprehension) else names
+            comprehension = isinstance(
+                n, (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension)
+            )
+            body = names - {n.variable} if comprehension else names
             for field_name in condition_child_fields(n):
                 value = getattr(n, field_name)
                 inner = comprehension and field_name != "collection"
