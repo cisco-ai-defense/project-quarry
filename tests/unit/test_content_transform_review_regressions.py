@@ -180,7 +180,9 @@ def test_source_mapping_deduplicates_large_segment_sets_with_bounded_checks(monk
         for index in range(8_192)
     )
 
-    ranges, unmapped = source_mapping_for(segments, 0, len(segments))
+    ranges, unmapped = source_mapping_for(
+        segments, 0, len(segments), check_deadline=timer.raise_if_evaluation_expired
+    )
 
     assert len(ranges) == len(segments)
     assert not unmapped
@@ -192,7 +194,9 @@ def test_source_mapping_stops_after_its_work_budget(monkeypatch):
 
     monkeypatch.setattr(transforms, "MAX_TRANSFORM_WORK", 2)
     segments = tuple(
-        ProvenanceSegment(index, index + 1, (ContentSourceRange(0, None, index, index + 1, index, index + 1),))
+        ProvenanceSegment(
+            index, index + 1, (ContentSourceRange(0, None, index, index + 1, index, index + 1),)
+        )
         for index in range(3)
     )
 

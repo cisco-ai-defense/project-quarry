@@ -500,6 +500,7 @@ class Message(OpenAIObject):
             start,
             end,
             require_mappable=True,
+            check_deadline=_raise_if_combine_expired,
         )
 
     def _with_transformed_content(
@@ -2231,6 +2232,7 @@ class Messages(Sequence[MessageType]):
                     message._content_provenance(),
                     0,
                     len(message.content),
+                    check_deadline=_raise_if_combine_expired,
                 )
                 unmapped = unmapped or has_unmapped
                 mapped.extend(source for source in ranges if source not in mapped)
@@ -2346,6 +2348,7 @@ class Messages(Sequence[MessageType]):
                 selected._content_provenance(),
                 span.start,
                 span.end,
+                check_deadline=_raise_if_combine_expired,
             )
         synthetic = _synthetic_key(selected) is not None
         if not synthetic and unmapped:
