@@ -30,8 +30,7 @@ Configure a scoring model alias `configuration_persistence_judge`, register
 `configuration_persistence_policy`, and bind policy parameter `threshold` to a
 number chosen for the deployment. No threshold or model accuracy has been
 calibrated. Offline corpus validation compiles the rule but does not evaluate
-its model-dependent cases. Mocked tests check selection and score routing, not
-the quality of a model's decisions.
+its model-dependent cases.
 
 Coverage depends on the listed file and execution terms and is limited to tool
 calls; other file names, encodings, and tool results can be missed. Generic names
