@@ -30,6 +30,7 @@ import random
 import re
 import string
 import sys
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import nullcontext
@@ -71,7 +72,12 @@ from quarry.integrations.model_head_plan import (
     head_requests,
     input_signature,
 )
-from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelRetryHistory, ModelUsage
+from quarry.integrations.model_usage import (
+    RETRYABLE_ERROR_CODES,
+    ModelPreparationFailure,
+    ModelRetryHistory,
+    ModelUsage,
+)
 from quarry.integrations.model_window_evidence import record_window_result
 from quarry.integrations.model_window_input import WindowMemo, join_window_input, json_window_input
 from quarry.integrations.model_window_ranges import (
@@ -112,6 +118,7 @@ from quarry.safety.timer import (
     clamp_to_evaluation_deadline,
     raise_if_evaluation_expired,
 )
+from quarry.telemetry import ModelOperation, public_model_operation
 from quarry.types.adapter_transforms import (
     DecodeLimitError,
     LocalTransformConfig,
@@ -2595,7 +2602,7 @@ class ModelInferenceBackend:
         retry_history = ModelRetryHistory()
 
         async def request(*, timeout: float | None) -> Any:
-            async def invoke(attempt_timeout):
+            def prepare_attempt():
                 # Construct a fresh payload for each retry. A host adapter may mutate it.
                 try:
                     arguments = payload()
@@ -2604,17 +2611,31 @@ class ModelInferenceBackend:
                         exc.message, exc, model_id, private_model=rate_limit_model
                     ) from exc
                 send = getattr(adapter, method) if dispatch is None else dispatch
-                response = send(model, *arguments, timeout=attempt_timeout)
-                return await response if inspect.isawaitable(response) else response
+
+                async def invoke(attempt_timeout):
+                    response = send(model, *arguments, timeout=attempt_timeout)
+                    return await response if inspect.isawaitable(response) else response
+
+                return invoke
+
+            async def invoke_unprepared(attempt_timeout):
+                return await prepare_attempt()(attempt_timeout)
 
             try:
                 response = await self._send(
                     model_id,
                     rate_limit_model,
-                    invoke,
+                    invoke_unprepared,
+                    operation_name=public_model_operation(method),
                     timeout=timeout,
                     retry_history=retry_history,
+                    attempt_factory=prepare_attempt,
                 )
+                if isinstance(response, ModelPreparationFailure):
+                    # Preparation did not invoke an adapter. Preserve its original failure
+                    # outside provider retry/normalization and release finished host frames.
+                    traceback.clear_frames(response.error.__traceback__)
+                    raise response.error
             except LLMError as exc:
                 reason = _refusal_reason(exc) if refusals else None
                 if reason is None:
@@ -2731,8 +2752,10 @@ class ModelInferenceBackend:
         rate_limit_model: str,
         operation: Callable[[float | None], Awaitable[Any]],
         *,
+        operation_name: ModelOperation,
         timeout: float | None,
         retry_history: ModelRetryHistory,
+        attempt_factory: Callable[[], Callable[[float | None], Awaitable[Any]]] | None = None,
     ) -> Any:
         """Run one logical model call and normalize its final provider failure."""
 
@@ -2741,8 +2764,10 @@ class ModelInferenceBackend:
                 rate_limit_model,
                 operation,
                 budget_alias=model_id,
+                operation_name=operation_name,
                 timeout=timeout,
                 retry_history=retry_history,
+                attempt_factory=attempt_factory,
             )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the

@@ -4,6 +4,7 @@
 """Windowed policies use exact host batches, shared heads and full-origin decoders."""
 
 import asyncio
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -286,6 +287,55 @@ def expected_batches(unit):
         if unit == "characters"
         else ((111, 97, 98, 99, 222), (111, 99, 100, 101, 222), (111, 101, 102, 222))
     )
+
+
+@pytest.mark.parametrize(
+    ("unit", "cap"), [("characters", None), ("characters", 3), ("tokens", None)]
+)
+@pytest.mark.parametrize("restored", [False, True])
+async def test_window_telemetry_counts_host_adapter_invocations_and_excludes_cache_hits(
+    tmp_path, unit, cap, restored
+):
+    host = (threading.get_ident(), asyncio.get_running_loop())
+    observed = []
+
+    class Counted(WindowAdapter):
+        async def encode_window_input(self, *args, **kwargs):
+            observed.append((threading.get_ident(), asyncio.get_running_loop()))
+            return await super().encode_window_input(*args, **kwargs)
+
+        async def window_token_counts(self, config, batches, context, *, timeout=None):
+            observed.append((threading.get_ident(), asyncio.get_running_loop()))
+            return [len(batch) for batch in batches]
+
+        async def classify_window_batch(self, *args, **kwargs):
+            observed.append((threading.get_ident(), asyncio.get_running_loop()))
+            return await super().classify_window_batch(*args, **kwargs)
+
+    adapter = Counted()
+    runtime = service(tmp_path, unit, adapter, cap=cap)
+    policy = compile_policy(
+        'rule "R" condition: model("classes").classify(messages) > 0.5',
+        runtime_config=runtime.config,
+        model_inference_backend=runtime,
+    )
+    if restored:
+        policy = load_compiled_policy(
+            policy.to_bytes(), runtime_config=runtime.config, model_inference_backend=runtime
+        )
+    result_cache.clear()
+    result = await policy.scan_async(DATA)
+    assert result.is_complete and result.rule_matches == ["R"], result.evaluation_errors
+    records = [{"model": "classes", "operation": "classify", "calls": 1}]
+    if unit == "tokens" or cap is not None:
+        records.append({"model": "classes", "operation": "input_tokens", "calls": 1})
+    assert result.model_usage == {"calls": len(records), "records": records, "truncated": False}
+    assert observed == [host] * len(records)
+    assert adapter.requests == [(expected_batches(unit), "", False)]
+    cached = await policy.scan_async(DATA)
+    assert cached.is_complete and cached.rule_matches == ["R"]
+    assert cached.model_usage == {"calls": 0, "records": [], "truncated": False}
+    assert observed == [host] * len(records)
 
 
 @pytest.mark.asyncio

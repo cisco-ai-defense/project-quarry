@@ -34,6 +34,7 @@ from copy import deepcopy
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 import yaml
@@ -70,6 +71,12 @@ from quarry.safety.validator import (
     _validate_raw_json_container_types,
 )
 from quarry.scanner import DSLScanner
+from quarry.telemetry import (
+    elapsed_seconds,
+    empty_model_usage,
+    merge_model_usage,
+    models_called,
+)
 from quarry.types.exceptions import (
     ConfigurationError,
     ConversationValidationError,
@@ -685,6 +692,8 @@ class QuarryPlugin:
                     "completion_state": "invalid",
                     "diagnostics": diagnostics,
                     "timings": {},
+                    "model_usage": empty_model_usage(),
+                    "models_called": [],
                 }
             )
             if conversations is not None:
@@ -730,6 +739,7 @@ class QuarryPlugin:
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
 
+        scan_started = monotonic()
         try:
             results = await policy.scan_many_async(
                 selected,
@@ -742,13 +752,17 @@ class QuarryPlugin:
             )
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
+        request_scan_seconds = elapsed_seconds(scan_started)
 
         provenance = results[0]
+        aggregate_usage = merge_model_usage([result.model_usage for result in results])
         response.update(
             {
                 "policy_digest": policy.policy_digest,
                 "parameter_digest": provenance.parameter_digest,
                 "parameter_evidence": provenance.parameter_evidence,
+                "model_usage": aggregate_usage,
+                "models_called": models_called(aggregate_usage),
             }
         )
 
@@ -805,6 +819,7 @@ class QuarryPlugin:
             )
             response["results"] = payloads
             response["count"] = len(payloads)
+            response["timings"] = {"total_seconds": request_scan_seconds}
             if static_graphs is not None:
                 response["visualization"] = build_batch_runtime_attribution(
                     [payload["visualization"] for payload in payloads],
@@ -836,8 +851,10 @@ class QuarryPlugin:
             "failures": [failure.to_dict() for failure in result.failures],
             "timings": {
                 "total_seconds": result.scan_time,
-                "rules": dict(result.rule_timings or {}),
+                "rules": dict(sorted((result.rule_timings or {}).items())),
             },
+            "model_usage": result.model_usage,
+            "models_called": models_called(result.model_usage),
             "diagnostics": self._scan_diagnostics(result),
         }
         if result.logical_reads is not None:

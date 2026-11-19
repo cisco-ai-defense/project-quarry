@@ -122,6 +122,9 @@ async def test_delegating_host_backend_adopts_the_original_logical_read(
     assert results[1].rule_matches == results[0].rule_matches
     assert results[1].logical_reads == results[0].logical_reads
     assert results[1].logical_reads["aggregates"]["totals"]["observations"] == 1
+    assert results[1].model_usage == results[0].model_usage
+    assert results[1].model_usage["calls"] == 1
+    assert not results[1].model_usage["truncated"]
 
 
 @pytest.mark.parametrize("delegation", ["child", "reader", "twice"])
