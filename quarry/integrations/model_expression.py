@@ -1725,6 +1725,10 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
     before its refusal propagates.
     """
 
+    if trace is not None:
+        # A prior empty trim has no dispatched call to consume its omission counts. Keep
+        # each model operation's evidence local so a later untrimmed sibling cannot inherit it.
+        trace.trim_omissions = None
     alias, operation = str(expression.value).split("\x1f", 1)
     with model_read(alias, operation) as observation:
         trimmed = bool(expression.children and expression.children[0].kind == "trim")
