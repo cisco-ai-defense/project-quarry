@@ -200,11 +200,11 @@ def test_guard_fails_closed_on_invalid_input(tmp_path, conversation, message):
         ),
     ],
 )
-def test_guard_rejects_malformed_arguments_before_evaluating_any_rule(tmp_path, scan):
+def test_guard_accepts_freeform_arguments_without_named_fields(tmp_path, scan):
     guard = QuarryGuard(_config(tmp_path, _GREETING_RULE, _READS_ARGS_RULE))
 
-    with pytest.raises(ConversationValidationError, match="malformed JSON"):
-        scan(guard, _UNPARSEABLE_ARGUMENTS)
+    matches = scan(guard, _UNPARSEABLE_ARGUMENTS)
+    assert [match["rule"] for match in matches] == ["Greeting"]
 
 
 @pytest.mark.parametrize(
@@ -254,3 +254,22 @@ def test_guard_raises_incomplete_scan_on_timeout_for_either_setting(tmp_path, fa
 
     assert exc_info.value.scan_result.timed_out_rules == ["Slow"]
     assert exc_info.value.details["partial_matches"] == ["Greeting"]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_guard_fails_closed_for_a_rule_local_numeric_argument_fault(tmp_path, asynchronous):
+    import copy
+
+    payload = copy.deepcopy(_UNPARSEABLE_ARGUMENTS)
+    payload["messages"][1]["tool_calls"][0]["function"]["arguments"] = '{"q": NaN}'
+    guard = QuarryGuard(_config(tmp_path, _GREETING_RULE, _READS_ARGS_RULE))
+    with pytest.raises(IncompleteScanError) as error:
+        if asynchronous:
+            asyncio.run(guard.scan_async(payload))
+        else:
+            guard.scan(payload)
+    result = error.value.scan_result
+    assert result.rule_matches == ["Greeting"] and result.validation_error is None
+    assert [failure.to_dict() for failure in result.failures] == [
+        {"category": "invalid_input", "rule_name": "ReadsArgs"}
+    ]

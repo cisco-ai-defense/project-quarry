@@ -2107,15 +2107,14 @@ def _outcome(condition, messages, header, expected, state, case_id):
             "complete",
             "capture-split-across-closed-flows",
         ),
-        # Malformed tool arguments invalidate the conversation before any
-        # short-circuit can turn an unread reference site into a clean verdict.
+        # A false guard leaves freeform named arguments unread.
         _outcome(
             'called_tool("never") and (any m in user_messages where ($t in m.content as v)) '
             "and (any c in tool_calls where c.arguments.cmd contains v)",
             [_u("TOKEN"), _call("x", "{not json")],
             'strings:\n    $t = "TOKEN"\n',
             [],
-            "invalid",
+            "complete",
             "malformed-reference-site",
         ),
         # A per-item condition past the item limit is incomplete only without a match.
