@@ -77,6 +77,8 @@ disabling size limits does not disable that deadline.
 Compiler identity is 25 with compiled-policy format 10. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 
+For declared-input scans, plugin decision paths hash only the rule's selected, validated data. Unread sections do not change `conversation_sha256`; it is null when the selected data cannot be safely hashed.
+
 ## Timeline and clocks
 
 A list section keeps its own item order. To compare its items with chat steps or items from another section, provide a `timeline` listing the observed message, tool call, and input item IDs in order:

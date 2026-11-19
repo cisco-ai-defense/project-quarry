@@ -521,5 +521,7 @@ def test_a_rejected_request_leaves_the_scan_incomplete_without_its_body(
     ).scan_data(_CONVERSATION)
 
     assert (result.rule_matches, result.is_complete) == ([], False)
-    assert result.evaluation_errors["R"] == "System One rejected the request as invalid"
+    assert result.evaluation_errors["R"] == (
+        "Inference model 'guard' failed: System One rejected the request as invalid"
+    )
     assert "echoed request content" not in str(vars(result))
