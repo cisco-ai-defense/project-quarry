@@ -42,7 +42,13 @@ from quarry import __version__ as QUARRY_VERSION
 from quarry.cache.async_cache import result_cache
 from quarry.config import QuarryConfig
 from quarry.core.logging import get_app_logger
-from quarry.decision_report import path_report, report_tree, scanner_digests, tree_report
+from quarry.decision_report import (
+    decision_scores,
+    path_report,
+    report_tree,
+    scanner_digests,
+    tree_report,
+)
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.resources import ResourcePreparationError
@@ -52,7 +58,7 @@ from quarry.plugin.visualization import (
     build_runtime_attribution,
     build_visualization_bundle,
 )
-from quarry.policy import bind_prepared_policy
+from quarry.policy import _validated_sample, bind_prepared_policy
 from quarry.prepared import PreparedRuleCache
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import Complexity, RuleValidator
@@ -70,7 +76,7 @@ from quarry.types.parameters import ParameterValueError
 
 _logger = get_app_logger()
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 MAX_REFERENCE_QUERY_CHARS = 4_096
 MAX_REFERENCE_IDS = 50
 MAX_REFERENCE_ID_CHARS = 200
@@ -84,6 +90,7 @@ _COMPLEXITY_RANK = {level: rank for rank, level in enumerate(Complexity)}
 ReferenceAction = Literal["index", "search", "get", "rejected"]
 ReferenceKind = Literal["function", "compiler_form", "surface", "construct", "token", "example"]
 ReferenceVerbosity = Literal["compact", "full"]
+ScanVerbosity = Literal["compact", "full"]
 
 # Keys the catalog carries for Quarry's own compiler and code generators. A rule author cannot
 # write them and an agent cannot act on them, so the reference omits them rather than spending
@@ -433,6 +440,7 @@ class QuarryPlugin:
             config = self._runtime_config
             response["runtime_config_version"] = config.config_version if config is not None else 1
             response["model_aliases"] = self._model_aliases()
+        response["inputs"] = self._inputs()
         # The table is the same on every call and is what an author reads once, before writing
         # anything, so it rides along with the browsing action and is asked for explicitly
         # anywhere else. Repeating it on every search and every get charged the caller for it
@@ -594,10 +602,11 @@ class QuarryPlugin:
         conversation: dict[str, Any] | None = None,
         conversations: list[dict[str, Any]] | None = None,
         parameters: Mapping[str, object] | None = None,
-        explain: bool | Literal["support"] = True,
+        explain: bool | Literal["support"] | None = None,
         visualize: bool = False,
         config_version: int | None = None,
         explore_rate: float = 0.0,
+        verbosity: ScanVerbosity | None = None,
     ) -> dict[str, Any]:
         """Compile one rule once and scan one conversation or an ordered batch.
 
@@ -608,14 +617,22 @@ class QuarryPlugin:
         ``visualize`` adds the static source graph once under ``compilation`` and a
         runtime-only ``visualization`` overlay; without it neither is recorded or returned.
 
-        Every complete result of a one-rule text carries its ``decision_path``: the
-        conversation's hash, the tree nodes it reached with their outcomes and scores,
-        and its leaf. ``explore_rate`` selects that fraction of conversations, by hash,
-        whose path also evaluates every node it skipped.
+        A single conversation defaults to ``full`` output, preserving its decision path and
+        explanation. A batch defaults to ``compact`` output: each result keeps its verdict,
+        diagnostics, matches, and decision scores while omitting its decision path, and
+        explanations are computed only when explicitly requested. ``verbosity="full"``
+        restores the detailed batch shape.
         """
 
+        if verbosity is not None and (
+            type(verbosity) is not str or verbosity not in ("compact", "full")
+        ):
+            raise PluginInputError("verbosity must be 'compact' or 'full'")
         if (conversation is None) == (conversations is None):
             raise PluginInputError("provide exactly one of conversation or conversations")
+        verbosity = verbosity or ("full" if conversation is not None else "compact")
+        if explain is None:
+            explain = verbosity == "full"
         if conversations is not None and not 1 <= len(conversations) <= MAX_SCAN_BATCH:
             raise PluginInputError(
                 f"conversations must contain between 1 and {MAX_SCAN_BATCH} items"
@@ -649,6 +666,7 @@ class QuarryPlugin:
         )
         response = self._version_envelope()
         response["rule_hash"] = self._rule_hash(rule_text)
+        response["verbosity"] = verbosity
         response["compilation"] = _brief_report(compilation, visualize=visualize)
         static_graphs = compilation.get("visualization") if visualize else None
         if scanner is None:
@@ -707,16 +725,39 @@ class QuarryPlugin:
         for item, result in zip(selected, results, strict=True):
             # ``scan_many_async`` stamps every result, timed-out ones included, with the digest.
             assert result.parameter_digest is not None
-            payload = self._scan_payload(scanner, result, static_graphs, node_ids=tree.ids)
-            payload["decision_path"] = path_report(
+            payload = self._scan_payload(
+                scanner,
+                result,
+                static_graphs,
+                node_ids=tree.ids,
+                details=verbosity == "full",
+                include_explanations=bool(explain) or verbosity == "full",
+            )
+            if result.validation_error is not None:
+                report_input = None
+            elif scanner.input_registry.declarations or scanner.input_adapters:
+                report_input = _validated_sample(
+                    item,
+                    artifact.read_surfaces,
+                    policy._adapter_hashes,
+                    artifact.orders_input_items,
+                    scanner.limits,
+                    scanner.input_registry,
+                )
+            else:
+                report_input = item
+            path = path_report(
                 tree,
                 (result.decision_paths or {}).get(rule_name),
                 matched=rule_name in result.rule_matches if result.is_complete else None,
-                conversation=item,
+                conversation=report_input,
                 parameter_digest=result.parameter_digest,
                 explain=bool(explain),
-                explore_rate=float(explore_rate),
+                explore_rate=0.0 if result.validation_error is not None else float(explore_rate),
             )
+            if verbosity == "full":
+                payload["decision_path"] = path
+            payload["decision_scores"] = decision_scores(path)
             payloads.append(payload)
         if conversation is not None:
             response.update(payloads[0])
@@ -745,11 +786,15 @@ class QuarryPlugin:
         static_graphs: dict[str, Any] | None,
         *,
         node_ids: Mapping[str | None, str] | None = None,
+        details: bool = True,
+        include_explanations: bool = True,
     ) -> dict[str, Any]:
         """Serialize one fail-closed scan result for either tool mode.
 
         ``node_ids`` maps each decision-tree check to its node ID, so an explanation
-        names the tree node each of its atoms belongs to."""
+        names the tree node each of its atoms belongs to. ``details`` controls the larger
+        full-verbosity visualization views, and ``include_explanations`` preserves an empty
+        explanation list for full responses when explanation was disabled."""
 
         with suppress(ConversationValidationError, IncompleteScanError):
             result.raise_for_status()
@@ -768,6 +813,7 @@ class QuarryPlugin:
                 result.rule_traces or {},
                 matched_rules=set(result.rule_matches),
                 completion_state=result.completion_state,
+                details=details,
             )
         if result.is_complete:
             matched_rules = [scanner.loaded_rules[name] for name in result.rule_matches]
@@ -780,9 +826,10 @@ class QuarryPlugin:
                     match["output"] = output.to_dict()
                 matches.append(match)
             payload["matches"] = matches
-            payload["explanations"] = [
-                evidence.to_dict(node_ids) for evidence in (result.explanations or [])
-            ]
+            if include_explanations:
+                payload["explanations"] = [
+                    evidence.to_dict(node_ids) for evidence in (result.explanations or [])
+                ]
         else:
             payload["partial_matches"] = list(result.rule_matches)
         return payload
@@ -1282,6 +1329,26 @@ class QuarryPlugin:
                 entry["description"] = config.model_descriptions[alias]
             aliases[alias] = entry
         return aliases
+
+    def _inputs(self) -> dict[str, dict[str, Any]]:
+        """Describe configured sections and the adapters that fill them."""
+
+        from quarry.inputs import load_input_adapters
+
+        config = self._runtime_config
+        if config is None:
+            return {}
+        adapters, declarations = load_input_adapters(config.adapters, config.inputs)
+        filled_by = {
+            section: key for key, adapter in adapters.items() for section in adapter.sections
+        }
+        listed = {}
+        for section, declaration in sorted(declarations.items()):
+            entry = declaration.describe()
+            if section in filled_by:
+                entry["adapter"] = filled_by[section]
+            listed[section] = entry
+        return listed
 
     def _deprecation_warnings_from_text(self, rule_text: str) -> list[dict[str, Any]]:
         warnings = []
