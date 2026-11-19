@@ -1,0 +1,2096 @@
+{
+  "quarry_compile": {
+    "$defs": {
+      "Advisory": {
+        "additionalProperties": true,
+        "description": "A non-fatal compilation or language warning.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "replacement": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replacement"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "title": "Advisory",
+        "type": "object"
+      },
+      "CapabilityRequirements": {
+        "additionalProperties": true,
+        "description": "Runtime resources required by a compiled rule.",
+        "properties": {
+          "functions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Functions",
+            "type": "array"
+          },
+          "model_operations": {
+            "items": {
+              "$ref": "#/$defs/ModelOperation"
+            },
+            "title": "Model Operations",
+            "type": "array"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "resource_groups": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Resource Groups",
+            "type": "array"
+          },
+          "text_resources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Text Resources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "resource_groups",
+          "functions",
+          "model_operations",
+          "models",
+          "text_resources"
+        ],
+        "title": "CapabilityRequirements",
+        "type": "object"
+      },
+      "Diagnostic": {
+        "additionalProperties": true,
+        "description": "A bounded machine-readable diagnostic.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "line": {
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "rule_name": {
+            "title": "Rule Name",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "Diagnostic",
+        "type": "object"
+      },
+      "ModelOperation": {
+        "additionalProperties": true,
+        "description": "One model alias and operation required by a rule.",
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "operation"
+        ],
+        "title": "ModelOperation",
+        "type": "object"
+      },
+      "ParameterSlot": {
+        "additionalProperties": true,
+        "description": "One declared rule parameter.",
+        "properties": {
+          "binding": {
+            "title": "Binding",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "binding"
+        ],
+        "title": "ParameterSlot",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Response from ``quarry_compile`` and the scan compilation envelope.",
+    "properties": {
+      "catalog_format_version": {
+        "title": "Catalog Format Version",
+        "type": "string"
+      },
+      "compiler_version": {
+        "title": "Compiler Version",
+        "type": "string"
+      },
+      "diagnostics": {
+        "items": {
+          "$ref": "#/$defs/Diagnostic"
+        },
+        "title": "Diagnostics",
+        "type": "array"
+      },
+      "estimated_complexity": {
+        "title": "Estimated Complexity",
+        "type": "string"
+      },
+      "language_version": {
+        "title": "Language Version",
+        "type": "string"
+      },
+      "parameter_schema": {
+        "items": {
+          "$ref": "#/$defs/ParameterSlot"
+        },
+        "title": "Parameter Schema",
+        "type": "array"
+      },
+      "plugin_version": {
+        "title": "Plugin Version",
+        "type": "string"
+      },
+      "quarry_version": {
+        "title": "Quarry Version",
+        "type": "string"
+      },
+      "required_capabilities": {
+        "$ref": "#/$defs/CapabilityRequirements"
+      },
+      "rule_complexities": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "title": "Rule Complexities",
+        "type": "object"
+      },
+      "rule_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Rule Hash",
+        "type": "string"
+      },
+      "rule_metadata": {
+        "additionalProperties": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "title": "Rule Metadata",
+        "type": "object"
+      },
+      "rule_names": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Rule Names",
+        "type": "array"
+      },
+      "stage": {
+        "title": "Stage",
+        "type": "string"
+      },
+      "valid": {
+        "title": "Valid",
+        "type": "boolean"
+      },
+      "visualization": {
+        "additionalProperties": true,
+        "title": "Visualization",
+        "type": "object"
+      },
+      "warnings": {
+        "items": {
+          "$ref": "#/$defs/Advisory"
+        },
+        "title": "Warnings",
+        "type": "array"
+      }
+    },
+    "required": [
+      "plugin_version",
+      "quarry_version",
+      "catalog_format_version",
+      "language_version",
+      "compiler_version",
+      "rule_hash",
+      "warnings",
+      "valid",
+      "stage",
+      "diagnostics",
+      "required_capabilities"
+    ],
+    "title": "CompileResponse",
+    "type": "object"
+  },
+  "quarry_decision_flows": {
+    "$defs": {
+      "LeafCounts": {
+        "additionalProperties": true,
+        "description": "Label counts for every terminal decision-flow state.",
+        "properties": {
+          "error": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Error",
+            "type": "object"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Match",
+            "type": "object"
+          },
+          "no_match": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "No Match",
+            "type": "object"
+          },
+          "unknown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Unknown",
+            "type": "object"
+          }
+        },
+        "required": [
+          "match",
+          "no_match",
+          "unknown",
+          "error"
+        ],
+        "title": "LeafCounts",
+        "type": "object"
+      },
+      "OutcomeCounts": {
+        "additionalProperties": true,
+        "description": "Label counts for both outcomes of one decision step.",
+        "properties": {
+          "false": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "False",
+            "type": "object"
+          },
+          "true": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "True",
+            "type": "object"
+          }
+        },
+        "required": [
+          "true",
+          "false"
+        ],
+        "title": "OutcomeCounts",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Response from the existing ``quarry_decision_flows`` operation.",
+    "properties": {
+      "leaves": {
+        "$ref": "#/$defs/LeafCounts"
+      },
+      "steps": {
+        "additionalProperties": {
+          "$ref": "#/$defs/OutcomeCounts"
+        },
+        "title": "Steps",
+        "type": "object"
+      },
+      "thresholds": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "title": "Thresholds",
+        "type": "object"
+      },
+      "tree_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Tree Sha256",
+        "type": "string"
+      },
+      "unmapped_paths": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "title": "Unmapped Paths",
+        "type": "object"
+      }
+    },
+    "required": [
+      "tree_sha256",
+      "thresholds",
+      "steps",
+      "leaves",
+      "unmapped_paths"
+    ],
+    "title": "DecisionFlowResponse",
+    "type": "object"
+  },
+  "quarry_decision_tree": {
+    "$defs": {
+      "DecisionNode": {
+        "additionalProperties": true,
+        "description": "One uniquely keyed decision-tree step and both of its outgoing edges.",
+        "properties": {
+          "false": {
+            "title": "False",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "check",
+              "score",
+              "number",
+              "collect"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "number_form": {
+            "$ref": "#/$defs/NumberNodeForm"
+          },
+          "score_form": {
+            "$ref": "#/$defs/ScoreNodeForm"
+          },
+          "score_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Key"
+          },
+          "source_nodes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Nodes",
+            "type": "array"
+          },
+          "true": {
+            "title": "True",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "source_nodes",
+          "true",
+          "false"
+        ],
+        "title": "DecisionNode",
+        "type": "object"
+      },
+      "DecisionTreePayload": {
+        "additionalProperties": true,
+        "description": "A versioned decision tree whose content is named by ``tree_sha256``.",
+        "properties": {
+          "nodes": {
+            "additionalProperties": {
+              "$ref": "#/$defs/DecisionNode"
+            },
+            "title": "Nodes",
+            "type": "object"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "tree_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Tree Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "root",
+          "nodes",
+          "tree_sha256"
+        ],
+        "title": "DecisionTreePayload",
+        "type": "object"
+      },
+      "Diagnostic": {
+        "additionalProperties": true,
+        "description": "A bounded machine-readable diagnostic.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "line": {
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "rule_name": {
+            "title": "Rule Name",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "Diagnostic",
+        "type": "object"
+      },
+      "NumberNodeForm": {
+        "additionalProperties": true,
+        "description": "The normalized comparison performed by a collection-size node.",
+        "properties": {
+          "operator": {
+            "enum": [
+              "=",
+              "!=",
+              ">",
+              ">=",
+              "<",
+              "<="
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Threshold"
+          }
+        },
+        "required": [
+          "operator",
+          "threshold"
+        ],
+        "title": "NumberNodeForm",
+        "type": "object"
+      },
+      "ParameterThreshold": {
+        "additionalProperties": true,
+        "description": "A comparison threshold supplied by a named rule parameter.",
+        "properties": {
+          "parameter": {
+            "title": "Parameter",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parameter"
+        ],
+        "title": "ParameterThreshold",
+        "type": "object"
+      },
+      "ScoreNodeForm": {
+        "additionalProperties": true,
+        "description": "The normalized comparison performed by a score node.",
+        "properties": {
+          "operator": {
+            "enum": [
+              "=",
+              "!=",
+              ">",
+              ">=",
+              "<",
+              "<="
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "quantifier": {
+            "enum": [
+              "none",
+              "any"
+            ],
+            "title": "Quantifier",
+            "type": "string"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "$ref": "#/$defs/ParameterThreshold"
+              }
+            ],
+            "title": "Threshold"
+          }
+        },
+        "required": [
+          "quantifier",
+          "operator",
+          "threshold"
+        ],
+        "title": "ScoreNodeForm",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Response from ``quarry_decision_tree``.",
+    "properties": {
+      "decision_tree": {
+        "additionalProperties": {
+          "$ref": "#/$defs/DecisionTreePayload"
+        },
+        "title": "Decision Tree",
+        "type": "object"
+      },
+      "diagnostics": {
+        "items": {
+          "$ref": "#/$defs/Diagnostic"
+        },
+        "title": "Diagnostics",
+        "type": "array"
+      },
+      "plugin_version": {
+        "title": "Plugin Version",
+        "type": "string"
+      },
+      "quarry_version": {
+        "title": "Quarry Version",
+        "type": "string"
+      },
+      "rule_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Rule Hash",
+        "type": "string"
+      },
+      "valid": {
+        "title": "Valid",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "plugin_version",
+      "quarry_version",
+      "rule_hash",
+      "valid",
+      "diagnostics"
+    ],
+    "title": "DecisionTreeResponse",
+    "type": "object"
+  },
+  "quarry_reference": {
+    "$defs": {
+      "CatalogEntry": {
+        "additionalProperties": true,
+        "description": "Stable identity fields shared by catalog records and examples.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "title": "CatalogEntry",
+        "type": "object"
+      },
+      "ModelAliasSummary": {
+        "additionalProperties": true,
+        "description": "Operations exposed by one trusted runtime model alias.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Operations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operations"
+        ],
+        "title": "ModelAliasSummary",
+        "type": "object"
+      },
+      "RejectedCatalogEntry": {
+        "additionalProperties": true,
+        "description": "One documented spelling the language rejects.",
+        "properties": {
+          "rejected_by": {
+            "title": "Rejected By",
+            "type": "string"
+          },
+          "replacement": {
+            "title": "Replacement",
+            "type": "string"
+          },
+          "source_form": {
+            "title": "Source Form",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_form",
+          "rejected_by"
+        ],
+        "title": "RejectedCatalogEntry",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Response from ``quarry_reference`` for any supported action.",
+    "properties": {
+      "action": {
+        "enum": [
+          "index",
+          "search",
+          "get",
+          "rejected"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "catalog_format_version": {
+        "title": "Catalog Format Version",
+        "type": "string"
+      },
+      "compiler_version": {
+        "title": "Compiler Version",
+        "type": "string"
+      },
+      "filtered_ids": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Filtered Ids",
+        "type": "array"
+      },
+      "language_version": {
+        "title": "Language Version",
+        "type": "string"
+      },
+      "missing_ids": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Missing Ids",
+        "type": "array"
+      },
+      "model_aliases": {
+        "additionalProperties": {
+          "$ref": "#/$defs/ModelAliasSummary"
+        },
+        "title": "Model Aliases",
+        "type": "object"
+      },
+      "next_offset": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Next Offset"
+      },
+      "offset": {
+        "title": "Offset",
+        "type": "integer"
+      },
+      "operator_precedence": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "title": "Operator Precedence",
+        "type": "array"
+      },
+      "plugin_version": {
+        "title": "Plugin Version",
+        "type": "string"
+      },
+      "quarry_version": {
+        "title": "Quarry Version",
+        "type": "string"
+      },
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "results": {
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogEntry"
+            },
+            {
+              "$ref": "#/$defs/RejectedCatalogEntry"
+            }
+          ]
+        },
+        "title": "Results",
+        "type": "array"
+      },
+      "runtime_capabilities": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "title": "Runtime Capabilities",
+        "type": "object"
+      },
+      "runtime_config_version": {
+        "title": "Runtime Config Version",
+        "type": "integer"
+      },
+      "total": {
+        "title": "Total",
+        "type": "integer"
+      },
+      "verbosity": {
+        "enum": [
+          "compact",
+          "full"
+        ],
+        "title": "Verbosity",
+        "type": "string"
+      }
+    },
+    "required": [
+      "plugin_version",
+      "quarry_version",
+      "catalog_format_version",
+      "language_version",
+      "compiler_version",
+      "action",
+      "runtime_capabilities",
+      "results"
+    ],
+    "title": "ReferenceResponse",
+    "type": "object"
+  },
+  "quarry_scan": {
+    "$defs": {
+      "Advisory": {
+        "additionalProperties": true,
+        "description": "A non-fatal compilation or language warning.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "replacement": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replacement"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "title": "Advisory",
+        "type": "object"
+      },
+      "CapabilityRequirements": {
+        "additionalProperties": true,
+        "description": "Runtime resources required by a compiled rule.",
+        "properties": {
+          "functions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Functions",
+            "type": "array"
+          },
+          "model_operations": {
+            "items": {
+              "$ref": "#/$defs/ModelOperation"
+            },
+            "title": "Model Operations",
+            "type": "array"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "resource_groups": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Resource Groups",
+            "type": "array"
+          },
+          "text_resources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Text Resources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "resource_groups",
+          "functions",
+          "model_operations",
+          "models",
+          "text_resources"
+        ],
+        "title": "CapabilityRequirements",
+        "type": "object"
+      },
+      "CompileResponse": {
+        "additionalProperties": true,
+        "description": "Response from ``quarry_compile`` and the scan compilation envelope.",
+        "properties": {
+          "catalog_format_version": {
+            "title": "Catalog Format Version",
+            "type": "string"
+          },
+          "compiler_version": {
+            "title": "Compiler Version",
+            "type": "string"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "estimated_complexity": {
+            "title": "Estimated Complexity",
+            "type": "string"
+          },
+          "language_version": {
+            "title": "Language Version",
+            "type": "string"
+          },
+          "parameter_schema": {
+            "items": {
+              "$ref": "#/$defs/ParameterSlot"
+            },
+            "title": "Parameter Schema",
+            "type": "array"
+          },
+          "plugin_version": {
+            "title": "Plugin Version",
+            "type": "string"
+          },
+          "quarry_version": {
+            "title": "Quarry Version",
+            "type": "string"
+          },
+          "required_capabilities": {
+            "$ref": "#/$defs/CapabilityRequirements"
+          },
+          "rule_complexities": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Rule Complexities",
+            "type": "object"
+          },
+          "rule_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rule Hash",
+            "type": "string"
+          },
+          "rule_metadata": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rule Metadata",
+            "type": "object"
+          },
+          "rule_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rule Names",
+            "type": "array"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "visualization": {
+            "additionalProperties": true,
+            "title": "Visualization",
+            "type": "object"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/$defs/Advisory"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugin_version",
+          "quarry_version",
+          "catalog_format_version",
+          "language_version",
+          "compiler_version",
+          "rule_hash",
+          "warnings",
+          "valid",
+          "stage",
+          "diagnostics",
+          "required_capabilities"
+        ],
+        "title": "CompileResponse",
+        "type": "object"
+      },
+      "ConstructedInputPiece": {
+        "additionalProperties": true,
+        "description": "One conversation field used to build a model input, without its text.",
+        "properties": {
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position",
+          "field"
+        ],
+        "title": "ConstructedInputPiece",
+        "type": "object"
+      },
+      "ConstructedSpan": {
+        "additionalProperties": true,
+        "description": "An input with its own root and optional references to conversation fields.",
+        "properties": {
+          "constructed": {
+            "const": true,
+            "title": "Constructed",
+            "type": "boolean"
+          },
+          "pieces": {
+            "items": {
+              "$ref": "#/$defs/ConstructedInputPiece"
+            },
+            "title": "Pieces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "constructed"
+        ],
+        "title": "ConstructedSpan",
+        "type": "object"
+      },
+      "ConversationSpan": {
+        "additionalProperties": true,
+        "description": "A half-open character range within one message or across adjacent messages.",
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "integer"
+          },
+          "end_message_index": {
+            "title": "End Message Index",
+            "type": "integer"
+          },
+          "message_index": {
+            "title": "Message Index",
+            "type": "integer"
+          },
+          "score": {
+            "$ref": "#/$defs/ScoreValue"
+          },
+          "start": {
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_index",
+          "start",
+          "end"
+        ],
+        "title": "ConversationSpan",
+        "type": "object"
+      },
+      "DecisionPathPayload": {
+        "additionalProperties": true,
+        "description": "The ordered steps one scan reached and its authoritative leaf, if any.",
+        "properties": {
+          "config_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Config Sha256",
+            "type": "string"
+          },
+          "conversation_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Conversation Sha256",
+            "type": "string"
+          },
+          "exploration": {
+            "$ref": "#/$defs/ExplorationDetails"
+          },
+          "leaf": {
+            "anyOf": [
+              {
+                "enum": [
+                  "match",
+                  "no_match"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leaf"
+          },
+          "parameter_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Parameter Digest",
+            "type": "string"
+          },
+          "path": {
+            "items": {
+              "$ref": "#/$defs/DecisionStep"
+            },
+            "title": "Path",
+            "type": "array"
+          },
+          "tree_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Tree Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tree_sha256",
+          "config_sha256",
+          "parameter_digest",
+          "conversation_sha256",
+          "leaf",
+          "path"
+        ],
+        "title": "DecisionPathPayload",
+        "type": "object"
+      },
+      "DecisionStep": {
+        "additionalProperties": true,
+        "description": "One reached decision step, including its unique step key.",
+        "properties": {
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "number": {
+            "$ref": "#/$defs/NumberMeasurement"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "score": {
+            "$ref": "#/$defs/ScoreMeasurement"
+          }
+        },
+        "required": [
+          "node",
+          "outcome"
+        ],
+        "title": "DecisionStep",
+        "type": "object"
+      },
+      "Diagnostic": {
+        "additionalProperties": true,
+        "description": "A bounded machine-readable diagnostic.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "line": {
+            "title": "Line",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "rule_name": {
+            "title": "Rule Name",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "Diagnostic",
+        "type": "object"
+      },
+      "ExplorationDetails": {
+        "additionalProperties": true,
+        "description": "Off-path checks evaluated for a deterministically sampled scan.",
+        "properties": {
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed",
+            "type": "array"
+          },
+          "off_path": {
+            "items": {
+              "$ref": "#/$defs/DecisionStep"
+            },
+            "title": "Off Path",
+            "type": "array"
+          },
+          "rate": {
+            "title": "Rate",
+            "type": "number"
+          },
+          "sample_value": {
+            "title": "Sample Value",
+            "type": "number"
+          },
+          "selected": {
+            "title": "Selected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rate",
+          "sample_value",
+          "selected"
+        ],
+        "title": "ExplorationDetails",
+        "type": "object"
+      },
+      "FailureRecord": {
+        "additionalProperties": true,
+        "description": "Stable failure category with optional rule attribution.",
+        "properties": {
+          "category": {
+            "enum": [
+              "invalid_input",
+              "rule_selection",
+              "input_read",
+              "preparation",
+              "model",
+              "resource",
+              "evaluation",
+              "timeout",
+              "skipped",
+              "truncated_input",
+              "evaluation_limit",
+              "unknown"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "rule_name": {
+            "title": "Rule Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category"
+        ],
+        "title": "FailureRecord",
+        "type": "object"
+      },
+      "MatchRecord": {
+        "additionalProperties": true,
+        "description": "One authoritative rule match.",
+        "properties": {
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "output": {
+            "$ref": "#/$defs/RuleOutput"
+          },
+          "rule_name": {
+            "title": "Rule Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_name",
+          "metadata"
+        ],
+        "title": "MatchRecord",
+        "type": "object"
+      },
+      "ModelOperation": {
+        "additionalProperties": true,
+        "description": "One model alias and operation required by a rule.",
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "operation"
+        ],
+        "title": "ModelOperation",
+        "type": "object"
+      },
+      "NumberMeasurement": {
+        "additionalProperties": true,
+        "description": "The collection size a decision step compared.",
+        "properties": {
+          "operator": {
+            "enum": [
+              "=",
+              "!=",
+              ">",
+              ">=",
+              "<",
+              "<="
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value",
+          "operator",
+          "threshold"
+        ],
+        "title": "NumberMeasurement",
+        "type": "object"
+      },
+      "NumberParameterEvidence": {
+        "additionalProperties": true,
+        "description": "Visible evidence for one effective numeric parameter value.",
+        "properties": {
+          "binding": {
+            "enum": [
+              "policy",
+              "scan"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "type": {
+            "const": "number",
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "type",
+          "binding",
+          "value"
+        ],
+        "title": "NumberParameterEvidence",
+        "type": "object"
+      },
+      "OutputItem": {
+        "additionalProperties": true,
+        "description": "One typed collection item.",
+        "properties": {
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "value": {
+            "additionalProperties": true,
+            "title": "Value",
+            "type": "object"
+          }
+        },
+        "required": [
+          "item_id",
+          "value"
+        ],
+        "title": "OutputItem",
+        "type": "object"
+      },
+      "OutputProducer": {
+        "additionalProperties": true,
+        "description": "Identity of a typed result producer within one scan.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name",
+          "run_id"
+        ],
+        "title": "OutputProducer",
+        "type": "object"
+      },
+      "ParameterSlot": {
+        "additionalProperties": true,
+        "description": "One declared rule parameter.",
+        "properties": {
+          "binding": {
+            "title": "Binding",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "binding"
+        ],
+        "title": "ParameterSlot",
+        "type": "object"
+      },
+      "RuleOutput": {
+        "additionalProperties": true,
+        "description": "A rule's typed collection output.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/OutputItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/$defs/OutputProducer"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "category",
+          "source",
+          "items"
+        ],
+        "title": "RuleOutput",
+        "type": "object"
+      },
+      "ScanEntry": {
+        "additionalProperties": true,
+        "description": "One conversation's result inside a batch.",
+        "properties": {
+          "completion_state": {
+            "enum": [
+              "complete",
+              "invalid",
+              "incomplete"
+            ],
+            "title": "Completion State",
+            "type": "string"
+          },
+          "decision_path": {
+            "$ref": "#/$defs/DecisionPathPayload"
+          },
+          "decision_scores": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Decision Scores",
+            "type": "object"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "explanations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Explanations",
+            "type": "array"
+          },
+          "failures": {
+            "items": {
+              "$ref": "#/$defs/FailureRecord"
+            },
+            "title": "Failures",
+            "type": "array"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/$defs/MatchRecord"
+            },
+            "title": "Matches",
+            "type": "array"
+          },
+          "partial_matches": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Partial Matches",
+            "type": "array"
+          },
+          "timings": {
+            "$ref": "#/$defs/TimingSummary"
+          },
+          "visualization": {
+            "additionalProperties": true,
+            "title": "Visualization",
+            "type": "object"
+          }
+        },
+        "required": [
+          "completion_state",
+          "failures",
+          "timings",
+          "diagnostics",
+          "decision_scores"
+        ],
+        "title": "ScanEntry",
+        "type": "object"
+      },
+      "ScoreMeasurement": {
+        "additionalProperties": true,
+        "description": "The score value a decision step compared.",
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/$defs/ScoredChunk"
+            },
+            "title": "Chunks",
+            "type": "array"
+          },
+          "deciding": {
+            "$ref": "#/$defs/ScoredChunk"
+          },
+          "evaluations": {
+            "title": "Evaluations",
+            "type": "integer"
+          },
+          "matching": {
+            "title": "Matching",
+            "type": "integer"
+          },
+          "operator": {
+            "enum": [
+              "=",
+              "!=",
+              ">",
+              ">=",
+              "<",
+              "<="
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "span": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ConversationSpan"
+              },
+              {
+                "$ref": "#/$defs/ConstructedSpan"
+              }
+            ],
+            "title": "Span"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value",
+          "operator",
+          "threshold",
+          "evaluations"
+        ],
+        "title": "ScoreMeasurement",
+        "type": "object"
+      },
+      "ScoreValue": {
+        "additionalProperties": true,
+        "description": "A normalized score attached to a span.",
+        "properties": {
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ScoreValue",
+        "type": "object"
+      },
+      "ScoredChunk": {
+        "additionalProperties": true,
+        "description": "One split chunk, its optional repeated context, and its score.",
+        "properties": {
+          "chunk": {
+            "title": "Chunk",
+            "type": "integer"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ConversationSpan"
+              },
+              {
+                "$ref": "#/$defs/ConstructedSpan"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "span": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ConversationSpan"
+              },
+              {
+                "$ref": "#/$defs/ConstructedSpan"
+              }
+            ],
+            "title": "Span"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "chunk",
+          "span",
+          "context"
+        ],
+        "title": "ScoredChunk",
+        "type": "object"
+      },
+      "TextParameterEvidence": {
+        "additionalProperties": true,
+        "description": "Redacted evidence for one effective text parameter value.",
+        "properties": {
+          "binding": {
+            "enum": [
+              "policy",
+              "scan"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "redacted": {
+            "const": true,
+            "title": "Redacted",
+            "type": "boolean"
+          },
+          "type": {
+            "const": "text",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "binding",
+          "redacted"
+        ],
+        "title": "TextParameterEvidence",
+        "type": "object"
+      },
+      "TimingSummary": {
+        "additionalProperties": true,
+        "description": "Bounded scan and per-rule timing values.",
+        "properties": {
+          "rules": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Rules",
+            "type": "object"
+          },
+          "total_seconds": {
+            "title": "Total Seconds",
+            "type": "number"
+          }
+        },
+        "title": "TimingSummary",
+        "type": "object"
+      }
+    },
+    "additionalProperties": true,
+    "description": "Response from ``quarry_scan`` in single or ordered-batch mode.",
+    "properties": {
+      "catalog_format_version": {
+        "title": "Catalog Format Version",
+        "type": "string"
+      },
+      "compilation": {
+        "$ref": "#/$defs/CompileResponse"
+      },
+      "compiler_version": {
+        "title": "Compiler Version",
+        "type": "string"
+      },
+      "completion_state": {
+        "enum": [
+          "complete",
+          "invalid",
+          "incomplete"
+        ],
+        "title": "Completion State",
+        "type": "string"
+      },
+      "count": {
+        "title": "Count",
+        "type": "integer"
+      },
+      "decision_path": {
+        "$ref": "#/$defs/DecisionPathPayload"
+      },
+      "decision_scores": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": "Decision Scores",
+        "type": "object"
+      },
+      "diagnostics": {
+        "items": {
+          "$ref": "#/$defs/Diagnostic"
+        },
+        "title": "Diagnostics",
+        "type": "array"
+      },
+      "explanations": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "title": "Explanations",
+        "type": "array"
+      },
+      "failures": {
+        "items": {
+          "$ref": "#/$defs/FailureRecord"
+        },
+        "title": "Failures",
+        "type": "array"
+      },
+      "language_version": {
+        "title": "Language Version",
+        "type": "string"
+      },
+      "matched": {
+        "title": "Matched",
+        "type": "boolean"
+      },
+      "matches": {
+        "items": {
+          "$ref": "#/$defs/MatchRecord"
+        },
+        "title": "Matches",
+        "type": "array"
+      },
+      "parameter_digest": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Parameter Digest",
+        "type": "string"
+      },
+      "parameter_evidence": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NumberParameterEvidence"
+            },
+            {
+              "$ref": "#/$defs/TextParameterEvidence"
+            }
+          ]
+        },
+        "title": "Parameter Evidence",
+        "type": "object"
+      },
+      "partial_matches": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Partial Matches",
+        "type": "array"
+      },
+      "plugin_version": {
+        "title": "Plugin Version",
+        "type": "string"
+      },
+      "policy_digest": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Policy Digest",
+        "type": "string"
+      },
+      "quarry_version": {
+        "title": "Quarry Version",
+        "type": "string"
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/ScanEntry"
+        },
+        "title": "Results",
+        "type": "array"
+      },
+      "rule_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Rule Hash",
+        "type": "string"
+      },
+      "timings": {
+        "$ref": "#/$defs/TimingSummary"
+      },
+      "verbosity": {
+        "enum": [
+          "compact",
+          "full"
+        ],
+        "title": "Verbosity",
+        "type": "string"
+      },
+      "visualization": {
+        "additionalProperties": true,
+        "title": "Visualization",
+        "type": "object"
+      }
+    },
+    "required": [
+      "plugin_version",
+      "quarry_version",
+      "catalog_format_version",
+      "language_version",
+      "compiler_version",
+      "rule_hash",
+      "verbosity",
+      "compilation",
+      "completion_state"
+    ],
+    "title": "ScanResponse",
+    "type": "object"
+  }
+}
