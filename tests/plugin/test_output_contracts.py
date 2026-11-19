@@ -34,11 +34,13 @@ from quarry.plugin.contracts import (
     CompileResponse,
     DecisionFlowResponse,
     DecisionTreeResponse,
+    ModelUsageSummary,
     ParameterEvidence,
     ReferenceResponse,
     RuleOutput,
     ScanEntry,
     ScanResponse,
+    TimingSummary,
     published_output_schemas,
     write_tool_schemas,
 )
@@ -323,6 +325,8 @@ def test_unique_step_ids_survive_typed_serialization() -> None:
         "completion_state": "complete",
         "failures": [],
         "timings": {"total_seconds": 0.01, "rules": {}},
+        "model_usage": {"calls": 0, "records": [], "truncated": False},
+        "models_called": [],
         "diagnostics": [],
         "decision_scores": {"t:score": 0.2, "t:score~1": 0.8},
         "matched": False,
@@ -333,6 +337,42 @@ def test_unique_step_ids_survive_typed_serialization() -> None:
     serialized = adapter.dump_json(adapter.validate_python(entry))
 
     assert list(json.loads(serialized)["decision_scores"]) == ["t:score", "t:score~1"]
+
+
+def test_timing_and_model_usage_contracts_reject_malformed_or_unbounded_values() -> None:
+    timing = TypeAdapter(TimingSummary)
+    usage = TypeAdapter(ModelUsageSummary)
+    valid_usage = {
+        "calls": 1,
+        "records": [{"model": "judge", "operation": "score", "calls": 1}],
+        "truncated": False,
+    }
+
+    assert usage.validate_python(valid_usage) == valid_usage
+    assert timing.validate_python({"total_seconds": 0.0, "rules": {"r": 0.1}})
+    for malformed in (
+        {**valid_usage, "calls": -1},
+        {**valid_usage, "calls": True},
+        {**valid_usage, "calls": 1_000_001},
+        {**valid_usage, "records": valid_usage["records"] * 513},
+        {
+            **valid_usage,
+            "records": [{"model": "x" * 201, "operation": "score", "calls": 1}],
+        },
+        {
+            **valid_usage,
+            "records": [{"model": "judge", "operation": "provider_call", "calls": 1}],
+        },
+    ):
+        with pytest.raises(ValidationError):
+            usage.validate_python(malformed)
+    for malformed in (
+        {"total_seconds": -0.1},
+        {"total_seconds": float("inf")},
+        {"total_seconds": True},
+    ):
+        with pytest.raises(ValidationError):
+            timing.validate_python(malformed)
 
 
 def test_cli_and_plugin_keep_shared_failure_and_typed_output_shapes() -> None:
@@ -346,6 +386,14 @@ def test_cli_and_plugin_keep_shared_failure_and_typed_output_shapes() -> None:
         file_path=None,
         rule_matches=["Synthetic boundary"],
         scan_time=0.01,
+        rule_timings={"Synthetic boundary": 0.005},
+        model_usage={
+            "calls": 1,
+            "records": [
+                {"model": "judge", "operation": "score", "calls": 1},
+            ],
+            "truncated": False,
+        },
         outputs={"Synthetic boundary": output},
     )
     scanner = SimpleNamespace(
@@ -361,6 +409,9 @@ def test_cli_and_plugin_keep_shared_failure_and_typed_output_shapes() -> None:
     assert plugin_payload["matches"][0]["output"] == cli_payload["matches"][0]["output"]
     assert TypeAdapter(RuleOutput).validate_python(plugin_payload["matches"][0]["output"])
     assert plugin_payload["failures"] == cli_payload["failures"] == []
+    assert plugin_payload["timings"] == cli_payload["timings"]
+    assert plugin_payload["model_usage"] == cli_payload["model_usage"]
+    assert plugin_payload["models_called"] == cli_payload["models_called"] == ["judge"]
 
     invalid = ScanResult(
         file_path=None,

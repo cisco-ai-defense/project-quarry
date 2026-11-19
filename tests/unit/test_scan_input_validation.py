@@ -22,6 +22,7 @@ conversation in it scanned authoritatively.
 """
 
 import asyncio
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -853,8 +854,17 @@ def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     )
 
     if fail_on_timeout:
-        with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded"):
+        with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded") as exc_info:
             asyncio.run(scanner.scan_data_async(conversation, deadline_seconds=0.05))
+        assert exc_info.value.scan_result.model_usage == {
+            "calls": 0,
+            "records": [],
+            "truncated": False,
+        }
+        assert exc_info.value.scan_result.completion_state == "incomplete"
+        timings = exc_info.value.scan_result.rule_timings
+        assert timings is not None and set(timings) == {"Read"}
+        assert math.isfinite(timings["Read"]) and timings["Read"] >= 0
     else:
         result = asyncio.run(scanner.scan_data_async(conversation, deadline_seconds=0.05))
     assert 0 < len(decoded) < len(arguments)

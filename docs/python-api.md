@@ -40,9 +40,61 @@ print(result.rule_matches, result.detailed_matches, result.outputs)
 
 `scan_data_async` serves async applications. `ScanResult.completion_state` is `complete`, `invalid`, or `incomplete`; `is_complete` is true only for an authoritative result. Explain evidence and typed `outputs` follow the same status rule.
 
+When constructing `SafetyLimits` in Python, `max_total_size` must be a nonnegative integer;
+booleans, floats, strings and `None` raise `ValueError` at construction. Zero is a real budget
+that rejects nonempty input. To disable limit enforcement for trusted input, set
+`enforce_limits=False` with a valid budget.
+
 Set `logical_reads=True` on scanner or compiled-policy scans to attach optional input-read
 snapshots. See [logical reads](logical-reads.md) for exact coverage unions, requesting-reader
 attribution, host reference token maps, limits and collection-lifetime semantics.
+
+### Scan timing and model usage
+
+`ScanResult.scan_time` is the bounded, finite, nonnegative monotonic duration for the scan.
+`ScanResult.rule_timings` is either `None` or a map from each started rule to its monotonic
+evaluation duration; concurrent rule durations can overlap and therefore need not sum to
+`scan_time`. `scan_batch_data` reports the monotonic elapsed time of the whole ordered batch and
+the average duration of each rule across child results that started it. Validation or selection
+failures before rule execution have no rule timings.
+
+`ScanResult.model_usage` is always present. It contains bounded provider-neutral physical
+adapter-attempt counts:
+
+```python
+{
+    "calls": 1,
+    "records": [{"model": "judge", "operation": "score", "calls": 1}],
+    "truncated": False,
+}
+```
+
+The `model` value is the configured public alias, never a provider model name. Records use only
+the generic operations `score`, `classify`, `complete`, and `input_tokens`. The summary does not
+contain prompts, model content, responses, endpoints, credentials, trace data, or pricing.
+Telemetry is diagnostic and never changes a verdict or completion state.
+Window token encoding and token-count requests use `input_tokens`; a window classifier batch
+uses one `classify` attempt per adapter invocation, regardless of the number of windows.
+Model-backed transforms use `complete`; local transforms and span decoders add no attempts.
+Payload preparation consumes the logical model or rule deadline. If preparation exhausts
+that budget, the adapter is not invoked and no physical attempt is charged. Otherwise the
+adapter receives only the time still remaining after preparation.
+An expired requesting rule retains its `QuarryTimeoutError` when shared work reports a timeout.
+Adapter execution and limiter cleanup also consume the logical budget. A successful response
+that finishes after the deadline is rejected before cache admission, while its physical attempt
+remains counted.
+
+When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
+`error.result`) carries the safe partial timing and model-usage snapshot recorded before the
+exception escaped. File and batch wrappers retain that telemetry in their returned incomplete
+results while preserving their existing failure categories and exception text.
+For a `CompiledPolicy` batch, a timeout on a later item aggregates the completed prefix and the
+current timed-out item once: `scan_time` is their saturated sum, each `rule_timings` value is the
+average across observed items that started that rule, and `model_usage` is the bounded merge in
+input order. An unstarted current item contributes zero.
+
+See [scan telemetry](PLUGIN.md#scan-telemetry) for exact retry, cache, shared-call, cancellation,
+batch, saturation, and CLI/plugin serialization semantics.
 
 ## Typed scan failures
 
