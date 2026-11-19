@@ -1430,7 +1430,7 @@ def _flow_requirements(
         candidates: list[FlowCandidate] = []
         for alt in probe.candidates:
             surface = alt.coll.surface if isinstance(alt, _EventAlt) else alt.surface
-            if isinstance(alt, _ElementAlt):
+            if isinstance(alt, _ElementAlt) or C.free_vars(alt.body) - {alt.var}:
                 # An enclosing element can carry a capture or join binding. Without its
                 # candidate binding, its mere surface presence is the safe preflight.
                 candidates.append(FlowCandidate(surface, None))

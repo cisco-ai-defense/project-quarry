@@ -42,6 +42,8 @@ condition:
 
 Only sections read by selected rules are validated. A bad section fails rules that read it while other rules retain their verdicts. An unknown top-level key makes the scan invalid. Each read section and the chat have their own size and nesting limits.
 
+For declared-input scans, plugin decision paths hash only the rule's selected, validated data. Unread sections do not change `conversation_sha256`; it is null when the selected data cannot be safely hashed.
+
 ## Timeline and clocks
 
 A list section keeps its own item order. To compare its items with chat steps or items from another section, provide a `timeline` listing the observed message, tool call, and input item IDs in order:

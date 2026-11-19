@@ -48,7 +48,7 @@ from rich.tree import Tree
 
 from quarry import __version__
 from quarry.config import QuarryConfig
-from quarry.safety.quality import quality_warnings
+from quarry.safety.quality import matchability_warning, quality_warnings, verify_matchability
 from quarry.safety.validator import Complexity, Severity, ValidationWarning, validate_rules
 from quarry.scanner import DSLScanner
 from quarry.types.results import CollectionResult, Span
@@ -484,7 +484,15 @@ def scan_command(args):
         advisory_by_rule: dict[str, list[ValidationWarning]] = {}
         for rule_name, rule in scanner.loaded_rules.items():
             try:
-                advisories = list(quality_warnings(rule, scanner.compiled_rules[rule_name]))
+                artifact = scanner.compiled_rules[rule_name]
+                advisories = list(quality_warnings(rule, artifact))
+                formal_warning = matchability_warning(
+                    rule,
+                    artifact,
+                    verify_matchability(artifact),
+                )
+                if formal_warning is not None:
+                    advisories.append(formal_warning)
                 for warning in advisories:
                     # Advisory analysis is best effort, including its returned shape.
                     _ = warning.severity.value, warning.message, warning.suggestion
