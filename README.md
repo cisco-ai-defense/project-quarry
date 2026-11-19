@@ -116,6 +116,7 @@ for match in matches:
 - [Python API](docs/python-api.md) and [parameters](docs/parameters.md)
 - [Declared inputs](docs/inputs.md) for data beside conversation messages
 - [Model inference](docs/model-inference.md) and [application integration](docs/integration.md)
+- [Optional formal rule verification](docs/formal-verification.md)
 - [Agent plugin](docs/PLUGIN.md) for Codex, Claude Code, and MCP hosts
 - [Architecture](docs/architecture.md) and [testing](docs/testing.md)
 - [Synthetic examples](examples/README.md)
