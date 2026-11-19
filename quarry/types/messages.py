@@ -490,6 +490,15 @@ class Message(OpenAIObject):
         text = self.content
         if not 0 <= start < end <= len(text):
             raise ValueError("message segment is outside the message content")
+        return self._copy_text_range(
+            start, end, text, slice_provenance(self._content_provenance(), start, end)
+        )
+
+    def _copy_text_range(
+        self, start: int, end: int, text: str, provenance: tuple[ProvenanceSegment, ...]
+    ) -> Self:
+        """Copy a range whose text and sliced map were checked by its range source."""
+
         update: dict[str, Any] = {"source_content": text[start:end]}
         if end < len(text) and isinstance(self, AssistantMessage):
             if self.tool_calls:
@@ -501,9 +510,7 @@ class Message(OpenAIObject):
         object.__setattr__(segment, "_content_parts_cache", None)
         object.__setattr__(segment, "_digest_cache", None)
         object.__setattr__(segment, "_segment", (start, end))
-        object.__setattr__(
-            segment, "_provenance", slice_provenance(self._content_provenance(), start, end)
-        )
+        object.__setattr__(segment, "_provenance", provenance)
         if not isinstance(self.source_content, str):
             object.__setattr__(segment, "_rewrite_content_changed", True)
         return segment
@@ -522,10 +529,18 @@ class Message(OpenAIObject):
 
         if self._provenance is not None:
             return self._provenance
+        return tuple(segment for segment in self._provenance_steps() if segment is not None)
+
+    def _provenance_steps(self) -> Iterator[ProvenanceSegment | None]:
+        """Visit raw parts or an existing map without an uninterruptible projection."""
+
+        if self._provenance is not None:
+            yield from self._provenance
+            return
         source = self.source_content
         if isinstance(source, str):
             if not source:
-                return ()
+                return
             base = self._segment[0] if self._segment is not None else 0
             original = ContentSourceRange(
                 self.message_index,
@@ -535,16 +550,20 @@ class Message(OpenAIObject):
                 base,
                 base + len(source),
             )
-            return (ProvenanceSegment(0, len(source), (original,)),)
+            yield ProvenanceSegment(0, len(source), (original,))
+            return
         if not isinstance(source, tuple):
-            return ()
-        segments = []
+            return
         output = 0
         for part_index, part in enumerate(source):
+            if part_index % 256 == 0:
+                _raise_if_combine_expired()
             if not isinstance(part, Mapping) or part.get("type") != "text":
+                yield None
                 continue
             text = part.get("text", "")
             if not isinstance(text, str) or not text:
+                yield None
                 continue
             original = ContentSourceRange(
                 self.message_index,
@@ -554,9 +573,8 @@ class Message(OpenAIObject):
                 output,
                 output + len(text),
             )
-            segments.append(ProvenanceSegment(output, output + len(text), (original,)))
+            yield ProvenanceSegment(output, output + len(text), (original,))
             output += len(text)
-        return tuple(segments)
 
     def _source_ranges(self, start: int, end: int) -> tuple[ContentSourceRange, ...]:
         """Map one non-empty range of this text to its original content parts."""

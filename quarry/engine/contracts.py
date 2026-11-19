@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-12 preserves distinct selected message
-# occurrences through rewriting, transformation, composition and token-bounded splitting.
-COMPILER_VERSION = "compiler-12"
+# previously produced artifacts. Compiler-13 bounds provenance work across split
+# preparation, token probes and overlap while retaining distinct message occurrences.
+COMPILER_VERSION = "compiler-13"
 
 
 @dataclass(frozen=True, slots=True)

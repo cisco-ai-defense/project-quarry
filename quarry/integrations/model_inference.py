@@ -52,6 +52,12 @@ from quarry.integrations.adapter_transforms import (
     transform_error,
     transform_unit_snapshot,
 )
+from quarry.integrations.message_ranges import (
+    MessageRangeIndex,
+    RangeBudget,
+    RangeMetrics,
+    gather_split_tasks,
+)
 from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelRetryHistory, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.shared_transforms import (
@@ -3408,12 +3414,25 @@ class ModelInferenceBackend:
         context: Messages | None,
         *,
         timeout: float | None,
+        _range_metrics: RangeMetrics | None = None,
     ) -> tuple[Messages, ...]:
         """Build the chunks after public argument validation."""
 
         await require_readable_media(messages)
         if context is not None:
             await require_readable_media(context)
+        range_budget = RangeBudget(_range_metrics)
+        range_indexes: dict[int, MessageRangeIndex] = {}
+        range_lock = asyncio.Lock()
+
+        async def range_index(position: int) -> MessageRangeIndex:
+            message = messages[position]
+            async with range_lock:
+                prepared = range_indexes.get(id(message))
+                if prepared is None:
+                    prepared = await MessageRangeIndex.prepare(message, range_budget)
+                    range_indexes[id(message)] = prepared
+                return prepared
 
         async def count(selection: Messages) -> int:
             return await self._count_messages(
@@ -3430,11 +3449,16 @@ class ModelInferenceBackend:
         def text_of(ordinal: int) -> str:
             return messages[ordinal].content
 
-        def piece(ordinal: int, start: int, end: int) -> Messages:
+        async def piece(ordinal: int, start: int, end: int) -> Messages:
+            prepared = await range_index(ordinal)
             selected = messages[ordinal : ordinal + 1]
-            return selected._select_ranges(
-                selected._ordinals, {selected[0].message_index: (start, end)}
-            )
+            selected._install_variants((prepared.segment(start, end),))
+            object.__setattr__(selected, "_chunk", True)
+            await range_budget.checkpoint()
+            return selected
+
+        async def count_piece(ordinal: int, start: int, end: int) -> int:
+            return await count(await piece(ordinal, start, end))
 
         # Packing keys are local positions. Two occurrences may have one source index
         # while holding different text, roles, or provenance.
@@ -3486,7 +3510,7 @@ class ModelInferenceBackend:
             selected = messages._view_ordinals(message.message_index for message in variants)
             selected._install_variants(variants)
             replacements = {
-                len(prefix) + local: messages[position]._segment_of(*text_range)
+                len(prefix) + local: range_indexes[id(messages[position])].segment(*text_range)
                 for local, position in enumerate(positions)
                 if (text_range := ranges.get(position)) is not None
                 and text_range != (0, len(text_of(position)))
@@ -3503,8 +3527,8 @@ class ModelInferenceBackend:
         # Counted alone, every message and range also pays the tokenizer's per-request
         # framing, so summed counts overcount a chunk; a chunk of several parts is confirmed.
         context_tokens = 0 if context is None else await count(context)
-        message_tokens = await asyncio.gather(
-            *(count(messages[ordinal : ordinal + 1]) for ordinal in body)
+        message_tokens = await gather_split_tasks(
+            count(messages[ordinal : ordinal + 1]) for ordinal in body
         )
         # Overlap is optional, so it must not force an otherwise fitting message to be cut.
         budget = max_input_tokens - context_tokens
@@ -3530,11 +3554,11 @@ class ModelInferenceBackend:
                 bounds.append(boundary if boundary > bounds[-1] else target)
             bounds.append(end)
             ranges = list(zip(bounds, bounds[1:], strict=False))
-            counts = await asyncio.gather(
-                *(count(piece(ordinal, low, high)) for low, high in ranges)
+            counts = await gather_split_tasks(
+                count_piece(ordinal, low, high) for low, high in ranges
             )
-            nested = await asyncio.gather(
-                *(cut(ordinal, low, high, n) for (low, high), n in zip(ranges, counts, strict=True))
+            nested = await gather_split_tasks(
+                cut(ordinal, low, high, n) for (low, high), n in zip(ranges, counts, strict=True)
             )
             return [part for parts_of in nested for part in parts_of]
 
@@ -3550,13 +3574,11 @@ class ModelInferenceBackend:
                 # Counted alone it pays the request framing twice beside the context, so
                 # only the exact count of its chunk in ``confirm`` can reject it.
                 return [_ChunkPart(ordinal, None, tokens)]
+            await range_index(ordinal)
             return await cut(ordinal, 0, len(message.content), tokens)
 
-        split_messages = await asyncio.gather(
-            *(
-                parts_of(ordinal, tokens)
-                for ordinal, tokens in zip(body, message_tokens, strict=True)
-            )
+        split_messages = await gather_split_tasks(
+            parts_of(ordinal, tokens) for ordinal, tokens in zip(body, message_tokens, strict=True)
         )
         packed: list[list[_ChunkPart]] = [[]]
         used = 0
@@ -3595,7 +3617,7 @@ class ModelInferenceBackend:
             while room > 0 and start < high:
                 spaces = [text.find(space, start, high) for space in " \n\t"]
                 start = min((index for index in spaces if index >= 0), default=start)
-                tokens = await count(piece(last.ordinal, start, high))
+                tokens = await count_piece(last.ordinal, start, high)
                 if tokens <= room:
                     return {
                         last.ordinal: (start, high),
@@ -3604,7 +3626,7 @@ class ModelInferenceBackend:
                 start = high - int((high - start) * room / tokens * 0.9)
             return {}
 
-        tails = await asyncio.gather(*(tail(parts) for parts in packed[:-1]) if overlap else ())
+        tails = await gather_split_tasks((tail(parts) for parts in packed[:-1]) if overlap else ())
 
         def own_ranges(
             index: int, repeated: dict[int, tuple[int, int] | None] | None = None
@@ -3667,7 +3689,7 @@ class ModelInferenceBackend:
             return view
 
         return tuple(
-            await asyncio.gather(*(confirm(index, view) for index, view in enumerate(chunks)))
+            await gather_split_tasks(confirm(index, view) for index, view in enumerate(chunks))
         )
 
     async def model_split_conversation(

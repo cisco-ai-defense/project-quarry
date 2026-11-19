@@ -78,6 +78,15 @@ that produced it. If variants map the same character offsets to different origin
 `source_ranges(message_index, start, end)` is ambiguous and raises; use the bound model span's
 `source_ranges` and `messages.extract(span)` instead.
 
+Text splitting prepares a scan-local range index once for each message variant. Range lookup and
+source-map copying are bounded across the entire split operation, including tokenizer probes and
+overlap. Exceeding 4,000,000 range work units raises an evaluation error and leaves the scan
+incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
+A failed or cancelled split cancels and joins its owned token probes before returning, including
+when its caller repeats cancellation while probe cleanup is still running.
+Compiler identity advances to 13 with compiled-policy format 9 unchanged. Earlier compiler
+artifacts are explicitly refused; recompile their saved rule sources before loading them.
+
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
 messages can be placed before, after, or between source views. Constructed roles are restricted to
 `system`, `developer`, `user`, and `assistant`, and constructors do not accept provider fields or
