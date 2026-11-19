@@ -22,7 +22,7 @@ Core packs live at `rules/rule-packs/core/<pack>/`; community packs live at
 `rules/rule-packs/community/<publisher>/<pack>/`. A pack ID is this path relative to
 `rules/rule-packs/`. Each rule has its own folder containing one `.rule` file and
 any runtime prompts or resources. Pack and rule READMEs are optional. Keep
-synthetic cases in `rules/test-cases/<pack-id>/<rule-stem>/`.
+example cases in `rules/test-cases/<pack-id>/<rule-stem>/`.
 
 The Quarry team owns core pack testing and maintenance. Repository maintainers
 review changes to both core and community packs. Any contributor may improve an
@@ -53,7 +53,7 @@ their attribution in a `contributors` string or the contribution history.
 
 ## Cases and compilation inputs
 
-Each active rule needs synthetic matching and clean cases, including useful
+Each active rule needs matching and clean cases, including useful
 near misses. Store them separately in `positive/` and `negative/`, and declare
 their expected results in `expectations.yaml`:
 
@@ -86,8 +86,8 @@ requiring models, probers, named text, or parameters as unevaluated.
 
 ## Versions and releases
 
-Rule versions live in metadata; pack versions live in immutable Git tags and
-`rules/rule-packs/<pack-id>/CHANGELOG.md`. There is no per-pack manifest. For example, tag
+Rule versions live in metadata; pack versions live in immutable Git tags.
+There is no per-pack manifest. For example, tag
 `rule-packs/core/coding-agents-runtime-behavior-rules/v0.1.0` identifies that
 pack's release. Consumers pin release commits and select their packs explicitly.
 
@@ -96,17 +96,17 @@ pack's release. Consumers pin release commits and select their packs explicitly.
 - Minor releases add compatible coverage or rules. Breaking changes need an
   explicit migration note; stable releases use a major version change.
 - Version affected rules when shared prompts or resources change. Unchanged
-  rules keep their versions, and the pack changelog identifies each change.
+  rules keep their versions; record changes in the contribution history.
 
 ## Deprecation and removal
 
 For a supported rule that should be retired, set `status = "deprecated"`, add a
-reason in the pack changelog, and preferably a `deprecation_reason` string. A
+reason in the contribution history, and preferably a `deprecation_reason` string. A
 replacement is optional. Deprecated rules can still compile and run when
 explicitly selected.
 
 If a rule no longer compiles or is unsupported, remove its active rule,
 associated resources and cases, and inventory entries together in a reviewed
 pull request. Record its ID, reason, last supported tag or commit, and any
-replacement in the changelog. Git preserves the previous rule and cases.
+replacement in the contribution history. Git preserves the previous rule and cases.
 Broken or unsafe rules may be removed immediately while Quarry is in alpha.

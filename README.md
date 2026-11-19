@@ -137,7 +137,7 @@ for match in matches:
 - [Optional formal rule verification](docs/formal-verification.md)
 - [Agent plugin](docs/PLUGIN.md) for Codex, Claude Code, and MCP hosts
 - [Architecture](docs/architecture.md) and [testing](docs/testing.md)
-- [Synthetic examples](examples/README.md)
+- [Examples](examples/README.md)
 - [Detection rule packs](rules/README.md) and [community contributions](rules/rules-contribution-guidelines.md)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to work on Quarry. Report security issues through [SECURITY.md](SECURITY.md). Keep conversation data and credentials out of public issues.

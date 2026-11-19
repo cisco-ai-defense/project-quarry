@@ -24,8 +24,6 @@ contributions. Anyone may edit any publisher's rules; preserve original author
 attribution and add contributor credit. Publisher maintainers are contacts for
 their content, and repository maintainers approve changes.
 
-Publisher metadata is required only for community namespaces.
-
 ## Before adding a rule
 
 Search all community publishers, core rules, and open contribution pull requests
@@ -37,7 +35,7 @@ redundant additions without a demonstrated gap will be rejected.
 Publisher names identify the contributor or organization. Pack and rule names
 describe their detection scope or observable behavior. Inappropriate,
 misleading, or irrelevant names and content will be rejected even if technical
-checks pass. Relevant synthetic attack scenarios are valid fixture content.
+checks pass. Relevant illustrative attack scenarios are valid fixture content.
 
 ## Publisher and rule layout
 
@@ -46,28 +44,15 @@ Use lowercase kebab-case publisher and pack directories:
 ```text
 rules/rule-packs/community/
   example-labs/
-    publisher.yaml
     coding-agent-security/
-      CHANGELOG.md
       <rule-stem>/
         <rule-stem>.rule
         README.md                    # optional
         resources/                   # optional
 ```
 
-Each publisher has one `rules/rule-packs/community/<publisher>/publisher.yaml` containing publisher details only:
-
-```yaml
-publisher:
-  id: example-labs
-  name: Example Labs
-  description: Community agent-security research
-  maintainers: ["@maintainer-handle"]
-```
-
-The publisher ID matches its directory. Adding packs or rules does not change
-this file. Pack IDs derive from their paths, and pack versions remain in Git tags
-and changelogs. A publisher namespace identifies attribution and contacts.
+Pack IDs derive from their paths, and pack versions live in Git tags. A
+publisher namespace identifies the contributor or organization.
 
 We recommend lowercase snake_case rule filenames using
 `<threat_name>_<observable_behavior>.rule`, for example
@@ -80,10 +65,10 @@ event order alone does not prove causation.
 
 ## Submission evidence
 
-Supply the rule, required runtime resources, publisher details when creating a
-namespace, and cases under `rules/test-cases/<pack-id>/<rule-stem>/`. Include
+Supply the rule, required runtime resources, and cases under
+`rules/test-cases/<pack-id>/<rule-stem>/`. Include
 `positive/`, `negative/`, and `expectations.yaml`, and update
-`rules/test-cases/corpus-manifest.json`. Use only synthetic conversations and
+`rules/test-cases/corpus-manifest.json`. Use only fictitious conversations and
 reserved example domains; keep private transcripts, credentials, private URLs,
 and proprietary test material out of submissions.
 
@@ -112,8 +97,6 @@ It checks all core and community packs across every publisher:
 - Rule folder/file layout and globally unique declared rule names.
 - Required string metadata, version/status formats, and compilation against the
   checkout's Quarry runtime, including `requires_quarry` compatibility.
-- Publisher details, matching publisher IDs, and absence of pack/rule inventories
-  in publisher metadata.
 - Reviewed inventory coverage for rules, resources, and cases, including missing
   files, unlisted additions, and orphaned cases.
 - Matching positive/negative JSON cases and expectations, valid conversation
@@ -129,10 +112,10 @@ and structural or validation errors fail the check.
 
 ## Maintainer review
 
-CI does not establish semantic uniqueness, content relevance, synthetic-data
+CI does not establish semantic uniqueness, content relevance, fixture-data
 provenance, attribution, licensing, detection quality, or appropriate release
 changes. Maintainers review these alongside related-rule comparisons, bypasses,
-false positives, coverage limits, changelog/version updates, and deprecation or
+false positives, coverage limits, version updates, and deprecation or
 removal reasons.
 
 From the repository root, run `uv run --frozen python rules/validate.py` and attach

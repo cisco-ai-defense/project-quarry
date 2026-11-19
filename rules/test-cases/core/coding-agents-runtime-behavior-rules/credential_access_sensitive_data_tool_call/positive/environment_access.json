@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review the operation."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "shell",
+            "arguments": "{\"command\": \"printenv API_KEY\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

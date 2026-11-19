@@ -63,7 +63,7 @@ language-check:  ## Check generated language and plugin schemas
 
 validate-rules: e2e-signatures  ## Load and execute every example rule with deterministic resources
 
-validate-packs:  ## Compile detection rules and check their local synthetic cases
+validate-packs:  ## Compile detection rules and check their local example cases
 	$(UV_RUN) python rules/validate.py
 
 build: lock-check  ## Build and validate wheel and source distribution

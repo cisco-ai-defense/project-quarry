@@ -18,18 +18,23 @@ SPDX-License-Identifier: Apache-2.0
 
 # Coding agents runtime behavior rules
 
-Experimental core pack with one example rule:
-download-to-shell text written to agent configuration (`rules/rule-packs/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/configuration_persistence_fetch_execute_content_write.rule`).
+This core pack contains four experimental rules illustrating model-assisted
+detection of:
 
-The rule checks `write_file` and `create_file` calls targeting `AGENTS.md` or
-`.claude/settings.json` for a `curl`/`wget` pipeline to `sh`/`bash`. A match is a
-review lead; it does not establish execution, persistence, or missing approval.
-See the changelog (`rules/rule-packs/core/coding-agents-runtime-behavior-rules/CHANGELOG.md`) for coverage limits.
+- Changes to agent configuration containing download-and-execute commands.
+- Attempts to override agent instructions or approval controls.
+- Sensitive data sent through tool calls.
+- Access to credential stores or sensitive files through tool calls.
 
-Synthetic validation cases stay outside the pack:
+Each rule uses readable word and phrase prefilters to select tool-call content
+for a model judge. The rules and their policy texts describe the inspected
+surfaces and their limits. Configure each model alias and policy text, and bind
+the required threshold before running a rule. Thresholds and detection accuracy
+have not been calibrated for these examples.
 
-- Positive example (`rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/positive/agents_download_shell.json`)
-- Negative example (`rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/download_without_execution.json`)
-- All expected results (`rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/expectations.yaml`): 3 positive and 5 negative cases.
-
-From the repository root, run `uv run --frozen python rules/validate.py` to validate the corpus.
+The matching and nonmatching examples are under
+`rules/test-cases/core/coding-agents-runtime-behavior-rules/`, separate from the
+rules. From the repository root, run `uv run --frozen python rules/validate.py`
+to validate the corpus. Offline validation compiles model-dependent rules and
+checks the case inputs, but does not evaluate their verdicts. Test configured
+models against representative data before relying on these rules.

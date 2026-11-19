@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Detection rule packs
 
-This directory contains maintained detection rules and their synthetic validation
+This directory contains maintained detection rules and their example validation
 cases. The examples (`examples/README.md`) teach Quarry's language and integrations.
 
 ```text
@@ -28,7 +28,6 @@ rules/
     metadata-schema.yaml
     core/
       coding-agents-runtime-behavior-rules/
-        CHANGELOG.md
         <rule-stem>/
           <rule-stem>.rule
           README.md                  # optional
@@ -36,7 +35,6 @@ rules/
           resources/                 # optional
     community/
       <publisher>/
-        publisher.yaml
         <pack>/                      # same contents as a core pack
   test-cases/
     corpus-manifest.json
@@ -57,7 +55,7 @@ maintained by their contributors, with repository maintainers reviewing changes.
 ## Contribution guidelines
 
 Follow the [rule contribution guidelines](rules-contribution-guidelines.md)
-for accepted names, existing-rule comparisons, publisher details, synthetic
+for accepted names, existing-rule comparisons, publisher namespaces, example
 cases, attribution, and submission evidence. The
 repository contribution guide (`CONTRIBUTING.md`)
 covers the general pull request process. Anyone may improve an existing rule;
@@ -69,13 +67,15 @@ redundancy, relevance, and provenance before accepting a contribution.
 
 ## Included example packs
 
-Each pack currently contains one experimental example `.rule` file:
+The core pack contains four model-judged example rules. The community pack
+contains one local rule:
 
 - Core: coding agents runtime behavior (`rules/rule-packs/core/coding-agents-runtime-behavior-rules/README.md`)
-  checks download-to-shell text written to agent configuration.
+  covers instruction control, sensitive data access, data transfer, and
+  suspicious text written to agent configuration.
 - Community: Example Labs shell review (`rules/rule-packs/community/example-labs/shell-review/README.md`)
   checks download-to-shell commands submitted to shell tools. Example Labs is a
-  synthetic publisher illustrating the community layout.
+  placeholder publisher illustrating the community layout.
 
 Each example has matching `positive/`, `negative/`, and `expectations.yaml` files
 under `rules/test-cases/`, separate from the actual rules.
@@ -112,8 +112,7 @@ files unless recursion is enabled. Select individual files or recurse within a
 chosen pack, such as
 `rules/rule-packs/core/coding-agents-runtime-behavior-rules/`. Configure named text,
 model aliases, and probers in the application; use `compile_policy()` for
-parameterized rules. Publisher YAML is contributor metadata, not scanner
-configuration.
+parameterized rules.
 
 See the pack contract (`rules/rule-packs/README.md`) for identity, metadata, versions, and
 deprecation, and the rule contribution guidelines (`rules/rules-contribution-guidelines.md`)

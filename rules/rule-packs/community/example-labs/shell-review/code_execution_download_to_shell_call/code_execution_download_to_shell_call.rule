@@ -17,12 +17,16 @@
 rule "community/example-labs/shell-review/code_execution_download_to_shell_call"
 metadata:
     title = "Download-to-shell command submitted to a shell tool"
-    description = "Synthetic community example: a known shell tool receives a curl/wget pipeline to sh/bash in its command argument. This flags a command submission, not successful execution or proof that the action was unauthorized."
-    author = "Project Quarry contributors (synthetic publisher example)"
+    description = "Community example: a known shell tool receives a curl/wget pipeline to sh/bash in its command argument. This flags a command submission, not successful execution or proof that the action was unauthorized."
+    author = "Cisco AI Defense"
+    revision = "0"
+    updated = "2026-10-14"
     version = "0.1.0"
     status = "experimental"
     requires_quarry = ">=0.1.0,<0.2.0"
-    threat_type = "code_execution"
+    taxonomy_objective = "Action-Space and Integration Abuse"
+    taxonomy_technique = "Tool Exploitation"
+    taxonomy_subtechnique = "Unsafe System / Browser / File Execution"
     signal_channel = "tool_calls"
 strings:
     $download_shell = "(?i)\b(curl|wget)\b[^\r\n|]*\|[ \t]*(sh|bash)\b" regex

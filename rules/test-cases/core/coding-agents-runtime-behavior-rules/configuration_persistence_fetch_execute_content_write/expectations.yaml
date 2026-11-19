@@ -21,6 +21,10 @@ cases:
     match: true
   positive/windows_config_path.json:
     match: true
+  positive/cursor_powershell_hook.json:
+    match: true
+  negative/caution_in_agent_file.json:
+    match: false
   negative/documentation_example.json:
     match: false
   negative/download_without_execution.json:

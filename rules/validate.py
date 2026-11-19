@@ -35,7 +35,7 @@ from quarry.safety.validator import RuleValidator, validate_conversation
 from quarry.scanner import DSLScanner
 
 _MAX_FILE_BYTES = 2 * 1024 * 1024
-_DOCS = {"README.md", "CHANGELOG.md"}
+_DOCS = {"README.md"}
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _STEM = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
 
@@ -204,29 +204,6 @@ def _rule_identity(path: Path, packs_dir: Path, report: ValidationReport) -> str
     return "/".join(parts[:-1])
 
 
-def _check_publisher(root: Path, path: Path) -> None:
-    document = _load(root, path)
-    publisher = document.get("publisher") if isinstance(document, dict) else None
-    if not isinstance(publisher, dict):
-        raise ValueError("publisher.yaml needs a publisher mapping with id, name, and description")
-    if set(document) != {"publisher"}:
-        raise ValueError(
-            "publisher.yaml contains publisher details only; do not inventory packs or rules"
-        )
-    if publisher.get("id") != path.parent.name:
-        raise ValueError("publisher id must match its directory")
-    for key in ("name", "description"):
-        if not isinstance(publisher.get(key), str) or not publisher[key].strip():
-            raise ValueError(f"publisher {key} must be a nonempty string")
-    maintainers = publisher.get("maintainers", [])
-    if not isinstance(maintainers, list) or not all(isinstance(item, str) for item in maintainers):
-        raise ValueError("publisher maintainers must be a list of strings")
-    if set(publisher) - {"id", "name", "description", "maintainers"}:
-        raise ValueError(
-            "publisher.yaml contains publisher details only; do not inventory packs or rules"
-        )
-
-
 def _expectations(root: Path, directory: Path) -> tuple[list[tuple[Path, dict]], dict[str, str]]:
     data = _load(root, directory / "expectations.yaml")
     if not isinstance(data, dict) or not isinstance(data.get("cases"), dict):
@@ -291,7 +268,7 @@ def _validate_rule(
     deprecated = rule.metadata.get("status") == "deprecated"
     if deprecated:
         report.warnings.append(
-            f"{identity}: deprecated; keep its reason and last supported version in the changelog"
+            f"{identity}: deprecated; document its reason and last supported version in the contribution history"
         )
         if not rule.metadata.get("deprecation_reason"):
             report.warnings.append(f"{identity}: add deprecation_reason metadata")
@@ -306,7 +283,7 @@ def _validate_rule(
     if not compiled.ok or compiled.artifact is None:
         errors = "; ".join(str(item.message) for item in compiled.diagnostics.errors)
         hint = (
-            "; update or remove the unsupported rule and its cases together, recording the last supported commit in the changelog"
+            "; update or remove the unsupported rule and its cases together, recording the last supported commit in the contribution history"
             if deprecated
             else ""
         )
@@ -374,13 +351,6 @@ def validate_repository(repo_root: Path, *, compile_only: bool = False) -> Valid
         return report
     names: set[str] = set()
     consumed = {cases_dir / "corpus-manifest.json"}
-    publishers = {
-        path
-        for path in packs
-        if path.name == "publisher.yaml"
-        and path.relative_to(packs_dir).parts[0] == "community"
-        and len(path.relative_to(packs_dir).parts) == 3
-    }
     rules = [path for path in packs if path.suffix == ".rule"]
     if not rules:
         report.errors.append("no rule files found in rules/rule-packs")
@@ -388,8 +358,6 @@ def validate_repository(repo_root: Path, *, compile_only: bool = False) -> Valid
         identity = None
         try:
             identity = _rule_identity(path, packs_dir, report)
-            if identity.startswith("community/"):
-                publishers.add(packs_dir / "/".join(identity.split("/")[:2]) / "publisher.yaml")
             consumed.update(
                 _validate_rule(root, path, identity, schema, names, compile_only, report)
             )
@@ -398,11 +366,6 @@ def validate_repository(repo_root: Path, *, compile_only: bool = False) -> Valid
             # Existing cases still belong to this failed rule; avoid orphan noise.
             if identity is not None:
                 consumed.update((cases_dir / identity).rglob("*"))
-    for publisher in sorted(publishers):
-        try:
-            _check_publisher(root, publisher)
-        except Exception as exc:
-            report.errors.append(f"{publisher.relative_to(root)}: {exc}")
     for orphan in sorted(set(cases) - consumed):
         report.errors.append(
             f"{orphan.relative_to(root)}: case file has no corresponding rule/expectation"

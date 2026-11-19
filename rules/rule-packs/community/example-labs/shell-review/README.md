@@ -18,17 +18,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Shell review example pack
 
-Synthetic community pack with one experimental example rule:
+Community pack with one experimental example rule:
 download-to-shell command submitted to a shell tool (`rules/rule-packs/community/example-labs/shell-review/code_execution_download_to_shell_call/code_execution_download_to_shell_call.rule`).
-The publisher metadata (`rules/rule-packs/community/example-labs/publisher.yaml`) illustrates a contributor namespace;
-Example Labs is a placeholder publisher.
+Example Labs is a placeholder publisher illustrating a contributor namespace.
 
 The rule checks the `command` argument of `execute_shell`, `run_shell`, and
 `shell` calls for a `curl`/`wget` pipeline to `sh`/`bash`. It detects submitted
-command text; it does not prove execution or missing approval. See the
-changelog (`rules/rule-packs/community/example-labs/shell-review/CHANGELOG.md`) for coverage limits.
+command text; it does not prove execution or missing approval. Coverage is
+limited to these named tools and the literal command pipeline.
 
-Synthetic validation cases stay outside the pack:
+Example validation cases stay outside the pack:
 
 - Positive example (`rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/positive/curl_shell_command.json`)
 - Negative example (`rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/negative/shell_download_for_review.json`)

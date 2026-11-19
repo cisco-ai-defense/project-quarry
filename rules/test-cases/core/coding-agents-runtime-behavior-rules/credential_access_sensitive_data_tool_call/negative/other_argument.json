@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review this example workflow."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "arguments": "{\"content\": \"gh auth token\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

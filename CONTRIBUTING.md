@@ -49,7 +49,7 @@ Avoid narrow elapsed-time assertions in required CI tests; measure throughput se
 
 See the [rule-pack workflow](rules/README.md) and
 [rule contribution guidelines](rules/rules-contribution-guidelines.md) for rule
-layout, metadata, synthetic cases, and review requirements. Check existing core
+layout, metadata, example cases, and review requirements. Check existing core
 and community rules before adding overlapping coverage. Anyone may improve an
 existing rule; preserve original attribution and add contributor credit.
 

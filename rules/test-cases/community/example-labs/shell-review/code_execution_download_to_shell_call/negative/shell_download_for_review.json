@@ -2,7 +2,7 @@
   "messages": [
     {
       "role": "user",
-      "content": "Inspect this synthetic workflow."
+      "content": "Inspect this example workflow."
     },
     {
       "role": "assistant",

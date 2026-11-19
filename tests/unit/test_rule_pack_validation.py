@@ -31,7 +31,7 @@ from rules.validate import main, validate_repository
 
 _MARKER = "QUARRY_FIXTURE_MATCH"
 _REQUIRED_METADATA = {
-    "description": "Detect a synthetic fixture marker.",
+    "description": "Detect an example fixture marker.",
     "author": "Quarry contributors",
     "version": "0.1.0",
     "status": "experimental",
@@ -54,7 +54,7 @@ def _manifest(repo: Path) -> None:
     cases = repo / "rules/test-cases"
     inventory: dict[str, list[str]] = {"rules": [], "resources": [], "test_cases": []}
     for path in sorted(packs.rglob("*")):
-        if path.is_file() and path.name not in {"README.md", "CHANGELOG.md"}:
+        if path.is_file() and path.name != "README.md":
             category = "rules" if path.suffix == ".rule" else "resources"
             inventory[category].append(path.relative_to(repo).as_posix())
     for path in sorted(cases.rglob("*")):
@@ -105,7 +105,7 @@ def _add_rule(
     )
     _write_json(
         case_dir / "negative/does_not_match.json",
-        {"messages": [{"role": "user", "content": "ordinary synthetic request"}]},
+        {"messages": [{"role": "user", "content": "ordinary example request"}]},
     )
     _write_yaml(
         case_dir / "expectations.yaml",
@@ -166,7 +166,7 @@ def test_incomplete_scans_cannot_pass_as_clean_fixture_verdicts(
         DSLScanner,
         "scan_data",
         lambda *args, **kwargs: SimpleNamespace(
-            is_complete=False, completion_issues=["synthetic evaluation timeout"], rule_matches=[]
+            is_complete=False, completion_issues=["example evaluation timeout"], rule_matches=[]
         ),
     )
 
@@ -191,7 +191,7 @@ def test_positive_fixture_can_require_match_evidence(corpus: Path) -> None:
 
 def test_manifest_must_include_new_resource(corpus: Path) -> None:
     rule, _ = _add_rule(corpus)
-    (rule.parent / "prompt.txt").write_text("Synthetic policy text.", encoding="utf-8")
+    (rule.parent / "prompt.txt").write_text("Example policy text.", encoding="utf-8")
 
     report = validate_repository(corpus)
 
@@ -202,7 +202,7 @@ def test_manifest_must_include_new_resource(corpus: Path) -> None:
 def test_manifest_must_drop_removed_file(corpus: Path) -> None:
     rule, _ = _add_rule(corpus)
     resource = rule.parent / "prompt.txt"
-    resource.write_text("Synthetic policy text.", encoding="utf-8")
+    resource.write_text("Example policy text.", encoding="utf-8")
     _manifest(corpus)
     resource.unlink()
 
@@ -432,65 +432,14 @@ def test_incompatible_deprecated_rule_has_actionable_failure(corpus: Path) -> No
     assert any("update" in error.lower() or "remove" in error.lower() for error in report.errors)
 
 
-def test_community_publisher_id_must_match_its_directory(corpus: Path) -> None:
+def test_community_pack_validates_without_publisher_metadata(corpus: Path) -> None:
     _add_rule(corpus, pack="community/fixture-author/fixture-pack")
-    _write_yaml(
-        corpus / "rules/rule-packs/community/fixture-author/publisher.yaml",
-        {
-            "publisher": {
-                "id": "different-author",
-                "name": "Fixture author",
-                "description": "Synthetic publisher for unit validation.",
-                "maintainers": ["fixture-author"],
-            }
-        },
-    )
-    _manifest(corpus)
 
     report = validate_repository(corpus)
 
-    assert not report.ok
-    assert any("publisher" in error.lower() and "id" in error.lower() for error in report.errors)
-
-
-def test_publisher_without_rules_is_still_validated(corpus: Path) -> None:
-    _add_rule(corpus)
-    publisher = corpus / "rules/rule-packs/community/unused-publisher/publisher.yaml"
-    publisher.parent.mkdir(parents=True)
-    publisher.write_text("publisher: [unterminated\n", encoding="utf-8")
-    _manifest(corpus)
-
-    report = validate_repository(corpus)
-
-    assert not report.ok
+    assert report.ok, report.errors
     assert report.compiled_rules == 1
-    assert any("unused-publisher/publisher.yaml" in error for error in report.errors)
-
-
-@pytest.mark.parametrize("inventory_field", ["packs", "rules"])
-def test_publisher_file_rejects_top_level_pack_or_rule_inventory(
-    corpus: Path, inventory_field: str
-) -> None:
-    _add_rule(corpus, pack="community/fixture-author/fixture-pack")
-    _write_yaml(
-        corpus / "rules/rule-packs/community/fixture-author/publisher.yaml",
-        {
-            "publisher": {
-                "id": "fixture-author",
-                "name": "Fixture author",
-                "description": "Synthetic publisher for unit validation.",
-                "maintainers": ["fixture-author"],
-            },
-            inventory_field: ["fixture-pack"],
-        },
-    )
-    _manifest(corpus)
-
-    report = validate_repository(corpus)
-
-    assert not report.ok
-    assert report.compiled_rules == 1
-    assert any("publisher.yaml" in error for error in report.errors)
+    assert report.passed_cases == 2
 
 
 def test_cli_returns_failure_for_invalid_corpus_and_success_for_valid_corpus(corpus: Path) -> None:

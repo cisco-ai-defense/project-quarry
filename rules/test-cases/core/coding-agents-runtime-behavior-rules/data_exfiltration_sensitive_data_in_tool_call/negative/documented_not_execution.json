@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Inspect this example workflow."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "shell",
+            "arguments": "{\"description\": \"Documentation: avoid sending passwords using curl.\", \"command\": \"echo hello\"}"
+          }
+        }
+      ]
+    }
+  ]
+}
