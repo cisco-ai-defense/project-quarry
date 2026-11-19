@@ -57,7 +57,7 @@ def scan(condition, strings, data, strategy, explain):
     if strategy == "compiled":
         return policy.scan(data, explain=explain)
     wire = policy.to_bytes()
-    assert json.loads(wire)["rule"]["artifact"]["compiler_version"] == "compiler-25"
+    assert json.loads(wire)["rule"]["artifact"]["compiler_version"] == "compiler-27"
 
     def forbidden(*args, **kwargs):
         raise AssertionError("unchanged compiler21 artifact entered parser/compiler")

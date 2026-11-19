@@ -93,7 +93,7 @@ from quarry.types.dsl import (
     UnaryOp,
     condition_child_fields,
 )
-from quarry.types.dsl.render import render_condition
+from quarry.types.dsl.render import ConditionRenderError, render_condition
 from quarry.types.dsl.traversal import walk_condition_nodes
 
 
@@ -1428,6 +1428,15 @@ def _compile(
     try:
         with spending(budget):
             return _attempt(rule, bind, decompose, response_schemas, transforms)
+    except ConditionRenderError:
+        name = str(getattr(rule, "name", "") or "")
+        diagnostics = Diagnostics()
+        diagnostics.error(
+            "the condition cannot be rendered safely for compiler diagnostics",
+            ErrorCategory.UNSUPPORTED,
+            SourceRef(rule_name=name),
+        )
+        return CompileResult(name, None, diagnostics), False, []
     except RecursionError:
         name = str(getattr(rule, "name", "") or "")
         diagnostics = Diagnostics()

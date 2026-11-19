@@ -81,6 +81,29 @@ Unknown exceptions are never treated as a clean result. A directly raised except
 caller cancellation or `fail_on_timeout`, retains its existing behavior and does not become a
 returned failure record.
 
+To render a parsed condition back to public DSL syntax, use the bounded renderer:
+
+```python
+from quarry.dsl.parser import DSLParser
+from quarry.types.dsl.render import ConditionRenderError, render_condition
+
+rule = DSLParser().parse('rule "Read" condition: messages[0].content == "🔥"')
+written = render_condition(rule.condition)
+assert DSLParser().parse('rule "Read" condition: ' + written).condition == rule.condition
+```
+
+`render_condition` preserves the grammar's precedence and literal/regex spelling semantics.
+Its keyword limits default to `max_nodes=50_000`, `max_depth=128` and
+`max_output=1_000_000`; each must be a positive plain integer. Rendering uses iterative graph
+validation and output traversal. Unsupported or malformed nodes, cycles and exceeded limits
+raise `ConditionRenderError`. Scalar and container subclasses are rejected rather than
+converted through host callbacks. Compiler and visualization entry points convert rendering
+failures to bounded diagnostics. Rendering a parsed condition does not require its source text.
+Internal diagnostic placeholders retain their established display conventions; for example,
+an empty internal transform displays as `messages.transform()`.
+Extraction keeps its parsed operation and argument count: selection/alias receivers retain
+function-call spelling, and explicit trailing `null` bounds retain positional spelling.
+
 For batches, `rule_name` uses `conv_N:rule` for rule failures and `conv_N` for a whole-child
 failure. The batch can also carry an unattributed `unknown` record for its aggregate error
 summary. An empty batch has `invalid_input`. Both matched and unmatched complete scans have

@@ -43,8 +43,8 @@ A value alias such as `(user_messages as messages)` applies to subsequent clause
 `and` chain. A nested parenthesized chain keeps its own declarations, which can shadow
 outer names inside that chain. Earlier clauses and earlier alias values keep their
 original meaning; an inner initializer can read an outer alias without capturing its
-later local uses. Called rules keep their own alias scope. Compiler 25 records these
-rules; saved compiler-24 policies require recompilation from rule source. Compiled-policy
+later local uses. Called rules keep their own alias scope. Compiler 27 retains these
+rules; older compiled policies require recompilation from rule source. Compiled-policy
 format 10 also retains declared resource requirements when constant folding removes an
 expression. Reload validates the same model configuration and capabilities as source
 compilation, without dispatching a model for an expression skipped at runtime.
@@ -55,6 +55,25 @@ short-circuiting still skips model inputs and calls that cannot affect the verdi
 Alias expansion is limited to 100,000 condition-node occurrences per rule and shares the
 rule's compile-work budget. Reusing a value counts each occurrence. Exceeding either limit
 rejects the rule before another expansion.
+
+Rendered conditions preserve operator precedence, nested alias groups, Unicode scalar values,
+regex spelling, comprehensions and public span/extraction syntax. The compiler and plugin use
+the same grammar-faithful labels. Pattern blocks omit parentheses that their grammar cannot
+parse; linked-call diagnostics retain qualified callee string names.
+Function-call extraction keeps its function spelling for message selections and aliases,
+whose `.extract(...)` method has a different parsed operation. Explicit trailing `null`
+defaults use positional spelling so rendering retains every authored AST argument.
+
+A message selection or composed value cannot serve as a Boolean verdict, including in a
+constant-folded branch. Pass it to a condition-producing operation or compare a scalar result.
+For a trailing value absorbed into an `any ... where ...` or `all ... where ...` body, the
+compiler gives bounded parenthesis guidance. These diagnostics respect local shadowing and
+analyze shared expression graphs within fixed work and depth bounds.
+
+Compiler 27 corrects stored extraction labels and explicit default-bound spelling while
+retaining executable-array normalization and load-time composition diagnostics.
+Serialized format 10 is unchanged. Recompile saved compiler-26 and earlier
+policies from their original rule source before loading them with this compiler.
 
 ```text
 rule "Repeated shell requests"

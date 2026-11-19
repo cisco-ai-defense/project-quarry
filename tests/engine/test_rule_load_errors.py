@@ -290,7 +290,7 @@ _REJECTED = [
     ),
     pytest.param(
         _rule("[c.name for c in tool_calls]"),
-        "a map comprehension outside join() must produce message values",
+        "a message selection or composed value cannot be used as a Boolean verdict",
         id="map-comprehension-as-a-condition",
     ),
     pytest.param(
@@ -300,7 +300,7 @@ _REJECTED = [
     ),
     pytest.param(
         _rule("[c.name for c in messages[-1].tool_calls]"),
-        "a map comprehension outside join() must produce message values",
+        "a message selection or composed value cannot be used as a Boolean verdict",
         id="map-comprehension-over-the-newest-message-as-a-condition",
     ),
     pytest.param(
