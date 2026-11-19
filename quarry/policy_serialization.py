@@ -95,6 +95,7 @@ _RESOURCE_REQUIREMENT_KEYS = frozenset(
         "model_span_models",
         "text_resources",
         "model_operations",
+        "model_trim_limits",
         "transforms",
     }
 )
@@ -1098,7 +1099,7 @@ def _declared_resources_from_wire(raw: object) -> dict[str, frozenset]:
     for name, members in value.items():
         checked = []
         for member in _list(members, f"declared_resources.{name}"):
-            if name in {"model_operations", "transforms"}:
+            if name in {"model_operations", "model_trim_limits", "transforms"}:
                 row = _list(member, f"declared_resources.{name}[]")
                 if len(row) != 2:
                     raise _fail("a declared operation or transform requires two values")
@@ -1119,6 +1120,13 @@ def _declared_resources_from_wire(raw: object) -> dict[str, frozenset]:
                         "spans",
                     }:
                         raise _fail("declared model operation is unsupported")
+                    if name == "model_trim_limits" and operation not in {
+                        "score",
+                        "classify",
+                        "complete",
+                        "spans",
+                    }:
+                        raise _fail("declared trim operation is unsupported")
                     checked.append((alias, operation))
             else:
                 checked.append(_string(member, f"declared_resources.{name}[]"))

@@ -150,6 +150,7 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "model": str,
     },
     "score": {
+        "max_input_tokens": int,
         "message_builder": str,
         "boundary_seed": int,
         "tokens": {"negative": str, "positive": str},
@@ -159,12 +160,13 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "explanation": {"max_tokens": int},
     },
     "classify": {
+        "max_input_tokens": int,
         "class_index": int,
         "instructions": str,
         "labels": _LIST_OR_MAPPING,
     },
-    "spans": {"class_index": int},
-    "complete": {"response_schema": _ANY_MAPPING},
+    "spans": {"class_index": int, "max_input_tokens": int},
+    "complete": {"response_schema": _ANY_MAPPING, "max_input_tokens": int},
 }
 
 
@@ -180,6 +182,12 @@ class InputTokensConfig:
 
 _MIN_EXPLANATION_TOKENS = 16
 _MAX_EXPLANATION_TOKENS = 4096
+
+
+def _input_token_limit(value: object) -> int | None:
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ValueError("max_input_tokens must be a positive integer")
+    return value
 
 
 def _explanation_token_budget(value: object, reasoning: int | None, owner: str) -> int:
@@ -214,8 +222,10 @@ class ScoreConfig:
     reasoning_max_tokens: int | None = None
     # A short user-facing explanation, separately opted into from private reasoning.
     explanation_max_tokens: int | None = None
+    max_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
+        _input_token_limit(self.max_input_tokens)
         if self.explanation_max_tokens is not None:
             _explanation_token_budget(
                 self.explanation_max_tokens, self.reasoning_max_tokens, "score"
@@ -231,6 +241,10 @@ class ClassifyConfig:
     # this order, each with an optional description. A fixed-head classifier ignores both.
     instructions: str | None = None
     labels: tuple[tuple[str, str | None], ...] | None = None
+    max_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        _input_token_limit(self.max_input_tokens)
 
 
 @dataclass(frozen=True)
@@ -238,6 +252,10 @@ class SpanConfig:
     """Select the adapter's span output class for a model alias."""
 
     class_index: int
+    max_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        _input_token_limit(self.max_input_tokens)
 
 
 @dataclass(frozen=True)
@@ -248,6 +266,10 @@ class CompleteConfig:
     # the matching object by field (``.json.label``), and a reply that does not match is a
     # refused call. See ``quarry.types.response_schema`` for the supported subset.
     response_schema: str
+    max_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        _input_token_limit(self.max_input_tokens)
 
 
 @dataclass(frozen=True)
@@ -274,6 +296,10 @@ class InferenceModelConfig:
         """
 
         document = asdict(self)
+        for operation in ("score", "classify", "spans", "complete"):
+            section = document[operation]
+            if section is not None and section.get("max_input_tokens") is None:
+                section.pop("max_input_tokens", None)
         if self.score is not None and self.score.explanation_max_tokens is None:
             document["score"].pop("explanation_max_tokens")
         return document
@@ -1484,11 +1510,15 @@ def _parse_complete_config(
     owner = owner or f"Inference model '{model_name}' complete"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
-    _reject_unknown_fields(value, {"response_schema"}, owner)
+    _reject_unknown_fields(value, {"response_schema", "max_input_tokens"}, owner)
     if "response_schema" not in value:
         raise ValueError(f"{owner} requires a 'response_schema'")
+    limit = _input_token_limit(value.get("max_input_tokens"))
     try:
-        return CompleteConfig(response_schema=response_schema_text(value["response_schema"]))
+        return CompleteConfig(
+            response_schema=response_schema_text(value["response_schema"]),
+            max_input_tokens=limit,
+        )
     except ValueError as exc:
         raise ValueError(f"{owner} response_schema {exc}") from exc
 
@@ -1505,7 +1535,9 @@ def _parse_classify_config(
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
-    _reject_unknown_fields(fields, {"class_index", "instructions", "labels"}, owner)
+    _reject_unknown_fields(
+        fields, {"class_index", "instructions", "labels", "max_input_tokens"}, owner
+    )
     class_index = fields.get("class_index")
     if isinstance(class_index, bool) or not isinstance(class_index, int) or class_index < 0:
         raise ValueError(f"{owner} requires a non-negative integer 'class_index'")
@@ -1513,7 +1545,12 @@ def _parse_classify_config(
     labels = _parse_classify_labels(fields["labels"], owner) if "labels" in fields else None
     if labels is not None and class_index >= len(labels):
         raise ValueError(f"{owner} class_index {class_index} is outside its {len(labels)} labels")
-    return ClassifyConfig(class_index=class_index, instructions=instructions, labels=labels)
+    return ClassifyConfig(
+        class_index=class_index,
+        instructions=instructions,
+        labels=labels,
+        max_input_tokens=_input_token_limit(fields.get("max_input_tokens")),
+    )
 
 
 def _parse_classify_labels(value: object, owner: str) -> tuple[tuple[str, str | None], ...]:
@@ -1551,11 +1588,13 @@ def _parse_span_config(
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
-    _reject_unknown_fields(fields, {"class_index"}, owner)
+    _reject_unknown_fields(fields, {"class_index", "max_input_tokens"}, owner)
     class_index = fields.get("class_index")
     if isinstance(class_index, bool) or not isinstance(class_index, int) or class_index < 0:
         raise ValueError(f"{owner} requires a non-negative integer 'class_index'")
-    return SpanConfig(class_index=class_index)
+    return SpanConfig(
+        class_index=class_index, max_input_tokens=_input_token_limit(fields.get("max_input_tokens"))
+    )
 
 
 def _parse_input_tokens(
@@ -1615,6 +1654,7 @@ def _parse_score_config(
             "calibration",
             "reasoning",
             "explanation",
+            "max_input_tokens",
         },
         owner,
     )
@@ -1682,6 +1722,7 @@ def _parse_score_config(
         ),
         reasoning_max_tokens=reasoning_max_tokens,
         explanation_max_tokens=explanation_max_tokens,
+        max_input_tokens=_input_token_limit(fields.get("max_input_tokens")),
     )
 
 
