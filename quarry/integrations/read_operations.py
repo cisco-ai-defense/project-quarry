@@ -477,6 +477,22 @@ def handoff_model_read():
     return _DISABLED if read is None or read._closed else _HandoffScope(read)
 
 
+def transfer_model_read():
+    """Consume an owned dispatch handoff and bind its replacement at the destination.
+
+    Copying a Context alone must never grant adoption to another task. The submitting
+    task first claims its existing single-use handoff with all normal ownership checks;
+    entering this scope then creates a handoff owned by the actual host invocation.
+    """
+    read = current_model_read()
+    pending = _PENDING.get()
+    if read is None or pending is None:
+        return _DISABLED
+    session = current_read_usage()
+    claimed = pending.claim(session, read.model, read.operation)
+    return _DISABLED if claimed is None else _HandoffScope(claimed)
+
+
 def current_model_read() -> ModelRead | None:
     read = _CURRENT.get()
     session = current_read_usage()

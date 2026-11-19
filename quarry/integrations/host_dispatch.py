@@ -7,13 +7,15 @@ from functools import partial
 from types import MethodType
 
 from quarry.async_runtime import call_host, call_host_sync
+from quarry.integrations.read_operations import transfer_model_read
 
 
-async def _await_backend(operation, *args, **kwargs):
+async def _await_backend(operation, handoff, *args, **kwargs):
     try:
-        return await operation(*args, **kwargs)
+        with handoff:
+            return await operation(*args, **kwargs)
     finally:
-        del operation, args, kwargs
+        del operation, handoff, args, kwargs
 
 
 async def call_backend(operation, *args, **kwargs):
@@ -26,7 +28,9 @@ async def call_backend(operation, *args, **kwargs):
             and getattr(ModelInferenceBackend, operation.__name__, None) is operation.__func__
         ):
             return await operation(*args, **kwargs)
-        return await call_host(partial(_await_backend, operation, *args, **kwargs))
+        return await call_host(
+            partial(_await_backend, operation, transfer_model_read(), *args, **kwargs)
+        )
     finally:
         del operation, args, kwargs
 

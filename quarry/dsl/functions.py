@@ -44,7 +44,8 @@ async def _classify(ctx, model_name: str, text: str, class_index: int) -> float:
     discards responses rejected by the reader.
     """
     with handoff_model_read():
-        return await _inference_backend(ctx).model_classification(
+        return await call_backend(
+            _inference_backend(ctx).model_classification,
             model_name,
             text,
             read=lambda result: _extract_max_probability(result, class_index=class_index),
