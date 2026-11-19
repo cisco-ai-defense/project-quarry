@@ -171,22 +171,27 @@ rule version asked first, so scanning the same conversations again, with a new v
 a rule or another threshold, costs no model call for what was already scored. The threshold is not
 part of a score's input. Scans that send identical input share its result, whoever sends it;
 nothing else is shared, but a reused result returns faster than a new call. The server shares
-one cache across all its rules, as every `DSLScanner` does across its own scans (see
-[USAGE.md](USAGE.md#result-caching)).
+one cache across all its rules, as every `DSLScanner` does across its own scans.
 
 Results are keyed by a digest of the request each call sends (the operation, the adapter, the
 model's provider settings and the payload's inputs), which the key does not retain.
 Results expire `model_cache.ttl_seconds` after their last use (12 hours by default). Past
-`model_cache.max_entries` (100,000 by default, counting model, regex and prober results alike) the least recently used result is dropped:
+`model_cache.max_entries` (100,000 by default, counting model, regex and prober results alike), or
+past `model_cache.max_bytes` of estimated retained result data (256 MiB by default), the least
+recently used completed result is dropped:
 
 ```yaml
 model_cache:
   ttl_seconds: 43200
   max_entries: 100000
+  max_bytes: 268435456
 ```
 
 The cache lives in the server process, so a host keeps one server running across scans to
-benefit from it. A shared call is made under the model-call budget and deadline of the scan
+benefit from it. The byte estimate and its exclusions are documented in
+[Configuration](configuration.md#process-result-cache). A result larger than the byte bound is
+returned but not cached; a running call remains shared and is never evicted. A shared call is made
+under the model-call budget and deadline of the scan
 that started it; another scan waiting on it that sees it fail because that scan ran out of time or budget retries under its own, and any other failure reaches every waiter. An
 output that fails Quarry's checks after the call, such as a completion outside its response
 schema, is dropped, so the next scan asks the model again.

@@ -1328,23 +1328,48 @@ async def test_a_server_keeps_no_text_completion_llm_complete_refused(tmp_path, 
     assert adapter.calls == 2
 
 
-def test_the_model_cache_is_configured_by_its_own_block(tmp_path) -> None:
-    """``model_cache`` defaults to results kept 12 hours after their last hit, and
-    refuses fields or values it does not support."""
+def test_the_model_cache_is_configured_by_its_own_block_with_telemetry(
+    tmp_path, monkeypatch
+) -> None:
+    """``model_cache`` defaults bound result age, count and retained bytes, and reject
+    fields or values it does not support."""
 
     def config(**settings) -> QuarryConfig:
         return QuarryConfig.from_mapping(
             {"config_version": 2, **settings}, tmp_path, require_rules=False
         )
 
-    assert (config().model_cache.ttl_seconds, config().model_cache.max_entries) == (
+    assert (
+        config().model_cache.ttl_seconds,
+        config().model_cache.max_entries,
+        config().model_cache.max_bytes,
+    ) == (
         43_200.0,
         100_000,
+        268_435_456,
     )
-    assert config(model_cache={"ttl_seconds": 60}).model_cache.ttl_seconds == 60
-    for invalid in ({"ttl_seconds": 0}, {"max_entries": True}, {"ttl": 60}, []):
+    configured = config(
+        model_cache={"ttl_seconds": 60, "max_entries": 10, "max_bytes": 4096}
+    ).model_cache
+    assert (configured.ttl_seconds, configured.max_entries, configured.max_bytes) == (60, 10, 4096)
+    for invalid in (
+        {"ttl_seconds": 0},
+        {"max_entries": True},
+        {"max_bytes": 0},
+        {"max_bytes": 1.5},
+        {"ttl": 60},
+        [],
+    ):
         with pytest.raises(ConfigurationError):
             config(model_cache=invalid)
+
+    applied = {}
+    monkeypatch.setattr(
+        "quarry.plugin.service.result_cache.configure",
+        lambda **bounds: applied.update(bounds),
+    )
+    QuarryPlugin(config(model_cache={"ttl_seconds": 90, "max_entries": 8, "max_bytes": 2048}))
+    assert applied == {"ttl_seconds": 90, "max_entries": 8, "max_bytes": 2048}
 
 
 async def test_a_parameterized_batch_scan_reports_each_conversation(tmp_path, monkeypatch):
@@ -2820,6 +2845,25 @@ async def test_a_caller_changing_a_scan_result_does_not_change_the_next_scan():
 
     assert second["compilation"]["rule_names"] == ["r"]
     assert first["matched"] is second["matched"] is True
+
+
+def test_the_model_cache_is_configured_by_its_own_block(tmp_path) -> None:
+    """``model_cache`` defaults to results kept 12 hours after their last hit, and
+    refuses fields or values it does not support."""
+
+    def config(**settings) -> QuarryConfig:
+        return QuarryConfig.from_mapping(
+            {"config_version": 2, **settings}, tmp_path, require_rules=False
+        )
+
+    assert (config().model_cache.ttl_seconds, config().model_cache.max_entries) == (
+        43_200.0,
+        100_000,
+    )
+    assert config(model_cache={"ttl_seconds": 60}).model_cache.ttl_seconds == 60
+    for invalid in ({"ttl_seconds": 0}, {"max_entries": True}, {"ttl": 60}, []):
+        with pytest.raises(ConfigurationError):
+            config(model_cache=invalid)
 
 
 def test_reference_publishes_model_alias_operations_and_optional_descriptions(

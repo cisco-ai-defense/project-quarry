@@ -350,6 +350,7 @@ class QuarryPlugin:
             result_cache.configure(
                 max_entries=runtime_config.model_cache.max_entries,
                 ttl_seconds=runtime_config.model_cache.ttl_seconds,
+                max_bytes=runtime_config.model_cache.max_bytes,
             )
         self._catalog = get_language_spec()
         self._items = {item["id"]: item for item in self._catalog["items"]}

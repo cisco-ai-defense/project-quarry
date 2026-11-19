@@ -19,6 +19,9 @@
 REGEX_CACHE_SIZE = 1024
 # The process-wide result cache: model responses and regex results by their inputs.
 RESULT_CACHE_MAX_ENTRIES = 100_000
+# Runtime-reported bytes retained by completed result graphs. Keys and cache bookkeeping are
+# outside this estimate; the entry limit independently bounds that metadata.
+RESULT_CACHE_MAX_BYTES = 256 * 1024 * 1024
 RESULT_CACHE_TTL_SECONDS = 43_200.0  # 12 hours after an entry's last use
 # A refused model call is kept this long after it was stored, however often it is read: a
 # scan's reads of the call agree, and a later scan asks the provider again.
