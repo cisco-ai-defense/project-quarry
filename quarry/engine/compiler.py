@@ -2828,6 +2828,10 @@ class _Compiler:
         decoded object, and ``c.arguments.*`` or a list value is one value on each line."""
 
         lowered, lowered_type = self._lower_model_expression(node, scope)
+        if isinstance(node, FieldAccess) and lowered_type in _STEP_TEXT_TYPES:
+            _base, base_type, fields = self._model_field_parts(node, scope)
+            if base_type == "ToolCall" and fields[:1] == ["arguments"]:
+                return ModelExpression("field_text", None, (lowered,)), "string"
         root = _field_root_name(node) if isinstance(node, FieldAccess) else None
         if root is None or scope.resolve_element(root) != _MAP_ITEM_SURFACE:
             return lowered, lowered_type

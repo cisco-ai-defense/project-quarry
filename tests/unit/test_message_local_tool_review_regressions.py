@@ -106,3 +106,36 @@ def test_outer_count_owns_evidence_when_its_filter_contains_a_quantifier(
     assert evidence.expression_value == 1 and type(evidence.expression_value) is int
     assert evidence.operator == "=" and evidence.threshold == 1
     assert evidence.input_span is None
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_indexed_tool_call_argument_arrays_keep_field_text_matching(restored):
+    condition = (
+        'any m in assistant_messages where '
+        'm.tool_calls[0].arguments.items ~ "^a"'
+    )
+    policy = compile_policy('rule "Read" condition: ' + condition)
+    if restored:
+        wire = policy.to_bytes()
+        policy = load_compiled_policy(wire)
+        assert policy.to_bytes() == wire
+    result = policy.scan(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"items":["a","b"]}',
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    assert result.is_complete and result.rule_matches == ["Read"]
