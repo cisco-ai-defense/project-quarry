@@ -40,6 +40,7 @@ from quarry.engine.atoms import (
     ModelExpression,
     model_expression_requires_model,
 )
+from quarry.engine.dispatch import pause_engine
 from quarry.engine.matchers import (
     MISSING,
     PURE_REGEX,
@@ -62,6 +63,7 @@ from quarry.integrations.content_transforms import (
     apply_content_transform,
     compiled_content_transform,
 )
+from quarry.integrations.host_dispatch import call_backend
 from quarry.integrations.message_readability import require_model_messages
 from quarry.integrations.model_head_plan import head_input, head_plan_active
 from quarry.integrations.model_window_evidence import capture_window_result
@@ -788,7 +790,7 @@ async def evaluate_model_expression(
         construction_source = None
         for index, constructor in enumerate(constructors):
             if index and index % 16 == 0:
-                await asyncio.sleep(0)
+                await pause_engine()
             raise_if_evaluation_expired()
             offset = 0 if constructor.kind == "message" else 1
             role = constructor.children[offset].value
@@ -1115,7 +1117,7 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
     for position, item in enumerate(items):
         raise_if_evaluation_expired()
         if pacer.due():
-            await asyncio.sleep(0)
+            await pause_engine()
         if not isinstance(item, ToolCall):
             raise TypeError("a local call collection contains a non-call item")
         item_scope = (*environment.get(_CONSTRUCTION_SCOPE, ()), id(expression), position)
@@ -1203,7 +1205,7 @@ async def _evaluate_message_selection(
     for position, item in enumerate(source):
         raise_if_evaluation_expired()
         if pacer.due():
-            await asyncio.sleep(0)
+            await pause_engine()
         item_environment = {
             **environment,
             variable: _BoundMessage(item, source[position : position + 1])
@@ -1256,7 +1258,7 @@ async def _evaluate_message_selection(
                 for selected in part:
                     raise_if_evaluation_expired()
                     if pacer.due():
-                        await asyncio.sleep(0)
+                        await pause_engine()
                     output_characters += len(selected.content)
                     if output_characters > MAX_MESSAGE_MAP_CHARACTERS:
                         raise ValueError(
@@ -1566,7 +1568,7 @@ async def _evaluate_string_spans(expression, context, event, environment, trace,
             _check_span_limit(context, len(items) + 1, f"{producer}.spans() spans")
             if pacer.due():
                 raise_if_evaluation_expired()
-                await asyncio.sleep(0)
+                await pause_engine()
             span = text.span(begin, end)
             identity = json.dumps(
                 [
@@ -1917,7 +1919,8 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
                     if operation in {"classify", "complete"} and arguments
                     else None
                 )
-                result = await backend.model_trim_messages(
+                result = await call_backend(
+                    backend.model_trim_messages,
                     alias,
                     operation,
                     *values[:2],
@@ -2094,13 +2097,18 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
             and isinstance(backend.model_judge_messages, MethodType)
             and backend.model_judge_messages.__func__ is ModelInferenceBackend.model_judge_messages
         ):
-            judged = await backend.model_judge_messages(
-                alias, constitution, messages, tools, timeout=context.limits.rule_timeout
+            judged = await call_backend(
+                backend.model_judge_messages,
+                alias,
+                constitution,
+                messages,
+                tools,
+                timeout=context.limits.rule_timeout,
             )
             result, reason = judged.score, judged.reason
         else:
-            result = await numeric(
-                alias, constitution, messages, tools, timeout=context.limits.rule_timeout
+            result = await call_backend(
+                numeric, alias, constitution, messages, tools, timeout=context.limits.rule_timeout
             )
         result = _finite(result)
         _record_call(trace, context, expression, alias, operation, arguments, result)
@@ -2111,7 +2119,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         messages, *optional = arguments
         with capture_window_result(trace is not None) as window:
             result = _finite(
-                await backend.model_classify_messages(
+                await call_backend(
+                    backend.model_classify_messages,
                     alias,
                     messages,
                     optional[0] if optional else None,
@@ -2130,7 +2139,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         if not isinstance(messages, Messages):
             raise TypeError("model().spans() input must be Messages")
         messages.assert_self_contained()
-        result = await backend.model_span_messages(
+        result = await call_backend(
+            backend.model_span_messages,
             alias,
             messages,
             threshold,
@@ -2142,7 +2152,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     if operation == "complete":
         messages, *optional = arguments
         # With a response schema the result also carries its JSON content as `.json`.
-        result = await backend.model_complete(
+        result = await call_backend(
+            backend.model_complete,
             alias,
             messages,
             optional[0] if optional else None,
@@ -2154,7 +2165,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         return result
     if operation == "input_tokens":
         messages, *optional = arguments
-        result = await backend.model_input_tokens_messages(
+        result = await call_backend(
+            backend.model_input_tokens_messages,
             alias,
             messages,
             optional[0] if optional else None,
@@ -2165,7 +2177,8 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     if operation == "split":
         messages, max_input_tokens, *optional = arguments
         overlap, split_context = [*optional, None, None][:2]
-        result = await backend.model_split_messages(
+        result = await call_backend(
+            backend.model_split_messages,
             alias,
             messages,
             max_input_tokens,
@@ -2436,7 +2449,7 @@ async def _evaluate_model_text(expression, context, event, bindings, trace, rege
         # The items are synchronous work, so stop at the rule deadline and let other tasks run.
         raise_if_evaluation_expired()
         if pacer.due():
-            await asyncio.sleep(0)
+            await pause_engine()
         bound = (
             _BoundMessage(item, source[position : position + 1])
             if isinstance(source, Messages)

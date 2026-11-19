@@ -153,6 +153,25 @@ def scan_deadline(
 
 
 @contextmanager
+def absolute_scan_deadline(
+    deadline: EvaluationDeadline | None,
+) -> Generator[EvaluationDeadline | None, None, None]:
+    """Resume an already-started scan budget without charging later evidence work."""
+
+    current = _current_scan_deadline.get()
+    active = (
+        deadline
+        if current is None or (deadline is not None and deadline.expires_at < current.expires_at)
+        else current
+    )
+    token = _current_scan_deadline.set(active)
+    try:
+        yield active
+    finally:
+        _current_scan_deadline.reset(token)
+
+
+@contextmanager
 def without_rule_deadline() -> Generator[None, None, None]:
     """Clear only the caller's rule deadline while retaining the scan cap."""
 
