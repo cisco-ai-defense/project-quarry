@@ -318,19 +318,19 @@ def _parameters(*declarations: str, condition: str) -> str:
         pytest.param(
             _parameters("threshold: number request", condition="true"),
             RuleParseError,
-            "'condition') at line 4, column 1",
+            "Unexpected token `condition` at line 4, column 1",
             id="unknown-binding",
         ),
         pytest.param(
             _parameters("params: number", condition="true"),
             RuleParseError,
-            "'params') at line 3, column 5",
+            "Unexpected token `params` at line 3, column 5",
             id="parameter-named-params",
         ),
         pytest.param(
             _parameters("policy: text", condition="true"),
             RuleParseError,
-            "'policy') at line 3, column 5",
+            "Unexpected token `policy` at line 3, column 5",
             id="parameter-named-policy",
         ),
     ],

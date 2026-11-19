@@ -6,8 +6,9 @@
 import pytest
 
 from quarry.config import QuarryConfig
+from quarry.dsl.parser import DSLParser
 from quarry.scanner import DSLScanner
-from quarry.types.exceptions import RuleValidationError
+from quarry.types.exceptions import RuleParseError, RuleValidationError
 
 _PI = 'rule "PI"\ncondition:\n    user_said("ignore")\n'
 _CALLER = 'rule "R"\nimports:\n    pi = "PI"\ncondition:\n'
@@ -17,6 +18,36 @@ _CONVERSATION = {
         {"role": "assistant", "content": "okay"},
     ]
 }
+
+
+@pytest.mark.parametrize("entrypoint", ["parser", "inline", "file"])
+@pytest.mark.parametrize(
+    ("broken", "expected"),
+    [
+        ('rule "Broken"\ncondition:\n    true and', "line 4, column 13"),
+        ('rule "Broken"\ncondition:\n', "line 3, column 11"),
+        ('rule "Broken" condition: true false', "Unexpected token `false`"),
+        ('rule "Broken" condition: true % false', "Unexpected character `%`"),
+        ('rule "Broken" condition: messages[0].role = "user"', "use `==`"),
+    ],
+)
+def test_module_syntax_errors_use_author_facing_diagnostics(tmp_path, entrypoint, broken, expected):
+    source = 'rule "Good" condition: true\n' + broken
+    path = tmp_path / "broken.rule"
+    with pytest.raises(RuleParseError) as raised:
+        if entrypoint == "parser":
+            DSLParser().parse_many(source, source=str(path))
+        elif entrypoint == "inline":
+            DSLScanner(QuarryConfig(quarry_rule_texts=(source,)))
+        else:
+            path.write_text(source)
+            DSLScanner(QuarryConfig(quarry_rules_paths=(path,)))
+
+    reason = raised.value.reason
+    assert expected in reason
+    assert "Expected one of:" in reason or "use `==`" in reason
+    assert "Unexpected token Token(" not in reason
+    assert "Expected one of: \n" not in reason
 
 
 @pytest.mark.parametrize(
