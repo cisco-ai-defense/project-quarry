@@ -33,8 +33,6 @@ _MARKER = "QUARRY_FIXTURE_MATCH"
 _REQUIRED_METADATA = {
     "description": "Detect an example fixture marker.",
     "author": "Quarry contributors",
-    "version": "0.1.0",
-    "status": "experimental",
     "requires_quarry": ">=0.1.0,<0.2.0",
 }
 
@@ -412,24 +410,14 @@ def test_compile_only_never_evaluates_even_local_fixtures(
     assert report.unevaluated_cases == 2
 
 
-def test_supported_deprecated_rule_still_runs_its_regression_cases(corpus: Path) -> None:
-    _add_rule(corpus, metadata={"status": "deprecated", "deprecation_reason": "Replaced behavior."})
-
-    report = validate_repository(corpus)
-
-    assert report.ok, report.errors
-    assert report.passed_cases == 2
-    assert any("deprecat" in warning.lower() for warning in report.warnings)
-
-
-def test_incompatible_deprecated_rule_has_actionable_failure(corpus: Path) -> None:
-    _add_rule(corpus, metadata={"status": "deprecated", "requires_quarry": ">=99.0.0"})
+def test_incompatible_rule_cannot_compile(corpus: Path) -> None:
+    _add_rule(corpus, metadata={"requires_quarry": ">=99.0.0"})
 
     report = validate_repository(corpus)
 
     assert not report.ok
     assert report.compiled_rules == 0
-    assert any("update" in error.lower() or "remove" in error.lower() for error in report.errors)
+    assert any("compile failed" in error.lower() for error in report.errors)
 
 
 def test_community_pack_validates_without_publisher_metadata(corpus: Path) -> None:

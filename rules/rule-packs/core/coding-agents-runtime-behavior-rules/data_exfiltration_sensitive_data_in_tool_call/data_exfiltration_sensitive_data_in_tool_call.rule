@@ -21,8 +21,6 @@ metadata:
     author = "Cisco AI Defense"
     revision = "0"
     updated = "2026-10-14"
-    version = "0.1.0"
-    status = "experimental"
     requires_quarry = ">=0.1.0,<0.2.0"
     taxonomy_objective = "Data and Privacy Violations"
     taxonomy_technique = "Data Exfiltration / Exposure"

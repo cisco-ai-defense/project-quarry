@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Coding agents runtime behavior rules
 
-This core pack contains four experimental rules illustrating model-assisted
+This core pack contains four rules illustrating model-assisted
 detection of:
 
 - Changes to agent configuration containing download-and-execute commands.

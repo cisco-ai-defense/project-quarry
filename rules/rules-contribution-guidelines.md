@@ -95,7 +95,7 @@ on every pull request and on pushes to `main`, using Python 3.11, 3.12, and 3.13
 It checks all core and community packs across every publisher:
 
 - Rule folder/file layout and globally unique declared rule names.
-- Required string metadata, version/status formats, and compilation against the
+- Required string metadata and compilation against the
   checkout's Quarry runtime, including `requires_quarry` compatibility.
 - Reviewed inventory coverage for rules, resources, and cases, including missing
   files, unlisted additions, and orphaned cases.
@@ -115,7 +115,7 @@ and structural or validation errors fail the check.
 CI does not establish semantic uniqueness, content relevance, fixture-data
 provenance, attribution, licensing, detection quality, or appropriate release
 changes. Maintainers review these alongside related-rule comparisons, bypasses,
-false positives, coverage limits, version updates, and deprecation or
+false positives, coverage limits, pack releases, and deprecation or
 removal reasons.
 
 From the repository root, run `uv run --frozen python rules/validate.py` and attach

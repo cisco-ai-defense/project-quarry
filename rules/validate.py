@@ -265,13 +265,6 @@ def _validate_rule(
     names.add(rule.name)
     if rule.name != identity:
         report.warnings.append(f"{identity}: recommended declared rule name is {identity!r}")
-    deprecated = rule.metadata.get("status") == "deprecated"
-    if deprecated:
-        report.warnings.append(
-            f"{identity}: deprecated; document its reason and last supported version in the contribution history"
-        )
-        if not rule.metadata.get("deprecation_reason"):
-            report.warnings.append(f"{identity}: add deprecation_reason metadata")
     safety = RuleValidator().validate(rule)
     if safety.regex_errors or safety.semantic_errors:
         raise ValueError(f"rule validation: {safety.regex_errors + safety.semantic_errors}")
@@ -282,12 +275,7 @@ def _validate_rule(
     compiled = compile_rule(rule, response_schemas=schemas)
     if not compiled.ok or compiled.artifact is None:
         errors = "; ".join(str(item.message) for item in compiled.diagnostics.errors)
-        hint = (
-            "; update or remove the unsupported rule and its cases together, recording the last supported commit in the contribution history"
-            if deprecated
-            else ""
-        )
-        raise ValueError(f"compile failed: {errors}{hint}")
+        raise ValueError(f"compile failed: {errors}")
     report.compiled_rules += 1
     artifact = compiled.artifact
     requirements = requirements_from_artifact(artifact)

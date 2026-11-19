@@ -20,8 +20,6 @@ type: object
 required:
   - description
   - author
-  - version
-  - status
   - requires_quarry
 properties:
   description:
@@ -30,15 +28,6 @@ properties:
   author:
     type: string
     minLength: 1
-  version:
-    type: string
-    pattern: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
-  status:
-    type: string
-    enum:
-      - experimental
-      - stable
-      - deprecated
   requires_quarry:
     type: string
     pattern: '^>=[^,\s]+(,<[^,\s]+)?$'
@@ -48,8 +37,5 @@ properties:
     type: string
   signal_channel:
     type: string
-  deprecation_reason:
-    type: string
-    minLength: 1
 additionalProperties:
   type: string

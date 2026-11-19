@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Shell review example pack
 
-Community pack with one experimental example rule:
+Community pack with one example rule:
 download-to-shell command submitted to a shell tool (`rules/rule-packs/community/example-labs/shell-review/code_execution_download_to_shell_call/code_execution_download_to_shell_call.rule`).
 Example Labs is a placeholder publisher illustrating a contributor namespace.
 

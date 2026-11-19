@@ -42,8 +42,6 @@ metadata schema (`rules/rule-packs/metadata-schema.yaml`) requires:
 
 - `description`: detected behavior and its important boundaries.
 - `author`: original author attribution.
-- `version`: independent rule version in Semantic Versioning format.
-- `status`: `experimental`, `stable`, or `deprecated`.
 - `requires_quarry`: tested compatibility using `>=VERSION` or
   `>=VERSION,<VERSION`.
 
@@ -53,7 +51,7 @@ their attribution in a `contributors` string or the contribution history.
 
 ## Cases and compilation inputs
 
-Each active rule needs matching and clean cases, including useful
+Each rule needs matching and clean cases, including useful
 near misses. Store them separately in `positive/` and `negative/`, and declare
 their expected results in `expectations.yaml`:
 
@@ -86,8 +84,7 @@ requiring models, probers, named text, or parameters as unevaluated.
 
 ## Versions and releases
 
-Rule versions live in metadata; pack versions live in immutable Git tags.
-There is no per-pack manifest. For example, tag
+Pack versions live in immutable Git tags. There is no per-pack manifest. For example, tag
 `rule-packs/core/coding-agents-runtime-behavior-rules/v0.1.0` identifies that
 pack's release. Consumers pin release commits and select their packs explicitly.
 
@@ -95,15 +92,14 @@ pack's release. Consumers pin release commits and select their packs explicitly.
 - Patch releases fix behavior within documented intent, documentation, or cases.
 - Minor releases add compatible coverage or rules. Breaking changes need an
   explicit migration note; stable releases use a major version change.
-- Version affected rules when shared prompts or resources change. Unchanged
-  rules keep their versions; record changes in the contribution history.
+- Record changes to shared prompts or resources and their affected rules in the
+  contribution history.
 
 ## Deprecation and removal
 
-For a supported rule that should be retired, set `status = "deprecated"`, add a
-reason in the contribution history, and preferably a `deprecation_reason` string. A
-replacement is optional. Deprecated rules can still compile and run when
-explicitly selected.
+For a supported rule that should be retired, record the reason in the
+contribution history. A replacement is optional. Rules that remain in the pack
+can still compile and run when explicitly selected.
 
 If a rule no longer compiles or is unsupported, remove its active rule,
 associated resources and cases, and inventory entries together in a reviewed
