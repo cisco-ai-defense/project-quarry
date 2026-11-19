@@ -202,7 +202,7 @@ class ModelUsage:
             attempt_timeout = asyncio.timeout(remaining)
             try:
                 async with attempt_timeout:
-                    return await self._attempt(
+                    result = await self._attempt(
                         model,
                         operation,
                         deadline=deadline,
@@ -212,6 +212,18 @@ class ModelUsage:
                         retry_history=history,
                         attempt_factory=attempt_factory,
                     )
+                    if isinstance(result, ModelPreparationFailure):
+                        return result
+                    # Host callbacks may finish without yielding to the timeout task.
+                    # Include adapter work and limiter cleanup before accepting success.
+                    self._remaining(
+                        deadline,
+                        name,
+                        evaluation_timeout_message,
+                        history.last_failure,
+                        history.failed_attempts,
+                    )
+                    return result
             except TimeoutError as exc:
                 # Preserve the scanner's error type when this inner timer is
                 # enforcing the same rule deadline.

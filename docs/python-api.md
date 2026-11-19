@@ -80,6 +80,9 @@ Payload preparation consumes the logical model or rule deadline. If preparation 
 that budget, the adapter is not invoked and no physical attempt is charged. Otherwise the
 adapter receives only the time still remaining after preparation.
 An expired requesting rule retains its `QuarryTimeoutError` when shared work reports a timeout.
+Adapter execution and limiter cleanup also consume the logical budget. A successful response
+that finishes after the deadline is rejected before cache admission, while its physical attempt
+remains counted.
 
 When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
 `error.result`) carries the safe partial timing and model-usage snapshot recorded before the

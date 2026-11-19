@@ -762,3 +762,232 @@ async def test_expired_requesting_rule_keeps_timeout_ownership_for_shared_work(
             "records": [{"model": "reader", "operation": "score", "calls": 1}],
             "truncated": False,
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_stage", ["adapter", "limiter_cleanup"])
+@pytest.mark.parametrize("deadline_owner", ["model", "rule", "unlimited"])
+@pytest.mark.parametrize("operation_seconds", [0.25, 2.0])
+@pytest.mark.parametrize("threaded", [False, True])
+async def test_successful_adapter_and_limiter_cleanup_keep_logical_deadline(
+    tmp_path, monkeypatch, completion_stage, deadline_owner, operation_seconds, threaded
+):
+    from contextlib import asynccontextmanager, nullcontext
+    from types import SimpleNamespace
+
+    from quarry.async_runtime import run_engine
+    from quarry.cache.async_cache import result_cache
+    from quarry.config import QuarryConfig
+    from quarry.integrations import model_usage
+    from quarry.integrations.model_inference import ModelInferenceBackend
+    from quarry.integrations.model_usage import model_call_budget
+    from quarry.safety import timer
+    from quarry.safety.timer import QuarryTimeoutError, evaluation_deadline
+    from quarry.telemetry import ModelUsageLedger
+    from quarry.types.exceptions import LLMError
+    from quarry.types.messages import Messages
+    from tests.unit.model_fakes import model_entry, passthrough_builder
+
+    result_cache.clear()
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(model_usage, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    timeouts = []
+
+    @asynccontextmanager
+    async def limit(_model):
+        yield
+        if completion_stage == "limiter_cleanup":
+            clock.now += operation_seconds
+
+    class Adapter:
+        async def score(self, _model, _messages, *, timeout=None):
+            timeouts.append(timeout)
+            if completion_stage == "adapter":
+                clock.now += operation_seconds
+            return 0.8
+
+    config = QuarryConfig.from_mapping(
+        {"config_version": 2, "models": {"reader": model_entry(score=True)}},
+        tmp_path,
+        require_rules=False,
+    )
+    backend = ModelInferenceBackend(
+        config,
+        adapters={"fake": Adapter()},
+        message_builders={"test": passthrough_builder},
+        rate_limiter=SimpleNamespace(limit=limit),
+    )
+    messages = Messages.from_openai([{"role": "user", "content": "synthetic"}])
+
+    def request():
+        return backend.model_score_messages(
+            "reader",
+            "synthetic policy",
+            messages,
+            timeout=1.0 if deadline_owner == "model" else None,
+        )
+
+    async def invoke():
+        return await run_engine(request) if threaded else await request()
+
+    scope = (
+        evaluation_deadline(1.0, "synthetic public rule deadline")
+        if deadline_owner == "rule"
+        else nullcontext()
+    )
+    expired = deadline_owner != "unlimited" and operation_seconds > 1.0
+    ledger = ModelUsageLedger()
+    with model_call_budget(1, ledger) as budget:
+        if expired:
+            error_type = LLMError if deadline_owner == "model" else QuarryTimeoutError
+            with pytest.raises(error_type) as caught, scope:
+                await invoke()
+            if deadline_owner == "model":
+                assert caught.value.details == {"code": "timeout", "model": "reader"}
+            else:
+                assert str(caught.value) == "synthetic public rule deadline"
+        else:
+            with scope:
+                assert await invoke() == 0.8
+        assert budget.calls_by_alias == {"reader": 1}
+        assert timeouts == ([None] if deadline_owner == "unlimited" else pytest.approx([1.0]))
+        assert ledger.snapshot() == {
+            "calls": 1,
+            "records": [{"model": "reader", "operation": "score", "calls": 1}],
+            "truncated": False,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threaded", [False, True])
+async def test_expired_failed_payload_keeps_original_error_and_no_attempt(
+    tmp_path, monkeypatch, threaded
+):
+    from types import SimpleNamespace
+
+    from quarry.async_runtime import run_engine
+    from quarry.config import QuarryConfig
+    from quarry.integrations import model_usage
+    from quarry.integrations.model_inference import ModelInferenceBackend
+    from quarry.integrations.model_usage import model_call_budget
+    from quarry.telemetry import ModelUsageLedger
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(model_usage, "monotonic", lambda: clock.now)
+    error = ValueError("synthetic failed payload after budget")
+    adapter_calls = []
+
+    class Adapter:
+        async def score(self, _config, *, timeout=None):
+            adapter_calls.append(timeout)
+            return 0.8
+
+    adapter = Adapter()
+    config = QuarryConfig.from_mapping(
+        {"config_version": 2, "models": {"reader": {"adapter": "synthetic", "model": "synthetic"}}},
+        tmp_path,
+        require_rules=False,
+    )
+    backend = ModelInferenceBackend(config, adapters={"synthetic": adapter})
+
+    def payload():
+        clock.now += 2.0
+        raise error
+
+    def request():
+        return backend._call(
+            "reader",
+            "synthetic",
+            adapter,
+            "score",
+            config.models["reader"],
+            payload,
+            key=("expired-failed-payload", threaded),
+            timeout=1.0,
+        )
+
+    ledger = ModelUsageLedger()
+    with model_call_budget(1, ledger) as budget, pytest.raises(ValueError) as caught:
+        if threaded:
+            await run_engine(request)
+        else:
+            await request()
+    assert caught.value is error
+    assert budget.calls_by_alias == {} and adapter_calls == []
+    assert ledger.snapshot() == {"calls": 0, "records": [], "truncated": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_stage", ["adapter", "limiter_cleanup"])
+@pytest.mark.parametrize("threaded", [False, True])
+async def test_late_success_is_not_cached_and_next_funded_score_can_complete(
+    tmp_path, monkeypatch, completion_stage, threaded
+):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from quarry.async_runtime import run_engine
+    from quarry.cache.async_cache import result_cache
+    from quarry.config import QuarryConfig
+    from quarry.integrations import model_usage
+    from quarry.integrations.model_inference import ModelInferenceBackend
+    from quarry.integrations.model_usage import model_call_budget
+    from quarry.telemetry import ModelUsageLedger
+    from quarry.types.exceptions import LLMError
+    from quarry.types.messages import Messages
+    from tests.unit.model_fakes import model_entry, passthrough_builder
+
+    result_cache.clear()
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(model_usage, "monotonic", lambda: clock.now)
+    timeouts = []
+
+    @asynccontextmanager
+    async def limit(_model):
+        yield
+        if completion_stage == "limiter_cleanup" and len(timeouts) == 1:
+            clock.now += 2.0
+
+    class Adapter:
+        async def score(self, _model, _messages, *, timeout=None):
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                if completion_stage == "adapter":
+                    clock.now += 2.0
+                return 0.8
+            return 0.6
+
+    config = QuarryConfig.from_mapping(
+        {"config_version": 2, "models": {"reader": model_entry(score=True)}},
+        tmp_path,
+        require_rules=False,
+    )
+    backend = ModelInferenceBackend(
+        config,
+        adapters={"fake": Adapter()},
+        message_builders={"test": passthrough_builder},
+        rate_limiter=SimpleNamespace(limit=limit),
+    )
+    messages = Messages.from_openai([{"role": "user", "content": "synthetic"}])
+
+    def request():
+        return backend.model_score_messages("reader", "synthetic policy", messages, timeout=1.0)
+
+    async def invoke():
+        return await run_engine(request) if threaded else await request()
+
+    ledger = ModelUsageLedger()
+    with model_call_budget(2, ledger) as budget:
+        with pytest.raises(LLMError) as caught:
+            await invoke()
+        assert caught.value.details == {"code": "timeout", "model": "reader"}
+        assert await invoke() == 0.6
+        assert await invoke() == 0.6
+    assert timeouts == pytest.approx([1.0, 1.0])
+    assert budget.calls_by_alias == {"reader": 2}
+    assert ledger.snapshot() == {
+        "calls": 2,
+        "records": [{"model": "reader", "operation": "score", "calls": 2}],
+        "truncated": False,
+    }
