@@ -85,6 +85,13 @@ from quarry.integrations.model_expression import (
     evaluate_scoped_model_expression,
     scoped_model_expression,
 )
+from quarry.integrations.model_head_plan import (
+    capture_head_plan,
+    head_event,
+    head_frame,
+    legacy_head_input,
+    resume_head_plan,
+)
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.read_operations import model_field_input
@@ -1063,19 +1070,20 @@ class DSLScanner:
                             evidence.append(result.evidence)
                         return result
 
-                    nested = await evaluate_async(
-                        check,
-                        nested_input,
-                        async_detector=grounded,
-                        read_observer=grounding_read_observer(),
-                        async_collector=self._make_async_collector(
-                            nested_ctx, regex_backend=regex_backend
-                        ),
-                        regex_backend=regex_backend,
-                        minimize_witness=False,
-                        record_trace=False,
-                        time_left=remaining_evaluation_time,
-                    )
+                    with head_frame(spec.model_expression):
+                        nested = await evaluate_async(
+                            check,
+                            nested_input,
+                            async_detector=grounded,
+                            read_observer=grounding_read_observer(),
+                            async_collector=self._make_async_collector(
+                                nested_ctx, regex_backend=regex_backend
+                            ),
+                            regex_backend=regex_backend,
+                            minimize_witness=False,
+                            record_trace=False,
+                            time_left=remaining_evaluation_time,
+                        )
                     if not explain:
                         return nested.matched
                     measured = evidence[0] if len(evidence) == 1 else None
@@ -1198,21 +1206,22 @@ class DSLScanner:
                                 ] = observed.evidence
                             return observed
 
-                        result = await evaluate_async(
-                            plan.artifact,
-                            child_input,
-                            async_detector=grounded_child,
-                            read_observer=grounding_read_observer(),
-                            async_collector=self._make_async_collector(
-                                child, regex_backend=regex_backend
-                            ),
-                            warnings=warnings,
-                            regex_backend=regex_backend,
-                            minimize_witness=False,
-                            record_trace=explain,
-                            record=child_record,
-                            time_left=remaining_evaluation_time,
-                        )
+                        with head_frame(plan.source):
+                            result = await evaluate_async(
+                                plan.artifact,
+                                child_input,
+                                async_detector=grounded_child,
+                                read_observer=grounding_read_observer(),
+                                async_collector=self._make_async_collector(
+                                    child, regex_backend=regex_backend
+                                ),
+                                warnings=warnings,
+                                regex_backend=regex_backend,
+                                minimize_witness=False,
+                                record_trace=explain,
+                                record=child_record,
+                                time_left=remaining_evaluation_time,
+                            )
                         rule_ctx.evaluation_warnings.extend(child.evaluation_warnings)
                         rule_ctx.evaluation_warnings.extend(warnings)
                         if not explain:
@@ -1331,15 +1340,16 @@ class DSLScanner:
                     return await run_child(selected, source_lease)
             if name == "model_expression":
                 trace = ModelExpressionTrace() if explain else None
-                value = truth(
-                    await evaluate_scoped_model_expression(
-                        spec.model_expression,
-                        rule_ctx,
-                        event=event,
-                        trace=trace,
-                        regex_backend=regex_backend,
+                with head_event(event, rule_ctx):
+                    value = truth(
+                        await evaluate_scoped_model_expression(
+                            spec.model_expression,
+                            rule_ctx,
+                            event=event,
+                            trace=trace,
+                            regex_backend=regex_backend,
+                        )
                     )
-                )
                 if trace is None:
                     return value
                 return Grounded(
@@ -1356,7 +1366,10 @@ class DSLScanner:
                     if spec.value_expr_key.startswith("field:")
                     else "content"
                 )
-                with model_field_input(arg, event, field, text, spec.selector):
+                with (
+                    model_field_input(arg, event, field, text, spec.selector),
+                    legacy_head_input(event, rule_ctx, field),
+                ):
                     return bool(
                         await model_scan(rule_ctx, arg, text, spec.threshold, spec.class_index)
                     )
@@ -1368,7 +1381,10 @@ class DSLScanner:
                     if spec.value_expr_key.startswith("field:")
                     else "content"
                 )
-                with model_field_input(arg, event, field, text, spec.selector):
+                with (
+                    model_field_input(arg, event, field, text, spec.selector),
+                    legacy_head_input(event, rule_ctx, field),
+                ):
                     score = await model_score(rule_ctx, arg, text, spec.class_index)
                 # A bare model_score atom (no comparator) is truthy on a positive score;
                 # a comparison atom carries op/number folded in by the compiler.
@@ -1698,9 +1714,18 @@ class DSLScanner:
         """Close rule value ownership on success, failures and cancellation."""
         read_scope = new_read_scope()
         record_scan_scope(read_scope)
+        backend = getattr(self.resource_manager, "model_inference_backend", None)
+        plan = getattr(backend, "token_head_plan", None)
+        selected = rules_subset if rules_subset is not None else self.compiled_rules
+        head_scope = (
+            plan(self.compiled_rules[name] for name in selected if name in self.compiled_rules)
+            if callable(plan)
+            else nullcontext()
+        )
         # ContextVar tokens belong to this task; only value owners may be transferred
         # to deferred evidence through value_lifetimes.pop_all().
         with (
+            head_scope,
             read_usage_scope(None, scope=read_scope) if read_scope is not None else nullcontext(),
             ExitStack() as value_lifetimes,
         ):
@@ -2466,11 +2491,16 @@ class DSLScanner:
             # part of this scan.
             scan = current_scan()
             read_owner = retain_read_usage()
+            continued_head_plan = capture_head_plan()
             if read_owner is not None:
                 value_lifetimes.callback(read_owner.close)
 
             async def finish(result: ScanResult) -> ScanResult:
-                with scan_scope(scan), resume_read_usage(read_owner):
+                with (
+                    scan_scope(scan),
+                    resume_read_usage(read_owner),
+                    resume_head_plan(continued_head_plan),
+                ):
                     await gather_evidence()
                 return replace(result, decision_paths=decision_path_records(), **evidence())
 

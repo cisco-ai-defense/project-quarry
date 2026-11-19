@@ -112,6 +112,17 @@ class ModelRead:
         if session is not None and self._pid == os.getpid():
             self._add("tools", collect_tools(session, tools))
 
+    def window_input(self, source, windows, encoding, context="") -> None:
+        if self._limited:
+            return
+        session = self._session()
+        if session is not None and self._pid == os.getpid():
+            from quarry.integrations.read_windows import collect_window_input
+
+            self._add("input", collect_window_input(session, source, windows, encoding))
+            if context:
+                self.value("window-context", context, slot="context")
+
     def _measurement(self, session):
         ordered = sorted(self._inputs.items())
         complete = bool(ordered) and all(item.characters.state == "measured" for _, item in ordered)

@@ -32,18 +32,20 @@ import string
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, is_dataclass, replace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, NamedTuple, cast
 from urllib.parse import urljoin, urlsplit
 
 import orjson
 
-from quarry.cache.async_cache import cache_retention, result_cache
+from quarry.cache.async_cache import cache_retention, current_scan, result_cache
 from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
+from quarry.cache.scan_responses import ScanResponses
 from quarry.config import InferenceModelConfig, QuarryConfig, ScoreConfig
 from quarry.core.conversation import Conversation
 from quarry.integrations.adapter_transforms import (
@@ -59,7 +61,29 @@ from quarry.integrations.message_ranges import (
     gather_split_tasks,
 )
 from quarry.integrations.message_readability import require_model_messages
+from quarry.integrations.model_head_plan import (
+    ROOT_FRAME,
+    child_frame,
+    current_head_input,
+    head_plan_scope,
+    head_requests,
+    input_signature,
+)
 from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelUsage
+from quarry.integrations.model_window_evidence import record_window_result
+from quarry.integrations.model_window_input import WindowMemo, join_window_input, json_window_input
+from quarry.integrations.model_window_ranges import (
+    WindowRangeBudget,
+    WindowRangeIndex,
+    origin_intervals,
+)
+from quarry.integrations.model_windows import (
+    MAX_MODEL_WINDOWS,
+    TokenEncoding,
+    character_windows,
+    selected_token_scores_async,
+    token_windows,
+)
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.read_operations import (
     current_model_read,
@@ -106,9 +130,11 @@ from quarry.types.exceptions import (
 from quarry.types.media import require_media_part, require_message_media, require_readable_media
 from quarry.types.messages import (
     AssistantMessage,
+    Message,
     Messages,
     Tool,
     ToolCallTypeRegistry,
+    _synthetic_key,
     messages_digest,
     tools_fault,
     wire_digest,
@@ -327,6 +353,9 @@ _REQUEST_SECTIONS = {
     "score": "score",
     "classify": "classify",
     "classify_messages": "classify",
+    "classify_window_batch": "classify",
+    "encode_window_input": "classify",
+    "window_token_counts": "classify",
     "complete": "complete",
     "complete_message": "complete",
     "tokenize": "tokens",
@@ -380,6 +409,27 @@ class JsonCompletion:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.message, name)
+
+
+@dataclass(frozen=True)
+class _TokenHeadResponse:
+    """Expose a head reply's known graph to byte accounting with a fixed lifetime."""
+
+    raw: Any
+    cache_lifetime = 300
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowResponse:
+    """Name one physical reply without storing opaque replies in scan score memos."""
+
+    raw: Any
+    generation: bytes
+
+
+class _WindowHeadResponse(_WindowResponse):
+    __slots__ = ()
+    cache_lifetime = 300
 
 
 class _Refused(NamedTuple):
@@ -1840,6 +1890,8 @@ class ModelInferenceBackend:
         self.adapters = {**_default_adapters(), **dict(adapters or {})}
         # Each configured model's settings digest per adapter method, with the model it names.
         self._settings_digests: dict[tuple[str, int], tuple[InferenceModelConfig, bytes]] = {}
+        self._validated_head_adapter: Any = None
+        self._window_namespace = object()
         self.require_completion_models(completion_models)
         self.require_classification_models(classification_models)
         self.require_span_models(span_models)
@@ -2010,13 +2062,26 @@ class ModelInferenceBackend:
         """Fail before scanning when a required model cannot classify text."""
 
         method = "classify_messages" if self.config.config_version == 2 else "classify"
-        self._require_capability(model_ids, method, "classify")
+        plain = []
+        for model_id in model_ids:
+            if self._model(model_id).windows is None:
+                plain.append(model_id)
+            else:
+                self._require_window_adapter(model_id)
+        self._require_capability(plain, method, "classify")
 
     def require_span_models(self, model_ids: Collection[str]) -> None:
         """Fail before scanning when a required model cannot produce spans."""
 
-        self._require_capability(model_ids, "classify_messages", "classify messages")
-        self._require_capability(model_ids, "decode_spans", "decode spans")
+        plain = [model_id for model_id in model_ids if self._model(model_id).windows is None]
+        self._require_capability(plain, "classify_messages", "classify messages")
+        self._require_capability(plain, "decode_spans", "decode spans")
+        for model_id in model_ids:
+            model = self._model(model_id)
+            if model.windows is not None:
+                self._require_window_adapter(model_id, spans=True)
+            if getattr(self.adapters[model.adapter], "supports_token_head", False) is True:
+                self._require_head_adapter(model_id)
 
     def _require_capability(self, model_ids: Collection[str], method: str, capability: str) -> None:
         """Require every named model adapter to implement one operation."""
@@ -2451,6 +2516,7 @@ class ModelInferenceBackend:
         prepare: Callable[[Any], Any] | None = None,
         dispatch: Callable[..., Any] | None = None,
         refusals: bool = False,
+        cache_category: str | None = None,
     ) -> Any:
         """Send one adapter request, ``adapter.<method>(model, *payload())``, or reuse the
         response to the same request, and return ``read(response)``. ``payload`` is built only
@@ -2523,7 +2589,8 @@ class ModelInferenceBackend:
                         budget=model_id,
                         retry_on=_starters_limit,
                         retention=cache_retention(
-                            "token_counts" if method == "tokenize" else "model_responses",
+                            cache_category
+                            or ("token_counts" if method == "tokenize" else "model_responses"),
                             self.config.model_cache,
                         ),
                         timeout=provider_timeout,
@@ -2563,15 +2630,20 @@ class ModelInferenceBackend:
         cached = self._settings_digests.get((method, id(model)))
         if cached is not None and cached[0] is model:
             return cached[1]
+        digest = input_key(self._request_model(method, model))
+        self._settings_digests[(method, id(model))] = (model, digest)
+        return digest
+
+    @staticmethod
+    def _request_model(method: str, model: InferenceModelConfig) -> InferenceModelConfig:
+        """Keep request-shaping configuration separate from response-reading settings."""
         # A request is shaped by the provider settings and its own operation's section; a
         # category, class index, span head or score calibration only reads the response, and
         # a score's builder and boundary only shape the messages its key names.
         if method == "transform":
             # A host transform receives the whole model configuration and may read every
             # field, so none of its operation sections can be omitted from request identity.
-            digest = input_key(model)
-            self._settings_digests[(method, id(model))] = (model, digest)
-            return digest
+            return model
         section = _REQUEST_SECTIONS.get(method)
         sections: dict[str, Any] = {name: None for name in _OPERATION_SECTIONS}
         if section == "score" and model.score is not None:
@@ -2585,13 +2657,17 @@ class ModelInferenceBackend:
             if classify is not None and (
                 classify.labels is not None or classify.instructions is not None
             ):
-                sections["classify"] = replace(classify, class_index=0)
+                sections["classify"] = replace(
+                    classify,
+                    class_index=0,
+                    max_input_tokens=None
+                    if method
+                    in ("classify_window_batch", "encode_window_input", "window_token_counts")
+                    else classify.max_input_tokens,
+                )
         elif section is not None:
             sections[section] = getattr(model, section)
-        digest = input_key(replace(model, **sections))
-        # The model is kept with its digest, so its id is never reused for another one.
-        self._settings_digests[(method, id(model))] = (model, digest)
-        return digest
+        return replace(model, **sections)
 
     async def _send(
         self,
@@ -2848,6 +2924,644 @@ class ModelInferenceBackend:
                 ),
             )
 
+    def _require_window_adapter(self, model_id: str, *, spans: bool = False) -> None:
+        model = self._model(model_id)
+        windows = model.windows
+        assert windows is not None
+        adapter = self.adapters.get(model.adapter)
+        if adapter is None:
+            raise ConfigurationError(
+                f"Inference model '{model_id}' uses unregistered adapter '{model.adapter}'"
+            )
+        units = getattr(adapter, "window_units", None)
+        if (
+            units is None
+            or type(units) not in (set, frozenset, list, tuple)
+            or windows.unit not in units
+        ):
+            raise ConfigurationError(
+                f"Inference model '{model_id}' adapter must declare {windows.unit} window units"
+            )
+        head = getattr(adapter, "supports_token_head", False) is True
+        methods = [
+            (
+                "classify_window_batch",
+                3,
+                {"timeout": None, **({"token_head": True} if head else {})},
+            )
+        ]
+        if windows.unit == "tokens":
+            methods.append(("encode_window_input", 4, {"timeout": None}))
+        if windows.renderer == "host":
+            methods.append(("render_window_input", 3, {}))
+        section = model.spans if spans else model.classify
+        if (
+            windows.unit == "characters"
+            and section is not None
+            and section.max_input_tokens is not None
+        ):
+            methods.append(("window_token_counts", 3, {"timeout": None}))
+        if spans:
+            if windows.unit == "tokens" and not head:
+                raise ConfigurationError(
+                    f"Inference model '{model_id}' token window spans require token_head support"
+                )
+            methods.append(
+                (
+                    "decode_window_spans",
+                    5,
+                    {
+                        "encoding": None,
+                        "token_scores": None,
+                        **({"token_head": True} if head else {}),
+                    },
+                )
+            )
+        for method, arity, extra in methods:
+            try:
+                inspect.signature(getattr(adapter, method)).bind(*([None] * arity), **extra)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"Inference model '{model_id}' window adapter must implement {method} with its window contract"
+                ) from exc
+
+    def _window_memo(self):
+        scope = current_scan()
+        if type(scope) is not ScanResponses:
+            return None
+        generation = scope.generation()
+        if generation is None:
+            return None
+        previous = scope._cleanup_callback(generation, self._window_namespace)
+        if previous is not None:
+            return cast(MethodType, previous).__self__
+        # A host finalizer may run during native allocation, so construct outside the
+        # scope lock and atomically select its owner only after construction returns.
+        memo = WindowMemo(self.config.model_cache.max_bytes)
+        callback = scope._cleanup_callback(generation, self._window_namespace, memo.close)
+        if callback is None:
+            memo.close()
+            return None
+        selected = cast(MethodType, callback).__self__
+        if selected is not memo:
+            memo.close()
+        return selected
+
+    async def _host_window_input(self, model_id, model, messages, tools):
+        from quarry.integrations.model_window_host import render_host_input
+
+        try:
+            return await render_host_input(self.adapters[model.adapter], model, messages, tools)
+        except (TypeError, ValueError, AttributeError, IndexError, KeyError) as exc:
+            raise _llm_error(
+                "invalid_output",
+                "Host window renderer returned an invalid input projection",
+                model_id,
+            ) from exc
+
+    async def _window_response(
+        self,
+        model_id,
+        messages,
+        tools,
+        *,
+        timeout,
+        read,
+        spans=False,
+        empty_result=0.0,
+        measured_class_index=None,
+    ):
+        # Claim the caller's input before an inline host renderer can make nested reads.
+        # Compatibility stays lazy, so empty input and preflight limits keep their paths.
+        head_candidates = current_head_input()
+        memo = self._window_memo()
+        owned = memo is None
+        if memo is None:
+            memo = WindowMemo(self.config.model_cache.max_bytes)
+        try:
+            return await self._window_response_owned(
+                model_id,
+                messages,
+                tools,
+                timeout=timeout,
+                read=read,
+                spans=spans,
+                empty_result=empty_result,
+                memo=memo,
+                measured_class_index=measured_class_index,
+                head_candidates=head_candidates,
+            )
+        finally:
+            if owned:
+                memo.close()
+
+    async def _window_response_owned(
+        self,
+        model_id,
+        messages,
+        tools,
+        *,
+        timeout,
+        read,
+        spans=False,
+        empty_result=0.0,
+        memo,
+        measured_class_index=None,
+        head_candidates=(),
+    ):
+        self._require_window_adapter(model_id, spans=spans)
+        model = self._model(model_id)
+        config = model.windows
+        assert config is not None
+        adapter = self.adapters[model.adapter]
+        request_model = self._request_model("classify_window_batch", model)
+        token_unit = config.unit == "tokens"
+
+        async def render():
+            if config.renderer == "json":
+                return await json_window_input(messages, tools)
+            if config.renderer == "host":
+                return await self._host_window_input(model_id, request_model, messages, tools)
+            return await join_window_input(messages, tools)
+
+        rendering = await memo.render(
+            input_key(
+                "window-render-v2",
+                object_identity(messages),
+                tools,
+                config.renderer,
+                self._settings_digest("classify_window_batch", model)
+                if config.renderer == "host"
+                else None,
+                object_identity(adapter) if config.renderer == "host" else None,
+            ),
+            render,
+        )
+        empty_last_turn = (
+            config.scope == "last_turn"
+            and rendering.last_turn is not None
+            and rendering.last_turn[0] == rendering.last_turn[1]
+        )
+        if not rendering.source.text or empty_last_turn:
+            observation = current_model_read()
+            if observation is not None:
+                observation.window_input(rendering.source, (), None)
+                observation.not_sent()
+            return empty_result
+        limits = self.config.get_safety_limits()
+        limit = (
+            min(limits.max_comprehension_size, MAX_MODEL_WINDOWS)
+            if limits.enforce_limits
+            else MAX_MODEL_WINDOWS
+        )
+        encoding = None
+        if config.unit == "tokens":
+
+            def encoded(raw):
+                try:
+                    if type(raw) is not TokenEncoding:
+                        raise TypeError("token encoder must return TokenEncoding")
+                    canonical = TokenEncoding(
+                        raw.token_ids,
+                        raw.prefix_token,
+                        raw.suffix_token,
+                        raw.last_turn,
+                        raw.context_tokens,
+                        raw.character_offsets,
+                    )
+                    if canonical.character_offsets is not None and any(
+                        row is not None and row[1] > len(rendering.source.text)
+                        for row in canonical.character_offsets
+                    ):
+                        raise ValueError("encoding character_offsets are outside its input")
+                    return canonical
+                except (TypeError, ValueError, AttributeError) as exc:
+                    raise _llm_error(
+                        "invalid_output", "Window encoder returned an invalid encoding", model_id
+                    ) from exc
+
+            encoding = await self._call(
+                model_id,
+                model.model,
+                adapter,
+                "encode_window_input",
+                model,
+                lambda: (rendering.source.text, rendering.context, rendering.last_turn),
+                key=(rendering.source.text, rendering.context, rendering.last_turn, "encoding-v1"),
+                timeout=timeout,
+                prepare=encoded,
+                read=lambda value: value,
+                cache_category="token_counts",
+                dispatch=lambda _settings, text, context, last_turn, *, timeout: (
+                    adapter.encode_window_input(
+                        request_model, text, context, last_turn, timeout=timeout
+                    )
+                ),
+            )
+
+        async def prepare_plan():
+            if encoding is not None:
+                windows = await token_windows(encoding, config, max_windows=limit)
+                batches = tuple(window.token_ids for window in windows)
+            else:
+                windows = await character_windows(
+                    rendering.source, config, max_windows=limit, last_turn=rendering.last_turn
+                )
+                batches = tuple(window.text for window in windows)
+            return windows, batches
+
+        windows, batches = await memo.plan(
+            input_key(
+                "window-plan-v1",
+                object_identity(rendering.source),
+                object_identity(encoding) if encoding is not None else None,
+                config.unit,
+                config.size,
+                config.step,
+                config.scope,
+                limit,
+            ),
+            prepare_plan,
+            encoding,
+        )
+        if not batches:
+            observation = current_model_read()
+            if observation is not None:
+                observation.window_input(rendering.source, (), None)
+                observation.not_sent()
+            return empty_result
+        observation = current_model_read()
+        if observation is not None:
+            observation.window_input(rendering.source, windows, encoding, rendering.context)
+        section = model.spans if spans else model.classify
+        cap = None if section is None else section.max_input_tokens
+        if cap is not None:
+            if encoding is not None:
+                counts = tuple(len(batch) + encoding.context_tokens for batch in batches)
+            else:
+
+                def counted(value):
+                    if (
+                        type(value) not in (tuple, list)
+                        or len(value) != len(batches)
+                        or any(type(count) is not int or count < 0 for count in value)
+                    ):
+                        raise _llm_error(
+                            "invalid_output",
+                            "Window token counts do not match the requested batches",
+                            model_id,
+                        )
+                    return tuple(value)
+
+                counts = await self._call(
+                    model_id,
+                    model.model,
+                    adapter,
+                    "window_token_counts",
+                    model,
+                    lambda: (list(batches), rendering.context),
+                    key=(batches, rendering.context),
+                    timeout=timeout,
+                    prepare=counted,
+                    read=lambda value: value,
+                    cache_category="token_counts",
+                    dispatch=lambda _settings, batches, context, *, timeout: (
+                        adapter.window_token_counts(
+                            request_model, batches, context, timeout=timeout
+                        )
+                    ),
+                )
+            if any(count > cap for count in counts):
+                raise _llm_error(
+                    "conversation_too_large", "A model window exceeds max_input_tokens", model_id
+                )
+        head = (
+            self._token_head_for(model_id, producer=spans, candidates=head_candidates)
+            if not tools
+            else False
+        )
+
+        def dispatch(settings, outbound, context, *, timeout):
+            return adapter.classify_window_batch(
+                request_model,
+                outbound,
+                context,
+                timeout=timeout,
+                **({"token_head": True} if head else {}),
+            )
+
+        async def consume(response):
+            if type(response) is not (_WindowHeadResponse if head else _WindowResponse):
+                raise TypeError("invalid cached window response")
+            raw = response.raw
+            chunks = getattr(raw, "chunks", None)
+            if chunks is None or type(chunks) not in (tuple, list) or len(chunks) != len(windows):
+                raise _llm_error(
+                    "invalid_output",
+                    "Window classifier must return one chunk per requested window",
+                    model_id,
+                )
+            if measured_class_index is not None:
+
+                async def measure():
+                    values = []
+                    for ordinal, chunk in enumerate(chunks):
+                        values.append(
+                            _classifier_probability(
+                                SimpleNamespace(chunks=(chunk,)), measured_class_index, model_id
+                            )
+                        )
+                        if ordinal % 256 == 0:
+                            await asyncio.sleep(0)
+                            raise_if_evaluation_expired()
+                    maximum = max(values)
+                    return tuple(values), maximum, values.index(maximum)
+
+                measured = await memo.measured(
+                    input_key("window-measurement-v1", response.generation, measured_class_index),
+                    measure,
+                )
+                record_window_result(measured, windows, rendering.source, encoding)
+                return measured[1]
+
+            async def token_measurement(class_index):
+                async def measure_tokens():
+                    return await selected_token_scores_async(
+                        getattr(raw, "token_head", None), windows, class_index
+                    )
+
+                return await memo.measured(
+                    input_key("window-token-measurement-v1", response.generation, class_index),
+                    measure_tokens,
+                )
+
+            return await read(raw, rendering.source, windows, encoding, head, token_measurement)
+
+        return await self._call(
+            model_id,
+            model.model,
+            adapter,
+            "classify_window_batch",
+            model,
+            lambda: (
+                [list(batch) if token_unit else batch for batch in batches],
+                rendering.context,
+            ),
+            key=(batches, rendering.context, "window-head-v2" if head else "window-headless-v2"),
+            timeout=timeout,
+            dispatch=dispatch,
+            prepare=lambda raw: (_WindowHeadResponse if head else _WindowResponse)(
+                raw, uuid.uuid4().bytes
+            ),
+            read=consume,
+        )
+
+    async def _model_window_spans(self, model_id, messages, threshold, *, timeout):
+        model = self._model(model_id)
+        assert model.spans is not None
+        class_index = model.spans.class_index
+        await require_model_messages(messages)
+
+        def collection(items, run):
+            return CollectionResult(
+                "span_collection",
+                model.category,
+                ProducerRef("model", model_id, str(run)),
+                tuple(items),
+            )
+
+        async def decoded_collection(decoded, source):
+            if isinstance(decoded, str | bytes) or not isinstance(decoded, Sequence):
+                raise TypeError("window span adapter must return a sequence of Span values")
+            run = uuid.uuid4()
+            items = []
+            budget = WindowRangeBudget()
+            indexes = {}
+            for ordinal, span in enumerate(decoded):
+                budget.charge()
+                if ordinal % 256 == 0:
+                    await budget.checkpoint()
+                if (
+                    not isinstance(span, Span)
+                    or span.score is None
+                    or not span.within_one_message
+                    or span.end <= span.start
+                ):
+                    raise TypeError("window span adapter must return scored non-empty spans")
+                offsets = None if source is None else source.offsets(span)
+                if (
+                    source is None
+                    or offsets is None
+                    or not 0 <= offsets[0] < offsets[1] <= len(source.text)
+                ):
+                    raise TypeError(
+                        "window span must be decoded against the full originating input"
+                    )
+                expected = source.span(*offsets)
+                if (
+                    type(span) is not Span
+                    or replace(span, score=None, label=None) != expected
+                    or span._source is not expected._source
+                    or span._message is not expected._message
+                ):
+                    raise _llm_error(
+                        "invalid_output",
+                        "Window decoder changed its originating span geometry",
+                        model_id,
+                    )
+                if isinstance(span._source, Message) and span.source is None and not span.field:
+                    # The canonical full-input span above admits its original owner. A
+                    # constructed message can read an earlier source outside its new root.
+                    original = span._source
+                    index = indexes.get(id(original))
+                    if index is None:
+                        index = await WindowRangeIndex.prepare(original, budget)
+                        indexes[id(original)] = index
+                    ranges = {}
+                    source_parts = {}
+                    unmapped = False
+                    for piece_index, (place, low, high) in enumerate(
+                        origin_intervals(source.origin, *offsets, budget)
+                    ):
+                        if place.owner is not original or place.field or place.source is not None:
+                            raise TypeError("window span owner is outside its content source")
+                        mapped_ranges, missing, parts, located = index.mapping(low, high)
+                        if missing and _synthetic_key(original) is None and not located:
+                            raise ValueError(
+                                "window span includes inserted text with no source position"
+                            )
+                        unmapped |= missing
+                        for part in parts:
+                            source_parts[part] = None
+                        for mapped in mapped_ranges:
+                            budget.charge()
+                            ranges[mapped] = None
+                        if piece_index % 256 == 0:
+                            await budget.checkpoint()
+                    span = replace(
+                        span,
+                        source_ranges=tuple(ranges),
+                        source_parts=tuple(source_parts),
+                        source_unmapped=unmapped,
+                    )
+                identity = (
+                    f"{model.category}:{span.message_index}:{span.start}:{span.end}:{ordinal}"
+                )
+                items.append(ResultItem(str(uuid.uuid5(run, identity)), span))
+            return collection(items, run)
+
+        async def decode(raw, source, windows, encoding, head, token_measurement):
+            scores = None
+            if head and encoding is not None:
+                try:
+                    scores = await token_measurement(class_index)
+                except (TypeError, ValueError) as exc:
+                    raise _llm_error(
+                        "invalid_output",
+                        "Window classifier returned an invalid selected token head",
+                        model_id,
+                    ) from exc
+            decoded = self.adapters[model.adapter].decode_window_spans(
+                model,
+                _detached(raw),
+                source,
+                windows,
+                float(threshold),
+                encoding=encoding,
+                token_scores=scores,
+                **({"token_head": True} if head else {}),
+            )
+            if inspect.isawaitable(decoded):
+                decoded = await decoded
+            return await decoded_collection(decoded, source)
+
+        return await self._window_response(
+            model_id,
+            messages,
+            [],
+            timeout=timeout,
+            read=decode,
+            spans=True,
+            empty_result=collection([], uuid.uuid4()),
+        )
+
+    def _require_head_adapter(self, model_id: str) -> None:
+        model = self._model(model_id)
+        adapter = self.adapters[model.adapter]
+        windowed = model.windows is not None
+        validated = self._validated_head_adapter
+        if validated is None or validated[0] is not adapter or validated[1] != windowed:
+            methods = (
+                (
+                    ("classify_window_batch", 3, {"timeout": None, "token_head": True}),
+                    (
+                        "decode_window_spans",
+                        5,
+                        {"encoding": None, "token_scores": None, "token_head": True},
+                    ),
+                )
+                if windowed
+                else (
+                    ("classify_messages", 3, {"timeout": None, "token_head": True}),
+                    ("decode_spans", 4, {"token_head": True}),
+                )
+            )
+            for method, arity, extra in methods:
+                try:
+                    inspect.signature(getattr(adapter, method)).bind(*([None] * arity), **extra)
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise ConfigurationError(
+                        f"Inference model '{model_id}' token-head adapter must accept "
+                        f"the token_head keyword in {method}"
+                    ) from exc
+            # Retain only the most recent registration, including for mutable host registries.
+            self._validated_head_adapter = (adapter, windowed)
+
+    def token_head_plan(self, artifacts):
+        """Select symbolic span inputs without evaluating or reading a conversation."""
+        if not any(
+            getattr(adapter, "supports_token_head", False) is True
+            for adapter in self.adapters.values()
+        ):
+            return nullcontext()
+        expressions = []
+        pending = [(artifact, ROOT_FRAME) for artifact in artifacts]
+        seen_artifacts = set()
+        while pending:
+            artifact, frame = pending.pop()
+            artifact_key = (id(artifact), frame)
+            if artifact_key in seen_artifacts:
+                continue
+            seen_artifacts.add(artifact_key)
+            expressions.extend(
+                (spec.model_expression, frame)
+                for spec in artifact.atom_specs.values()
+                if spec.model_expression is not None
+            )
+            collect = artifact.collect_plan
+            if collect is not None:
+                expressions.extend(((collect.source, frame), (collect.local_predicate, frame)))
+                if collect.model_predicate is not None:
+                    expressions.append((collect.model_predicate, frame))
+            for atom_id, child in artifact.split_checks.items():
+                source = artifact.atom_specs[atom_id].model_expression
+                pending.append((child, child_frame(source, frame)))
+            for condition in artifact.computed_conditions.values():
+                pending.append((condition.artifact, child_frame(condition.source, frame)))
+        requests = set()
+        seen = set()
+        while expressions:
+            node, frame = expressions.pop()
+            node_key = (id(node), frame)
+            if node_key in seen:
+                continue
+            seen.add(node_key)
+            if node.kind == "model_call" and str(node.value).endswith("\x1fspans"):
+                alias = str(node.value).split("\x1f", 1)[0]
+                model = self._model(alias)
+                if getattr(self.adapters[model.adapter], "supports_token_head", False) is True:
+                    self._require_head_adapter(alias)
+                    requests.add(
+                        (
+                            self._settings_digest(
+                                "classify_window_batch"
+                                if model.windows is not None
+                                else "classify_messages",
+                                model,
+                            ),
+                            input_signature(node.children[0], frame),
+                        )
+                    )
+            expressions.extend((child, frame) for child in node.children)
+        return head_plan_scope(self, requests)
+
+    def _token_head_for(self, model_id: str, *, producer: bool = False, candidates=None) -> bool:
+        """Use a typed input plan, or compatible loaded aliases for direct native calls."""
+        model = self._model(model_id)
+        adapter = self.adapters[model.adapter]
+        planned = head_requests(self)
+        if candidates is None:
+            candidates = current_head_input() if planned is not None else ()
+        if getattr(adapter, "supports_token_head", False) is not True:
+            return False
+        method = "classify_window_batch" if model.windows is not None else "classify_messages"
+        settings = self._settings_digest(method, model)
+        if producer:
+            compatible = True
+        elif planned is not None:
+            compatible = any((settings, candidate) in planned for candidate in candidates)
+        else:
+            compatible = any(
+                self.models[alias].spans is not None
+                and self.models[alias].adapter == model.adapter
+                and self._settings_digest(method, self.models[alias]) == settings
+                for alias in self._loaded_model_ids
+            )
+        if not compatible:
+            return False
+        self._require_head_adapter(model_id)
+        return True
+
     async def _classify_messages_raw(
         self,
         model_id: str,
@@ -2856,6 +3570,7 @@ class ModelInferenceBackend:
         key: tuple[Any, ...],
         timeout: float | None,
         read: Callable[[Any], Any] | None = None,
+        token_head: bool | None = None,
     ) -> Any:
         """Invoke the version 2 classification adapter, sent ``payload()``'s messages and
         tools, without selecting a head."""
@@ -2865,6 +3580,32 @@ class ModelInferenceBackend:
         if not callable(getattr(adapter, "classify_messages", None)):
             raise ConfigurationError(
                 f"Inference model '{model_id}' adapter '{model.adapter}' cannot classify"
+            )
+        needs_head = token_head if token_head is not None else self._token_head_for(model_id)
+        if needs_head:
+
+            def dispatch(config, messages, tools, *, timeout):
+                return adapter.classify_messages(
+                    config, messages, tools, timeout=timeout, token_head=True
+                )
+
+            async def consume(response):
+                if type(response) is not _TokenHeadResponse:
+                    raise TypeError("invalid cached token-head response")
+                return await _read(_detached(response.raw) if read is None else response.raw, read)
+
+            return await self._call(
+                model_id,
+                model.model,
+                adapter,
+                "classify_messages",
+                model,
+                payload,
+                key=(*key, "token-head-v1"),
+                timeout=timeout,
+                read=consume,
+                prepare=_TokenHeadResponse,
+                dispatch=dispatch,
             )
         return await self._call(
             model_id,
@@ -2901,6 +3642,7 @@ class ModelInferenceBackend:
                 tools,
                 timeout=timeout,
                 read=lambda raw: _classifier_probability(raw, class_index, model_id),
+                measured_class_index=class_index,
             )
 
     async def _classification_response(
@@ -2911,11 +3653,28 @@ class ModelInferenceBackend:
         *,
         timeout: float | None,
         read: Callable[[Any], Any] | None,
+        token_head: bool = False,
+        measured_class_index: int | None = None,
     ) -> Any:
         """Return ``read`` of one opaque message-classification response."""
 
         await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
+
+        if self._model(model_id).windows is not None:
+
+            async def consume(raw, _source, _windows, _encoding, _head, _token_measurement):
+                return await _read(_detached(raw) if read is None else raw, read)
+
+            return await self._window_response(
+                model_id,
+                messages,
+                tool_dicts,
+                timeout=timeout,
+                read=consume,
+                measured_class_index=measured_class_index,
+            )
+
         record_model_input(messages, tools=tools)
 
         def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2929,6 +3688,7 @@ class ModelInferenceBackend:
             key=(messages, tool_dicts),
             timeout=timeout,
             read=read,
+            **({"token_head": False} if tool_dicts else {"token_head": True} if token_head else {}),
         )
 
     async def model_span_messages(
@@ -2954,6 +3714,10 @@ class ModelInferenceBackend:
                 raise ConfigurationError(f"Inference model '{model_id}' has no spans configuration")
             if model.category is None:
                 raise ConfigurationError(f"Inference model '{model_id}' has no category")
+            if model.windows is not None:
+                return await self._model_window_spans(
+                    model_id, messages, threshold, timeout=timeout
+                )
             adapter = self.adapters[model.adapter]
             decode_spans = getattr(adapter, "decode_spans", None)
             if not callable(decode_spans):
@@ -2961,10 +3725,17 @@ class ModelInferenceBackend:
                     f"Inference model '{model_id}' adapter '{model.adapter}' cannot decode spans"
                 )
             category = model.category
+            token_head = self._token_head_for(model_id, producer=True)
 
             async def spans(raw: Any) -> CollectionResult[Span]:
                 # The adapter's decoder is handed its own copy of the shared response.
-                decoded = await decode_spans(model, _detached(raw), messages, float(threshold))
+                decoded = await decode_spans(
+                    model,
+                    _detached(raw),
+                    messages,
+                    float(threshold),
+                    **({"token_head": True} if token_head else {}),
+                )
                 if isinstance(decoded, str | bytes) or not isinstance(decoded, Sequence):
                     raise TypeError("span adapter must return a sequence of Span values")
                 run_uuid = uuid.uuid4()
@@ -2996,6 +3767,7 @@ class ModelInferenceBackend:
                 None,
                 timeout=timeout,
                 read=spans,
+                **({"token_head": True} if token_head else {}),
             )
 
     async def model_classification(
@@ -3017,6 +3789,14 @@ class ModelInferenceBackend:
         share one response."""
 
         with model_read(model_id, "classify", adopt=True):
+            if self._model(model_id).windows is not None:
+                return await self._classification_response(
+                    model_id,
+                    Messages.from_openai([{"role": "user", "content": text}]),
+                    None,
+                    timeout=timeout,
+                    read=read,
+                )
             record_model_text(text)
             if self.config.config_version == 2:
                 message = {"role": "user", "content": text}
