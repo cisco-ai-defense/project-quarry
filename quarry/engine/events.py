@@ -32,18 +32,16 @@ rule AST (`quarry.types.dsl`), the scanner (`quarry.scanner`), or the DSL layer
 (`quarry.dsl.*`); the engine stays independent of how rules are parsed. (This boundary is
 enforced by ``tests/engine/test_async_runtime.py``.)
 
-Events are built directly from ``ScanContext.timeline`` so positions match the timeline's
-ordering by construction. Surface membership and per-surface ordinals are computed by
-*object identity* against the ``Conversation`` surface lists, so the view reflects exactly
-what those collections contain — which is the caller's complete conversation. Nothing upstream truncates or skips: an input that breaches a
-safety limit is rejected by ``ScanContext`` before the engine is reached, so the event
-word is always built over the whole transcript.
+Conversation events are built directly from ``ScanContext.timeline``. A scan may also
+supply registered extension events and an explicit shared order. Surface membership
+and per-surface ordinals are computed by object identity. Inputs that breach a safety
+limit are rejected before the engine builds the event word.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -81,23 +79,22 @@ class EventKind(StrEnum):
     MESSAGE = "message"
     TOOL_CALL = "tool_call"
     TOOL_RESPONSE = "tool_response"
+    EXTENSION = "extension"
 
 
 @dataclass(frozen=True)
 class ConversationEvent:
-    """One element of the temporal word — a faithful view of an Quarry timeline entry.
+    """One element of the temporal word from a conversation or registered extension.
 
     Fields:
-        position: exact ``ScanContext.timeline`` index (the shared clock).
-        kind: message / tool_call / tool_response.
-        surface_tags: the surfaces this event belongs to (subset of :data:`SURFACES`),
-            by identity membership in the ``Conversation`` collections.
+        position: index in the evaluated timeline.
+        kind: message / tool_call / tool_response / extension.
+        surface_tags: the surfaces this event belongs to, by identity membership.
         ordinals: per-surface index of this event within each surface it belongs to
             (e.g. ``{"user_messages": 0}`` == ``user_messages[0]``).
-        source: the original Quarry ``Message``/``ToolCall``/``ToolResponse`` object
-            (identity preserved for evidence and downstream grounding).
+        source: the original conversation object or validated extension fact.
         message_index: the source object's ``message_index`` (tool call/response) or the
-            timeline position (plain messages) — used for evidence provenance.
+            timeline position (plain messages), or -1 for extension events.
         source_path: a stable human-readable path to the event, e.g.
             ``"user_messages[0]"`` or ``"tool_calls[2]"`` (first surface + ordinal).
     """
@@ -204,6 +201,8 @@ class StaticEnvironment:
     # Diagnostic metadata, never used to answer a rule's size comparison. Explanations
     # can describe skipped tool atoms without semantically reading faulty definitions.
     tool_count: int | None = None
+    extension_state: dict[str, Any] = field(default_factory=dict)
+    missing_extension_states: frozenset[str] = frozenset()
     _system_prompt_reader: Callable[[], str | None] | None = field(
         default=None, repr=False, compare=False
     )
@@ -384,10 +383,18 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     size_readers.update(
         tools=lambda: len(conv.tools), system_prompt=lambda: len(conv.system_prompt or "")
     )
+    size_readers.update(
+        {
+            surface: lambda items=items: len(items)
+            for surface, items in context.extension_event_surfaces.items()
+        }
+    )
     surface_sizes = _SurfaceSizes(size_readers)
     tool_call_name_counts = _DeferredMapping(conv.messages._name_counts)
     tool_response_name_counts = _DeferredMapping(lambda: conv.messages._name_counts(responses=True))
     return StaticEnvironment(
+        extension_state=context.extension_state_values,
+        missing_extension_states=context.missing_extension_states,
         tools=_DeferredMapping(conv._tool_index),
         system_prompt=None,
         _system_prompt_reader=lambda: conv.system_prompt,
@@ -401,11 +408,43 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
 
 
 def build_evaluation_input(context: ScanContext) -> EvaluationInput:
-    """Assemble the full :class:`EvaluationInput` (static + events) from a scan context.
+    """Assemble the conversation and registered facts into one event word."""
+    static = build_static_environment(context)
+    conversation_events = build_events(context)
+    if not context.extension_event_sequence and context.ordered_timeline is None:
+        return EvaluationInput(static=static, events=conversation_events)
 
-    It depends only on the conversation (rule strings are already folded into the compiled
-    atoms), so one input serves every rule of a scan."""
-    return EvaluationInput(
-        static=build_static_environment(context),
-        events=build_events(context),
-    )
+    by_source = {id(event.source): event for event in conversation_events}
+    extension_surface = {
+        id(item): surface
+        for surface, items in context.extension_event_surfaces.items()
+        for item in items
+    }
+    word = context.ordered_timeline
+    if word is None:
+        word = [*context.timeline]
+        start = len(word)
+        word.extend(
+            (start + index, item) for index, item in enumerate(context.extension_event_sequence)
+        )
+    events: list[ConversationEvent] = []
+    extension_ordinals: dict[str, int] = {}
+    for position, item in word:
+        conversation_event = by_source.get(id(item))
+        if conversation_event is not None:
+            event = replace(conversation_event, position=position)
+        else:
+            surface = extension_surface[id(item)]
+            ordinal = extension_ordinals.get(surface, 0)
+            extension_ordinals[surface] = ordinal + 1
+            event = ConversationEvent(
+                position=position,
+                kind=EventKind.EXTENSION,
+                surface_tags=frozenset((surface,)),
+                ordinals={surface: ordinal},
+                source=item,
+                message_index=-1,
+                source_path=f"{surface}[{ordinal}]",
+            )
+        events.append(event)
+    return EvaluationInput(static=static, events=tuple(events))
