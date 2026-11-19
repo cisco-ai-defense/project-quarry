@@ -145,7 +145,8 @@ def json_size(value: Any, limit: int) -> int:
     (``json_string_size``), keys included; numbers, ``true``, ``false`` and ``null`` as
     written; two brackets per dict or list, a comma between items and a colon after each key.
     Every occurrence counts, so a value named twice counts twice, as it does in the JSON text
-    and in the ``Messages`` built from it.
+    and in the ``Messages`` built from it. Unsupported Python values count as over budget;
+    scalar subclasses are measured through built-in methods, without calling overrides.
 
     It saturates: once the running total passes ``limit`` this returns ``limit + 1`` and stops
     walking, so a result above ``limit`` means "over budget", not how far over. A value nested
@@ -166,9 +167,18 @@ def json_size(value: Any, limit: int) -> int:
             # A colon before a dict's value, a comma before any other item but the first.
             total += 1
         frame[2] += 1
-        if issubclass(type(current), str):
+        kind = type(current)
+        if kind is not str and issubclass(kind, str):
+            current = str.__str__(current)
+        elif kind is not int and issubclass(kind, int):
+            current = int.__int__(cast(int, current))
+        elif kind is not float and issubclass(kind, float):
+            current = float.__float__(cast(Any, current))
+        if type(current) not in (str, int, float, bool, dict, list, tuple, type(None)):
+            return limit + 1
+        if type(current) is str:
             # A string's UTF-8 bytes are at least its length; skip encoding one that is over.
-            if str.__len__(cast(str, current)) > limit - total:
+            if str.__len__(current) > limit - total:
                 return limit + 1
             total += json_string_size(str.__str__(current))
         elif current is True or current is None:

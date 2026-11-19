@@ -11,7 +11,7 @@
       "name": "quarry",
       "source": "./",
       "description": "Find Quarry language features, compile rules, and scan single or batched conversations.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }

@@ -288,7 +288,7 @@ _MODEL_TEXT_FIELDS: dict[str, dict[str, str]] = {"ToolCall": {"arguments": "raw_
 _MAP_ITEM_SURFACE = "map_items"
 # The types of a map comprehension item field that a text test reads as a rule step reads it.
 _STEP_TEXT_TYPES = frozenset({"object", "object[]", "string", "string?"})
-_MESSAGE_VALUE_TYPES = frozenset({"Messages", "Message", "AssistantMessage"})
+_MESSAGE_VALUE_TYPES = frozenset({"Messages", "Messages[]", "Message", "AssistantMessage"})
 
 # `join()` makes the text of a model input from a map comprehension. The compiler rejects every
 # other use of `join()` and of a map comprehension with one of these messages.

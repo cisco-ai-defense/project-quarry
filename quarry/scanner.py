@@ -1835,8 +1835,8 @@ class DSLScanner:
 
         try:
             if type(data) is not dict:
-                raise ConversationValidationError("A conversation must be an object")
-            if any(type(key) is not str for key in data):
+                raise ConversationValidationError("A conversation must be an exact built-in object")
+            if any(type(key) is not str for key in dict.__iter__(data)):
                 raise ConversationValidationError(
                     "Conversation keys must be exact built-in strings"
                 )
@@ -1871,6 +1871,10 @@ class DSLScanner:
                         continue
                     if type(value) is not dict:
                         reason = f"{key!r} must be an object of its sections"
+                        input_faults.update(dict.fromkeys(sections_of, reason))
+                        continue
+                    if any(type(section_key) is not str for section_key in dict.__iter__(value)):
+                        reason = f"{key!r} section keys must be exact built-in strings"
                         input_faults.update(dict.fromkeys(sections_of, reason))
                         continue
                     for section in read:
@@ -2009,6 +2013,19 @@ class DSLScanner:
                 self.limits,
                 {section: reason for section, reason in input_faults.items() if section in read},
             )
+            max_timeline_items = self.limits.max_timeline_items
+            timeline_item_count = len(context.timeline) + sum(
+                len(items) for items in prepared.lists.values()
+            )
+            if (
+                self.limits.enforce_limits
+                and max_timeline_items > 0
+                and timeline_item_count > max_timeline_items
+            ):
+                raise ConversationValidationError(
+                    f"scan produces {timeline_item_count} timeline items; limit is "
+                    f"{max_timeline_items}"
+                )
             missing_event_surfaces = {
                 section
                 for section in self.input_registry.event_surfaces
