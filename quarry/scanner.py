@@ -30,7 +30,6 @@ from quarry.cache.async_cache import current_scan, result_cache, retain_scan, sc
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
-from quarry.core.conversation import Conversation
 from quarry.core.logging import get_app_logger
 from quarry.dsl.functions import (
     capability_tags,
@@ -1347,39 +1346,7 @@ class DSLScanner:
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
-        if legacy_chat or chat_read:
-            try:
-                validate_conversation_arguments(context.conversation.messages)
-            except QuarryTimeoutError as exc:
-                if self.limits.fail_on_timeout:
-                    raise
-                return ScanResult(
-                    file_path=file_path,
-                    rule_matches=[],
-                    scan_time=(datetime.now() - start_time).total_seconds(),
-                    error=f"Tool argument validation timed out: {exc}",
-                    error_category=ScanFailureCategory.TIMEOUT,
-                )
-            except ConversationValidationError as exc:
-                conversation_surfaces = chat_surfaces - {"tools"}
-                if legacy_chat or every_rule_reads(conversation_surfaces):
-                    message = str(exc)
-                    return ScanResult(
-                        file_path=file_path,
-                        rule_matches=[],
-                        scan_time=(datetime.now() - start_time).total_seconds(),
-                        error=f"Conversation validation error: {message}",
-                        validation_error=message,
-                    )
-                # Malformed chat cannot become a match, including for a name-only
-                # reader. Independent inputs and static tools keep their own state.
-                part_faults.update(dict.fromkeys(conversation_surfaces, exc))
-                context.conversation = Conversation(
-                    [],
-                    chat.get("tools"),
-                    tool_call_types=self.tool_call_types,
-                    max_nesting_depth=self.limits.max_nesting_depth,
-                )
+        # Argument decoding stays local to rules that read arguments.
 
         try:
             wanted = {section: value for section, value in raw_sections.items() if section in read}
