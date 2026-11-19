@@ -34,6 +34,42 @@ condition:
 
 A model alias can expose scoring, classification, completion, input token counting, splitting, or spans when its adapter and configuration support them. Quarry validates scores and provider output. A `complete.response_schema` lets a completion rule read validated JSON. For spans, a rule may use `model("alias").spans(messages, threshold)` in `collect:` to return typed span items after its condition matches.
 
+## Selecting model input
+
+Model operations accept immutable message selections. A filter keeps matching messages in their
+current order, `+` combines selections in written order, and a conditional evaluates only its
+chosen branch:
+
+```text
+variables:
+    user_turns = [item for item in messages if item.role == "user"]
+    input = messages[:1] + user_turns[-1:] if messages[-1].role == "user" else user_turns
+condition:
+    model("guard").classify(input) >= 0.8
+```
+
+The filter output name must match its loop variable. Filters and conditional predicates are local,
+Boolean checks and cannot call a model. Both conditional branches must have compatible static
+types. A source selection can be combined with an allowlisted text constructor:
+
+```text
+messages[-2:] + message("assistant", "Answer with one word.")
+```
+
+Constructed roles are literal `system`, `developer`, `user`, or `assistant` values. Constructors
+do not accept tool IDs, provider metadata, arbitrary objects, or custom roles. Source messages
+retain their transcript identity, multimodal parts, provenance, and tool links; constructed
+messages receive separate scan-local identity and have no source offsets. A direct copy such as
+`message("user", messages[0].content)` retains character provenance from that source field.
+
+Message order is preserved, repeated selections remain repeated, and an empty selection makes no
+provider call. An explicitly constructed empty message remains an empty message and is sent to the provider.
+An existing message with null content contributes empty text when its content is passed to an
+explicit constructor; an absent selected message still produces no provider call. Selection work
+uses `max_comprehension_size`; nested prepared expressions are also depth-, node-, constructor-,
+and fanout-bounded. A combined value has a separate hard ceiling of 256 operands and 10,000
+messages.
+
 ## Decision models
 
 The built-in `system_one` adapter serves System One decision models such as TypeSafe's [Jev](https://docs.typesafe.ai/api). These models return calibrated probabilities instead of generating text. Quarry sends the trusted criteria as the question and the conversation as separate state, so no verdict tokens or boundary tags are involved.

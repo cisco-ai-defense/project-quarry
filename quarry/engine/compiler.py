@@ -42,6 +42,7 @@ from typing import Literal as TypeLiteral
 
 from quarry.engine import temporal as T
 from quarry.engine.atoms import (
+    MAX_MODEL_EXPRESSION_FANOUT,
     POSITION_FIELD_SEP,
     POSITION_GROUP_SEP,
     AtomDomain,
@@ -50,6 +51,9 @@ from quarry.engine.atoms import (
     ModelExpression,
     StringSemantics,
     make_atom,
+    validate_constructed_message_graph,
+    validate_model_expression,
+    validate_transform_expression_graph,
 )
 from quarry.engine.budget import DEFAULT_MAX_WORK, charge
 from quarry.engine.collect import CollectPlan
@@ -60,6 +64,7 @@ from quarry.engine.diagnostics import (
     SourceRef,
     UnsupportedConstruct,
 )
+from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
 from quarry.language.metadata import TYPE_CONVERSIONS, DSLParameter, Use, dsl_compiler_form
 from quarry.language.runtime import (
     LanguageSpecError,
@@ -79,6 +84,7 @@ from quarry.types.dsl import (
     AnyComprehension,
     Assignment,
     BinaryOp,
+    ConditionalValue,
     ConditionNode,
     ContainsAnyOp,
     FieldAccess,
@@ -102,6 +108,7 @@ from quarry.types.dsl.operators.string import (
     StringSetQuantifier,
 )
 from quarry.types.response_schema import response_schema_types
+from quarry.types.transforms import MAX_TRANSFORM_CHAIN, ContentTransform
 
 _T = TypeVar("_T")
 
@@ -188,12 +195,12 @@ def _chunk_scalar_shapes() -> dict[str, dict[str, int | bool]]:
     return shapes
 
 
-_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event"))
-_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static"))
+_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event") | EVENT_SURFACES.get())
+_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static") | STATIC_SURFACES.get())
 # Surfaces valid as a Messages-typed model-input selection (no tools). ``tool_calls`` is
 # excluded — it is a collection of ToolCall objects, not a message transcript.
 _MODEL_INPUT_SURFACES = _LazySet(lambda: surface_names(model_input=True))
-_SURFACES = _LazySet(surface_names)
+_SURFACES = _LazySet(lambda: surface_names() | EVENT_SURFACES.get() | STATIC_SURFACES.get())
 
 # Role-view accessors valid as a model-input selection filter step (everything in
 # _MODEL_INPUT_SURFACES except the whole-transcript ``messages`` root).
@@ -206,6 +213,13 @@ _COMPARISONS = {"=", "!=", ">", "<", ">=", "<="}
 _CONTENT_OPS = {"contains", "in", "~", "matches"}
 
 _MODEL_FIELD_TYPES: dict[str, dict[str, str]] = {
+    "Messages": {
+        "system_messages": "Messages",
+        "developer_messages": "Messages",
+        "user_messages": "Messages",
+        "assistant_messages": "Messages",
+        "tool_responses": "Messages",
+    },
     "AssistantMessage": {
         "role": "string",
         "content": "string",
@@ -246,6 +260,7 @@ _SURFACE_ELEMENT_TYPES: dict[str, str] = {
     "developer_messages": "Message",
     "user_messages": "Message",
     "assistant_messages": "AssistantMessage",
+    "tool_responses": "Message",
     "tool_calls": "ToolCall",
 }
 
@@ -257,6 +272,7 @@ _MODEL_TEXT_FIELDS: dict[str, dict[str, str]] = {"ToolCall": {"arguments": "raw_
 _MAP_ITEM_SURFACE = "map_items"
 # The types of a map comprehension item field that a text test reads as a rule step reads it.
 _STEP_TEXT_TYPES = frozenset({"object", "object[]", "string", "string?"})
+_MESSAGE_VALUE_TYPES = frozenset({"Messages", "Message", "AssistantMessage"})
 
 # `join()` makes the text of a model input from a map comprehension. The compiler rejects every
 # other use of `join()` and of a map comprehension with one of these messages.
@@ -377,13 +393,19 @@ class CompileResult:
 
 
 class _Compiler:
-    def __init__(self, rule, response_schemas: Mapping[str, str] | None = None):
+    def __init__(
+        self,
+        rule,
+        response_schemas: Mapping[str, str] | None = None,
+        transforms: Mapping[str, ContentTransform] | None = None,
+    ):
         self.rule = rule
         self.rule_name = getattr(rule, "name", "")
         # An alias with a response schema completes to a message whose `.json` the schema
         # types, so a rule reading a field the schema lacks fails at load.
         self._field_types = dict(_MODEL_FIELD_TYPES)
         self._completion_types: dict[str, str] = {}
+        self._transforms = dict(transforms or {})
         for alias, schema_text in (response_schemas or {}).items():
             root, objects = response_schema_types(alias, schema_text)
             completion = f"completion of model {alias!r}"
@@ -647,6 +669,11 @@ class _Compiler:
         scope = Scope()
         if not self._contains_model_call(node):
             self._reject_model_text_forms(node)
+        if isinstance(node, BinaryOp) and node.operator in _COMPARISONS | _CONTENT_OPS:
+            for operand in (node.left, node.right):
+                if surface := self._input_state_field_surface(operand):
+                    self.has_static = True
+                    return self.compile_step(node, surface, scope)
         # Chunked scoring, both forms. The collection is a function result rather than a
         # timeline surface. Each desugars to ONE folded atom.
         #   quantifier:  any/all <c> in llm_split_conversation(...) where <scalar>(…, <c>) <op> n
@@ -687,7 +714,7 @@ class _Compiler:
             complete = self._complete_comparison(node)
             if complete is not None:
                 return complete
-        if self._contains_model_call(node):
+        if self._contains_model_call(node) or self._contains_conditional_value(node):
             return self._model_predicate_atom(node, scope)
         # `system_prompt contains/~ X` — a zero-width static content check on the
         # system prompt. Bare static atom (holds at boot, false on real events).
@@ -1156,6 +1183,129 @@ class _Compiler:
         return None
 
     @staticmethod
+    def _input_state_field_surface(node) -> str | None:
+        """Find a registered state root through fields and literal subscripts."""
+        base = node
+        while True:
+            if isinstance(base, Identifier):
+                return base.name if base.name in STATIC_SURFACES.get() else None
+            if isinstance(base, FieldAccess):
+                base = base.base
+            elif isinstance(base, FunctionCall) and base.name in {"_index", "_slice"}:
+                base = base.args[0]
+            else:
+                return None
+
+    def reject_unsupported_input_state_functions(self, node) -> None:
+        """Reject function reads whose existing lowering would bind state to an event.
+
+        ``len`` and ``count`` currently measure text, so applying them to arbitrary
+        JSON state (including arrays) would also give misleading results. Follow
+        ``as`` aliases through conjunctions, while allowing direct scalar state
+        comparisons and content predicates.
+        """
+        state_surfaces = STATIC_SURFACES.get()
+        if not state_surfaces or node is None:
+            return
+
+        def conjunction_scope(
+            left: ConditionNode, scope: Mapping[str, str | None]
+        ) -> Mapping[str, str | None]:
+            """Carry every left-hand `as` binding into the following `and` clause."""
+            pending = [left]
+            while pending:
+                current = pending.pop()
+                if (
+                    isinstance(current, BinaryOp)
+                    and not isinstance(current, FlowOp)
+                    and current.operator == "and"
+                ):
+                    pending.extend((current.right, current.left))
+                elif isinstance(current, Assignment):
+                    source = (
+                        state_root(current.expression, scope)
+                        if self._scalar_alias(current) is not None
+                        else None
+                    )
+                    scope = {**scope, current.variable: source}
+            return scope
+
+        def scoped_children(
+            current: ConditionNode, scope: Mapping[str, str | None]
+        ) -> list[tuple[ConditionNode, Mapping[str, str | None]]]:
+            children = []
+            for field_name in condition_child_fields(current):
+                child_scope = scope
+                if (
+                    isinstance(
+                        current,
+                        (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension),
+                    )
+                    and field_name != "collection"
+                ):
+                    # The bound element shadows an outer `as` alias in its body.
+                    child_scope = {**scope, current.variable: None}
+                elif (
+                    isinstance(current, BinaryOp)
+                    and not isinstance(current, FlowOp)
+                    and current.operator == "and"
+                    and field_name == "right"
+                ):
+                    child_scope = conjunction_scope(current.left, scope)
+                value = getattr(current, field_name)
+                values = value if isinstance(value, list | tuple) else (value,)
+                children.extend(
+                    (child, child_scope) for child in values if isinstance(child, ConditionNode)
+                )
+            return children
+
+        def state_root(expression, scope: Mapping[str, str | None]) -> str | None:
+            # Follow the value's source, not predicates inside a derived value.
+            pending = [expression]
+            while pending:
+                current = pending.pop()
+                if isinstance(current, Identifier):
+                    if current.name in scope:
+                        if surface := scope[current.name]:
+                            return surface
+                    elif current.name in state_surfaces:
+                        return current.name
+                elif isinstance(current, FieldAccess) and current.base is not None:
+                    pending.append(current.base)
+                elif isinstance(current, FunctionCall) and current.name in {"_index", "_slice"}:
+                    pending.extend(current.args[:1])
+            return None
+
+        external_names = set(_EXTERNAL_FUNCS)
+        # Preserve the AST walk's cycle rejection for programmatically built rules.
+        for _ in walk_condition_nodes(node):
+            pass
+        pending: list[tuple[ConditionNode, Mapping[str, str | None]]] = [(node, {})]
+        while pending:
+            expression, scope = pending.pop()
+            if isinstance(expression, FunctionCall) and expression.name in {"len", "count"}:
+                if expression.args and (surface := state_root(expression.args[0], scope)):
+                    raise UnsupportedConstruct(
+                        f"{expression.name}() cannot read registered extension state "
+                        f"{surface}; compare a scalar state field directly"
+                    )
+            elif isinstance(expression, FunctionCall) and expression.name in external_names:
+                for argument in expression.args:
+                    if surface := state_root(argument, scope):
+                        raise UnsupportedConstruct(
+                            f"{expression.name}() cannot read registered extension state "
+                            f"{surface}; compare a scalar state field directly"
+                        )
+            elif isinstance(expression, ModelCall):
+                for argument in expression.args:
+                    if surface := state_root(argument, scope):
+                        raise UnsupportedConstruct(
+                            f"model().{expression.operation}() cannot read registered "
+                            f"extension state {surface}; compare a scalar state field directly"
+                        )
+            pending.extend(reversed(scoped_children(expression, scope)))
+
+    @staticmethod
     def _static_field_surface(node) -> str | None:
         """If ``node`` names the ``system_prompt`` static surface (bare Identifier or the
         equivalent base-less FieldAccess), return ``"system_prompt"``; else None.
@@ -1282,6 +1432,8 @@ class _Compiler:
         self._reject_foreign_reads(node, scope)
         if not self._contains_model_call(node):
             self._reject_model_text_forms(node)
+        if isinstance(node, ConditionalValue):
+            return self._model_predicate_atom(node, scope, surface, event_bound=True)
         if isinstance(node, BinaryOp):
             op = node.operator
             if op == "matches" and isinstance(node.right, PatternMatch):
@@ -1290,7 +1442,7 @@ class _Compiler:
                 left = self.compile_step(node.left, surface, scope)
                 right = self.compile_step(node.right, surface, scope)
                 return T.And(left, right) if op == "and" else T.Or(left, right)
-            if self._contains_model_call(node):
+            if self._contains_model_call(node) or self._contains_conditional_value(node):
                 return self._model_predicate_atom(node, scope, surface, event_bound=True)
             if op == "contains":
                 if self._is_capture_ref(node.right):
@@ -1469,6 +1621,12 @@ class _Compiler:
         )
 
     @staticmethod
+    def _contains_conditional_value(node) -> bool:
+        """Return whether ``node`` chooses a typed value with ``if ... else``."""
+
+        return any(isinstance(current, ConditionalValue) for current in walk_condition_nodes(node))
+
+    @staticmethod
     def _model_calls(node) -> tuple[ModelCall, ...]:
         """Return typed model operations in deterministic source order."""
 
@@ -1491,10 +1649,17 @@ class _Compiler:
                 and scope.resolve_element(current.name) is not None
             ):
                 dependencies.add(current.name)
-            body = hidden | {current.variable} if isinstance(current, MapComprehension) else hidden
+            body = (
+                hidden | {current.variable}
+                if isinstance(current, MapComprehension | FilterComprehension)
+                else hidden
+            )
             for child in iter_condition_children(current):
-                # The collection of a map comprehension is outside the scope of its variable.
-                outside = isinstance(current, MapComprehension) and child is current.collection
+                # A comprehension's collection is outside the scope of its variable.
+                outside = (
+                    isinstance(current, MapComprehension | FilterComprehension)
+                    and child is current.collection
+                )
                 pending.append((child, hidden if outside else body))
         return dependencies
 
@@ -1633,9 +1798,10 @@ class _Compiler:
         *,
         event_bound: bool = False,
     ) -> T.Formula:
-        """Lower one closed model-derived boolean expression to an external atom."""
+        """Lower one typed Boolean value expression to an external atom."""
 
-        if any(call.operation == "split" for call in self._model_calls(node)):
+        model_calls = self._model_calls(node)
+        if any(call.operation == "split" for call in model_calls):
             raise UnsupportedConstruct(
                 "model().split() is supported only as an any-comprehension collection"
             )
@@ -1644,7 +1810,12 @@ class _Compiler:
             raise UnsupportedConstruct("a model expression must produce a boolean rule condition")
         if surface == "messages" and not event_bound:
             self.has_static = True
-        return self._mint_model_expression(expression, surface, event_bound=event_bound)
+        return self._mint_model_expression(
+            expression,
+            surface,
+            event_bound=event_bound,
+            cost=Cost.LLM if model_calls else Cost.PURE,
+        )
 
     def _mint_model_expression(
         self,
@@ -1652,16 +1823,27 @@ class _Compiler:
         surface: str,
         *,
         event_bound: bool = False,
+        cost: Cost = Cost.LLM,
     ) -> T.Formula:
         """Intern an engine-native model predicate without overloading legacy atom fields."""
 
+        try:
+            validate_model_expression(expression)
+            validate_constructed_message_graph(expression)
+            validate_transform_expression_graph(
+                expression,
+                maximum=MAX_TRANSFORM_CHAIN,
+                validate_plan=ContentTransform.from_canonical_json,
+            )
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedConstruct(str(exc)) from exc
         domain = AtomDomain.EVENT if event_bound else AtomDomain.STATIC
         spec = make_atom(
             domain=domain,
             selector=surface,
             value_expr_key="model_expression",
             predicate="external",
-            cost=Cost.LLM,
+            cost=cost,
             detector="model_expression",
             model_expression=expression,
             evidence_policy="model",
@@ -1696,6 +1878,24 @@ class _Compiler:
             ModelExpression("if_refused", None, (guarded, fallback)),
             _fallback_type(guarded_type, fallback_type),
         )
+
+    @dsl_compiler_form(
+        name="messages.transform",
+        return_type="model_input",
+        syntax='messages.transform("name")',
+        implicit_receiver_count=1,
+    )
+    def _bind_content_transform(
+        self,
+        name: Annotated[object, DSLParameter(accepted_types=("string",), literal_only=True)],
+    ) -> object:
+        """Apply one reviewed configured transform to message text.
+
+        The result keeps message roles, tool links, and source provenance. Transforms may be
+        chained, filtered, sliced, composed, or passed directly to a model operation.
+        """
+
+        return name
 
     def _lower_model_expression(
         self,
@@ -1759,10 +1959,13 @@ class _Compiler:
                 "developer_messages",
                 "user_messages",
                 "assistant_messages",
+                "tool_responses",
             }:
                 return ModelExpression("message_view", node.name), "Messages"
             if node.name == "tools":
                 return ModelExpression("tools"), "Tools"
+            if node.name in STATIC_SURFACES.get() and scope.resolve_element(node.name) is None:
+                return ModelExpression("input_state", node.name), "object"
             bound_surface = scope.resolve_element(node.name)
             if bound_surface is not None:
                 result_type = scope.resolve_element_type(node.name) or _SURFACE_ELEMENT_TYPES.get(
@@ -1779,6 +1982,51 @@ class _Compiler:
             return ModelExpression("field", ".".join(fields), (base,)), result_type
 
         if isinstance(node, FunctionCall):
+            if node.name == "_transform":
+                if len(node.args) != 2:
+                    raise UnsupportedConstruct("messages.transform() takes one literal name")
+                messages, messages_type = self._lower_model_expression(node.args[0], scope)
+                messages, messages_type = _convert(messages, messages_type, {"Messages"})
+                if messages_type != "Messages":
+                    raise UnsupportedConstruct("messages.transform() receiver must be Messages")
+                name = self._lit(node.args[1])
+                if not isinstance(name, str) or not name:
+                    raise UnsupportedConstruct(
+                        "messages.transform() requires one non-empty literal name"
+                    )
+                transform = self._transforms.get(name)
+                if transform is None:
+                    raise UnsupportedConstruct(f"content transform {name!r} is not configured")
+                if type(transform) is not ContentTransform:
+                    raise UnsupportedConstruct(
+                        f"content transform {name!r} must use the immutable transform contract"
+                    )
+                return (
+                    ModelExpression("transform", transform.canonical_json(), (messages,)),
+                    "Messages",
+                )
+            if node.name == "_input_message":
+                surface_node, role_node, *field_nodes = node.args
+                parts = []
+                for field_node in field_nodes:
+                    part, part_type = self._lower_model_content(field_node, scope)
+                    if part_type != "string" or part.kind != "field":
+                        raise UnsupportedConstruct("an input's content fields are text")
+                    parts.append(part)
+                surface = self._lit(surface_node)
+                order = "\x1f".join(INPUT_TEXTS.get().get(surface, ()))
+                return (
+                    ModelExpression(
+                        "input_message",
+                        surface,
+                        (
+                            ModelExpression("literal", self._lit(role_node)),
+                            ModelExpression("literal", order),
+                            *parts,
+                        ),
+                    ),
+                    "Messages",
+                )
             if node.name == "extract" and 2 <= len(node.args) <= 4:
                 messages, messages_type = self._lower_model_expression(node.args[0], scope)
                 span, span_type = self._lower_model_expression(node.args[1], scope)
@@ -1866,6 +2114,9 @@ class _Compiler:
                 raise UnsupportedConstruct(_JOIN_FORM)
             raise UnsupportedConstruct(f"function {node.name}() is not a model-expression input")
 
+        if isinstance(node, FilterComprehension):
+            return self._lower_message_selection(node, scope)
+
         if isinstance(node, ModelCall):
             if node.result_type.endswith("[]") and not allow_collection_source:
                 if node.operation == "spans":
@@ -1905,6 +2156,9 @@ class _Compiler:
                 result_type,
             )
 
+        if isinstance(node, ConditionalValue):
+            return self._lower_conditional_value(node, scope)
+
         if isinstance(node, UnaryOp) and node.operator == "not":
             operand, operand_type = self._lower_model_expression(node.operand, scope)
             if operand_type != "bool":
@@ -1936,6 +2190,8 @@ class _Compiler:
                         f"{node.operator} requires boolean model expressions"
                     )
                 return ModelExpression(node.operator, None, (left, right)), "bool"
+            if node.operator == "+" and _MESSAGE_VALUE_TYPES & {left_type, right_type}:
+                return self._lower_message_concat(node, (left, left_type), (right, right_type))
             if node.operator in {"+", "-", "*"}:
                 if left_type not in {"int", "float"} or right_type not in {"int", "float"}:
                     raise UnsupportedConstruct("model arithmetic requires numeric operands")
@@ -1955,6 +2211,96 @@ class _Compiler:
         if isinstance(node, MapComprehension):
             raise UnsupportedConstruct(_MAP_COMPREHENSION_FORM)
         raise UnsupportedConstruct(f"unsupported model expression {type(node).__name__}")
+
+    def _lower_message_selection(
+        self, node: FilterComprehension, scope: Scope
+    ) -> tuple[ModelExpression, str]:
+        """Lower an identity filter over a typed message value."""
+
+        if (node.output_variable or node.variable) != node.variable:
+            raise UnsupportedConstruct(
+                "a message selection must keep its loop variable before `for`"
+            )
+        if self._contains_model_call(node.condition):
+            raise UnsupportedConstruct("a message selection predicate cannot call a model")
+        self._reject_provenance_selectors(node.condition)
+        source, source_type = self._lower_model_expression(node.collection, scope)
+        source, source_type = _convert(source, source_type, {"Messages"})
+        if source_type != "Messages":
+            raise UnsupportedConstruct("unsupported model expression FilterComprehension")
+        item_scope = scope.bind(node.variable, _MAP_ITEM_SURFACE, "Message")
+        predicate, predicate_type = self._lower_model_expression(node.condition, item_scope)
+        if predicate_type != "bool":
+            raise UnsupportedConstruct("a message selection predicate must be Boolean")
+        return ModelExpression("message_select", node.variable, (source, predicate)), "Messages"
+
+    def _lower_conditional_value(
+        self, node: ConditionalValue, scope: Scope
+    ) -> tuple[ModelExpression, str]:
+        """Lower a lazy conditional whose branches have one statically known type."""
+
+        if self._contains_model_call(node.predicate):
+            raise UnsupportedConstruct("a conditional value predicate cannot call a model")
+        self._reject_provenance_selectors(node.predicate)
+        predicate, predicate_type = self._lower_model_expression(node.predicate, scope)
+        if predicate_type != "bool":
+            raise UnsupportedConstruct("a conditional value predicate must be Boolean")
+
+        branches = [
+            self._lower_model_expression(branch, scope) for branch in (node.chosen, node.fallback)
+        ]
+        if any(branch_type in _MESSAGE_VALUE_TYPES for _, branch_type in branches):
+            branches = [
+                cast(tuple[ModelExpression, str], _convert(value, value_type, {"Messages"}))
+                for value, value_type in branches
+            ]
+        (chosen, chosen_type), (fallback, fallback_type) = branches
+        numeric = {"int", "float"}
+        if chosen_type in numeric and fallback_type in numeric:
+            result_type = "float" if "float" in {chosen_type, fallback_type} else "int"
+        elif chosen_type == fallback_type:
+            result_type = chosen_type
+        else:
+            raise UnsupportedConstruct(
+                "both branches of a conditional value must have compatible types "
+                f"(got {chosen_type} and {fallback_type})"
+            )
+        return ModelExpression("conditional", None, (predicate, chosen, fallback)), result_type
+
+    def _lower_message_concat(
+        self,
+        node: BinaryOp,
+        left: tuple[ModelExpression, str],
+        right: tuple[ModelExpression, str],
+    ) -> tuple[ModelExpression, str]:
+        """Lower ``+`` over typed message values in written order."""
+
+        operands: list[ModelExpression] = []
+        for _written, (value, value_type) in ((node.left, left), (node.right, right)):
+            value, value_type = _convert(value, value_type, {"Messages"})
+            if value_type != "Messages":
+                raise UnsupportedConstruct(
+                    "message combination requires message values on both sides of `+`; "
+                    f"one side has type {value_type}"
+                )
+            operands.extend(value.children if value.kind == "concat" else (value,))
+            if len(operands) > MAX_MODEL_EXPRESSION_FANOUT:
+                raise UnsupportedConstruct(
+                    f"message combination exceeds {MAX_MODEL_EXPRESSION_FANOUT} operands"
+                )
+        return ModelExpression("concat", None, tuple(operands)), "Messages"
+
+    @staticmethod
+    def _reject_provenance_selectors(predicate: ConditionNode) -> None:
+        """Keep local value predicates on the same public fields as ordinary rule checks."""
+
+        if any(
+            isinstance(node, FieldAccess) and "message_index" in node.fields
+            for node in walk_condition_nodes(predicate)
+        ):
+            raise UnsupportedConstruct(
+                "message_index is provenance metadata and cannot be used as a selector"
+            )
 
     def compile_collect(self, node) -> CollectPlan:
         """Lower one identity filter comprehension to an AST-free collection plan."""
@@ -1999,12 +2345,31 @@ class _Compiler:
                 raise UnsupportedConstruct("collect: filter must produce a boolean value")
             (model_terms if has_model_call else local_terms).append(predicate)
 
+        local_predicate = self._join_collect_predicates(local_terms)
+        model_predicate = self._join_collect_predicates(model_terms) if model_terms else None
+        try:
+            additional_roots = (
+                local_predicate,
+                *((model_predicate,) if model_predicate is not None else ()),
+            )
+            validate_constructed_message_graph(
+                source,
+                additional_roots=additional_roots,
+            )
+            validate_transform_expression_graph(
+                source,
+                maximum=MAX_TRANSFORM_CHAIN,
+                validate_plan=ContentTransform.from_canonical_json,
+                additional_roots=additional_roots,
+            )
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedConstruct(str(exc)) from exc
         return CollectPlan(
             variable=node.variable,
             item_type=item_type,
             source=source,
-            local_predicate=self._join_collect_predicates(local_terms),
-            model_predicate=(self._join_collect_predicates(model_terms) if model_terms else None),
+            local_predicate=local_predicate,
+            model_predicate=model_predicate,
             has_external_work=self._contains_model_call(node),
         )
 
@@ -2305,17 +2670,13 @@ class _Compiler:
             ),
         ],
     ) -> tuple[object, ...]:
-        """Return original-conversation spans from the alias-configured span operation.
+        """Return spans from the alias-configured typed message input.
 
-        `messages` must be the root conversation or one of its views. Quarry reuses the raw
-        classifier response cached for the same model input. The adapter owns span decoding and
-        how the required `threshold` is applied.
+        Source-backed characters retain exact original ranges. Constructed characters are
+        explicitly unmapped. Quarry reuses the raw classifier response cached for the same model
+        input. The adapter owns span decoding and how the required `threshold` is applied.
         """
 
-        if not self._is_conversation_backed_messages(messages):
-            raise UnsupportedConstruct(
-                "model().spans() input must be a view of the original conversation"
-            )
         return messages, threshold
 
     @staticmethod
@@ -2330,9 +2691,12 @@ class _Compiler:
                 "user_messages",
                 "assistant_messages",
             }
-        return (
-            isinstance(node, FunctionCall)
-            and node.name in {"_slice", "_index"}
+        return isinstance(node, FunctionCall) and (
+            node.name in {"_slice", "_index"}
+            and bool(node.args)
+            and _Compiler._is_conversation_backed_messages(node.args[0])
+            or node.name == "_transform"
+            and bool(node.args)
             and _Compiler._is_conversation_backed_messages(node.args[0])
         )
 
@@ -2660,12 +3024,20 @@ class _Compiler:
         and ``len(field) <op> n`` as per-step scalar-gate atoms; a bare collection count
         macro is a top-level concern (see _count_macro)."""
         left, right, op = node.left, node.right, node.operator
+
         # Field vs literal (=/!=). `field = null` is a NULL-CHECK (present-vs-absent),
         # NOT a string compare to "None" — quarry's FieldAccess returns None for a null
         # value or a missing key, and `= null` is true in both cases. `field = "lit"` is
         # an exact-match atom. Both operand orders.
+        def indexed_field(value) -> bool:
+            while (
+                isinstance(value, FunctionCall) and value.name == "_index" and len(value.args) == 2
+            ):
+                value = value.args[0]
+            return isinstance(value, FieldAccess)
+
         for fnode, vnode in ((left, right), (right, left)):
-            if isinstance(fnode, FieldAccess) and isinstance(vnode, Literal) and op in ("=", "!="):
+            if indexed_field(fnode) and isinstance(vnode, Literal) and op in ("=", "!="):
                 if vnode.value is None:
                     atom = self._mint_scalar(surface, self._field_path(fnode), "is_null", "=", None)
                     return atom if op == "=" else T.Not(atom)
@@ -3554,6 +3926,7 @@ class _Compiler:
         """Build a one-message model input from a role and literal or field-backed content.
 
         In a version 2 model expression, `content` can also be the text that `join()` gives.
+        Use `+` to place the constructed message before, after, or between source selections.
         """
 
         role = self._string_literal(role_node, "message() role")
@@ -4232,6 +4605,7 @@ def compile_rule(
     max_work: int | None = DEFAULT_MAX_WORK,
     decompose: bool = True,
     response_schemas: Mapping[str, str] | None = None,
+    transforms: Mapping[str, ContentTransform] | None = None,
 ) -> CompileResult:
     """Compile a parsed ``DSLRule`` into a :class:`CompiledRuleArtifact` through the core
     calculus (``quarry.engine.lower``). On any unsupported construct or construction limit,
@@ -4239,7 +4613,8 @@ def compile_rule(
     ``None`` lifts it), the result's ``ok`` is False with located diagnostics and
     ``artifact=None``. ``decompose`` builds the rule's decision tree (see ``compile_core``).
     ``response_schemas`` maps each model alias to its completion response schema, which types
-    the rule's ``.json`` reads; without one, a rule cannot read ``.json``."""
+    the rule's ``.json`` reads; without one, a rule cannot read ``.json``. ``transforms`` is
+    the immutable registry resolved into transform expressions at compile time."""
     from quarry.engine.lower import compile_core
 
     compatibility_issue = check_rule_compatibility(rule)
@@ -4253,7 +4628,11 @@ def compile_rule(
         )
         return CompileResult(rule_name, None, diagnostics)
     return compile_core(
-        rule, max_work=max_work, decompose=decompose, response_schemas=response_schemas
+        rule,
+        max_work=max_work,
+        decompose=decompose,
+        response_schemas=response_schemas,
+        transforms=transforms,
     )
 
 

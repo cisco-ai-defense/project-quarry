@@ -544,6 +544,31 @@ condition:
         backend_required=True,
     ),
     ExampleRecord(
+        id="example:message-composition",
+        rule_text="""rule "Selected model input"
+variables:
+    selected = [item for item in messages if item.role == "user"]
+    input = messages[:1] + selected[-1:] if messages[-1].role == "user" else selected
+condition:
+    model("guard").classify(input) >= 0.8
+""",
+        covered_item_ids=(
+            "construct:addition",
+            "construct:conditional-value",
+            "construct:filter-comprehension",
+        ),
+        backend_required=True,
+    ),
+    ExampleRecord(
+        id="example:content-transform",
+        rule_text="""rule "Normalized model input"
+condition:
+    model("guard").classify(messages.transform("normalized")) >= 0.8
+""",
+        covered_item_ids=("compiler_form:messages.transform",),
+        backend_required=True,
+    ),
+    ExampleRecord(
         id="example:model-spans",
         rule_text=r"""rule "PII email"
 strings:

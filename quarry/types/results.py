@@ -23,6 +23,8 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Generic, Protocol, TypeVar
 
+from quarry.types.transforms import ContentSourceRange
+
 
 class ResultValue(Protocol):
     """A typed result value with an explicit public serializer."""
@@ -92,10 +94,12 @@ class JudgeResult:
 class Span:
     """One location in a conversation: from ``start`` of one message to ``end`` of another.
 
-    Offsets index each message's canonical text. Both end messages are inclusive and every
-    message between them is covered whole; ``end_message_index`` defaults to
-    ``message_index``, a range inside one message. A message without text has the single
-    offset ``0``. ``score`` is set when a model scored the span.
+    Offsets index each selected message's text. Both end messages are inclusive and every message
+    between them is covered whole; ``end_message_index`` defaults to ``message_index``, a range
+    inside one message. A message without text has the single offset ``0``. ``score`` is set when
+    a model scored the span. ``source_ranges`` lists exact original ranges for mapped characters;
+    ``source_unmapped`` is true when any covered character was explicitly constructed and has no
+    source position.
     """
 
     message_index: int
@@ -103,7 +107,12 @@ class Span:
     end: int
     score: Score | None = None
     end_message_index: int | None = None
+    source_ranges: tuple[ContentSourceRange, ...] = ()
+    source_unmapped: bool = False
     _message: object | None = field(default=None, repr=False, compare=False)
+    _view: object | None = field(default=None, repr=False, compare=False)
+    _view_start: int | None = field(default=None, repr=False, compare=False)
+    _view_end: int | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         end_index = self.message_index if self.end_message_index is None else self.end_message_index
@@ -131,6 +140,12 @@ class Span:
             raise ValueError("span end must be greater than start")
         if self.score is not None and not isinstance(self.score, Score):
             raise TypeError("span score must be a Score")
+        if not isinstance(self.source_ranges, tuple) or any(
+            not isinstance(source, ContentSourceRange) for source in self.source_ranges
+        ):
+            raise TypeError("span source_ranges must be ContentSourceRange values")
+        if type(self.source_unmapped) is not bool:
+            raise TypeError("span source_unmapped must be a Boolean")
 
     @property
     def within_one_message(self) -> bool:
@@ -145,6 +160,10 @@ class Span:
         data["end"] = self.end
         if self.score is not None:
             data["score"] = self.score.to_dict()
+        if self.source_ranges:
+            data["source_ranges"] = [source.to_dict() for source in self.source_ranges]
+        if self.source_unmapped:
+            data["source_unmapped"] = True
         return data
 
     def _bind_to_message(self, message: object) -> Span:

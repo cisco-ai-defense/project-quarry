@@ -47,6 +47,7 @@ from quarry.plugin.service import (
 from quarry.policy import bind_prepared_policy
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
+from quarry.types.results import Score, Span
 from tests.conftest import EMAIL_SPAN_RULE, EmailSpanAdapter, email_span_models
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -244,7 +245,8 @@ async def test_plugin_reference_compile_and_scan_work_as_one_public_flow():
         "example:flow-operators",
     } <= result_ids
     assert all(result["matched_fields"] for result in search["results"])
-    assert search["operator_precedence"][0]["operators"] == ["or"]
+    assert search["operator_precedence"][0]["operators"] == ["if ... else"]
+    assert search["operator_precedence"][1]["operators"] == ["or"]
     assert search["operator_precedence"][-1]["family"] == "postfix access"
 
     detail = plugin.reference(action="get", ids=["function:called_tool", "example:flow-operators"])
@@ -388,6 +390,7 @@ async def test_scan_returns_no_visualization_unless_requested():
     plugin = QuarryPlugin()
 
     single = await plugin.scan(rule_text=FLOW_RULE, conversation=MATCHING_CONVERSATION)
+    assert single["verbosity"] == "full"
     assert single["matched"] is True
     assert "visualization" not in single
     assert "visualization" not in single["compilation"]
@@ -396,10 +399,109 @@ async def test_scan_returns_no_visualization_unless_requested():
     assert "trace" not in explanation
 
     batch = await plugin.scan(rule_text=FLOW_RULE, conversations=[MATCHING_CONVERSATION])
+    assert batch["verbosity"] == "compact"
     assert batch["results"][0]["matched"] is True
+    assert "decision_path" not in batch["results"][0]
+    assert "explanations" not in batch["results"][0]
     assert "visualization" not in batch
     assert "visualization" not in batch["compilation"]
     assert "visualization" not in batch["results"][0]
+
+
+async def test_compact_batch_keeps_verdicts_and_full_restores_details():
+    plugin = QuarryPlugin()
+    conversations = [MATCHING_CONVERSATION, CLEAN_CONVERSATION, {"messages": "invalid"}]
+
+    compact = await plugin.scan(rule_text=FLOW_RULE, conversations=conversations)
+    full = await plugin.scan(
+        rule_text=FLOW_RULE,
+        conversations=conversations,
+        verbosity="full",
+    )
+
+    assert (compact["verbosity"], full["verbosity"]) == ("compact", "full")
+    assert compact["completion_state"] == full["completion_state"] == "incomplete"
+
+    def verdict(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in item.items()
+            if key not in {"decision_path", "explanations", "timings"}
+        }
+
+    assert [verdict(item) for item in compact["results"]] == [
+        verdict(item) for item in full["results"]
+    ]
+    assert all(
+        "decision_path" not in item and "explanations" not in item for item in compact["results"]
+    )
+    assert [item.get("matched") for item in compact["results"]] == [True, False, None]
+    assert compact["results"][2]["diagnostics"][0]["code"] == "invalid_conversation"
+
+    explained = await plugin.scan(
+        rule_text=FLOW_RULE,
+        conversations=conversations[:2],
+        explain="support",
+    )
+    assert explained["verbosity"] == "compact"
+    assert [entry["matched"] for entry in explained["results"][0]["explanations"]] == [True]
+    assert "decision_path" not in explained["results"][0]
+
+    unknown: Any = "brief"
+    with pytest.raises(PluginInputError, match="verbosity must be"):
+        await plugin.scan(
+            rule_text=FLOW_RULE,
+            conversations=conversations[:1],
+            verbosity=unknown,
+        )
+
+
+async def test_compact_batch_retains_scores_used_to_move_thresholds(tmp_path, monkeypatch):
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _ScoreAdapter(),
+        {"judge": {**SCORE_MODEL, "model": "synthetic-judge"}},
+    )
+    rule = _rule('model("judge").score(messages, "Assess the conversation") >= 0.5')
+    batch = [MATCHING_CONVERSATION, CLEAN_CONVERSATION]
+
+    compact = await plugin.scan(rule_text=rule, conversations=batch)
+    full = await plugin.scan(rule_text=rule, conversations=batch, verbosity="full")
+
+    compact_scores = [item["decision_scores"] for item in compact["results"]]
+    assert compact_scores == [item["decision_scores"] for item in full["results"]]
+    assert [list(scores.values()) for scores in compact_scores] == [[0.8], [0.2]]
+
+
+async def test_compact_scores_keep_repeated_decision_step_ids(tmp_path, monkeypatch):
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        _ScoreAdapter(),
+        {"judge": {**SCORE_MODEL, "model": "synthetic-judge"}},
+    )
+    rule = """rule "Repeated score"
+variables:
+    risk = model("judge").score(messages, "Assess the conversation") >= 0.5
+    marker = any m in user_messages where m.content contains "send"
+condition:
+    (marker and risk) or (not marker and not risk)
+"""
+    (tree,) = plugin.decision_tree(rule_text=rule)["decision_tree"].values()
+    score_steps = [key for key, node in tree["nodes"].items() if node["kind"] == "score"]
+    assert len(score_steps) == 2
+    assert score_steps[1] == f"{score_steps[0]}~1"
+
+    batch = [MATCHING_CONVERSATION, CLEAN_CONVERSATION]
+    compact = await plugin.scan(rule_text=rule, conversations=batch)
+    full = await plugin.scan(rule_text=rule, conversations=batch, verbosity="full")
+
+    expected = [{score_steps[0]: 0.8}, {score_steps[1]: 0.2}]
+    assert [item["decision_scores"] for item in compact["results"]] == expected
+    assert [item["decision_scores"] for item in full["results"]] == expected
+    assert [item["decision_path"]["path"][-1]["node"] for item in full["results"]] == score_steps
+    assert all("decision_path" not in item for item in compact["results"])
 
 
 # ── visualization: what each source node reports ───────────────────────
@@ -767,7 +869,12 @@ async def test_visualization_reports_each_source_node_for_one_and_many_conversat
         view: _by_label(graph, _view(runtime, view), expected) for view, expected in views.items()
     } == views
 
-    many = await plugin.scan(rule_text=rule_text, conversations=[conversation], visualize=True)
+    many = await plugin.scan(
+        rule_text=rule_text,
+        conversations=[conversation],
+        visualize=True,
+        verbosity="full",
+    )
     aggregate = many["visualization"]["graphs"][0]["aggregate"]["nodes"]
     assert _by_label(graph, aggregate, batch) == batch
 
@@ -1101,6 +1208,7 @@ async def test_a_batch_explains_each_conversation():
     result = await QuarryPlugin().scan(
         rule_text=_rule('any m in tool_responses where m.content contains "IGNORE"'),
         conversations=[_INJECTED, _users("hello")],
+        explain=True,
     )
 
     assert result["completion_state"] == "complete"
@@ -1375,11 +1483,20 @@ condition:
     model("judge").score(messages, params.instructions) >= params.threshold
 """
 
+    batch = [MATCHING_CONVERSATION, CLEAN_CONVERSATION]
+    parameters = {"instructions": "Detect requests to send data", "threshold": 0.7}
+    compact = await plugin.scan(
+        rule_text=rule,
+        conversations=batch,
+        parameters=parameters,
+        visualize=True,
+    )
     result = await plugin.scan(
         rule_text=rule,
-        conversations=[MATCHING_CONVERSATION, CLEAN_CONVERSATION],
-        parameters={"instructions": "Detect requests to send data", "threshold": 0.7},
+        conversations=batch,
+        parameters=parameters,
         visualize=True,
+        verbosity="full",
     )
 
     assert result["completion_state"] == "complete"
@@ -1390,11 +1507,35 @@ condition:
         "rule_name",
         "runtime_attribution",
     }
+    compact_runtime = compact["results"][0]["visualization"]["graphs"][0]["runtime_attribution"]
+    full_runtime = result["results"][0]["visualization"]["graphs"][0]["runtime_attribution"]
+    lightweight = {
+        "status",
+        "matched",
+        "attempts",
+        "proof_attempt",
+    }
+    assert set(compact_runtime) == lightweight
+    assert set(full_runtime) == lightweight | {"trace", "node_evidence", "nodes"}
+    compact_batch_graph = compact["visualization"]["graphs"][0]
     batch_graph = result["visualization"]["graphs"][0]
+    assert set(compact_batch_graph["executions"][0]) == lightweight | {"execution_index"}
+    assert set(batch_graph["executions"][0]) == lightweight | {
+        "execution_index",
+        "trace",
+        "node_evidence",
+        "nodes",
+    }
     assert [item["execution_index"] for item in batch_graph["executions"]] == [0, 1]
     assert batch_graph["aggregate"]["execution_count"] == 2
     assert batch_graph["aggregate"]["matched_count"] == 2
     assert result["parameter_evidence"]["threshold"]["value"] == 0.7
+    expected_evidence = {
+        "instructions": {"type": "text", "binding": "policy", "redacted": True},
+        "threshold": {"type": "number", "binding": "scan", "value": 0.7},
+    }
+    assert compact["parameter_evidence"] == result["parameter_evidence"] == expected_evidence
+    assert parameters["instructions"] not in json.dumps(result["parameter_evidence"])
     # A scan-bound threshold still makes a score node: the path keeps the score and the
     # span of the whole conversation it read.
     last = MATCHING_CONVERSATION["messages"][-1]["content"]
@@ -1502,7 +1643,11 @@ async def test_plugin_returns_a_structured_timeout_result(fail_on_timeout):
     assert result["parameter_digest"]
     assert result["decision_path"]["leaf"] is None
 
-    batch = await plugin.scan(rule_text=rule, conversations=[conversation, conversation])
+    batch = await plugin.scan(
+        rule_text=rule,
+        conversations=[conversation, conversation],
+        verbosity="full",
+    )
     assert batch["completion_state"] == "incomplete"
     assert batch["count"] == 2
     assert [item["diagnostics"][0]["code"] for item in batch["results"]] == [
@@ -2360,7 +2505,8 @@ def test_the_precedence_table_rides_with_index_and_is_asked_for_elsewhere():
     plugin = QuarryPlugin()
     table = plugin.reference(action="index", limit=1)["operator_precedence"]
 
-    assert table[0]["operators"] == ["or"]
+    assert table[0]["operators"] == ["if ... else"]
+    assert table[1]["operators"] == ["or"]
     assert [
         "operator_precedence" in plugin.reference(action=action, **extra)
         for action, extra in (
@@ -2372,7 +2518,8 @@ def test_the_precedence_table_rides_with_index_and_is_asked_for_elsewhere():
     # A caller editing its copy does not change what later calls are served.
     table[0]["operators"].append("changed by caller")
     asked = plugin.reference(action="search", query="tool call", include_precedence=True)
-    assert asked["operator_precedence"][0]["operators"] == ["or"]
+    assert asked["operator_precedence"][0]["operators"] == ["if ... else"]
+    assert asked["operator_precedence"][1]["operators"] == ["or"]
     declined = plugin.reference(action="index", limit=1, include_precedence=False)
     assert "operator_precedence" not in declined
 
@@ -2685,6 +2832,64 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
     assert after_exit == b""
 
 
+async def test_a_hundred_conversation_batch_stays_within_response_budget(monkeypatch):
+    import tiktoken
+
+    from quarry.plugin import server as plugin_server
+
+    service = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(rule_timeout=None)))
+    monkeypatch.setattr(plugin_server, "_service", service)
+    rule = _rule('any call in tool_calls where call.arguments.task contains "review"')
+    conversations = [
+        {
+            "messages": [
+                {"role": "user", "content": "Run the synthetic job."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"job-{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "queue_job",
+                                "arguments": json.dumps(
+                                    {
+                                        "task": (
+                                            f"review-sample-{index}"
+                                            if index % 2
+                                            else f"archive-sample-{index}"
+                                        )
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                },
+            ]
+        }
+        for index in range(100)
+    ]
+
+    result = await plugin_server.mcp.call_tool(
+        "quarry_scan",
+        {"rule_text": rule, "conversations": conversations},
+    )
+
+    response = result.structured_content
+    assert (response["verbosity"], response["completion_state"], response["count"]) == (
+        "compact",
+        "complete",
+        100,
+    )
+    assert [item["matched"] for item in response["results"]] == [
+        index % 2 == 1 for index in range(100)
+    ]
+    client_text = "".join(block.text for block in result.content if block.type == "text")
+    spent = len(tiktoken.get_encoding("cl100k_base").encode(client_text))
+    assert spent < 10_000, f"{spent} tokens for a 100-conversation batch scan"
+
+
 async def test_a_search_then_get_workflow_stays_inside_its_reference_budget(tmp_path, monkeypatch):
     """Reference output is the agent's context; the budget counts what the MCP client receives.
 
@@ -2853,3 +3058,233 @@ def test_the_model_cache_is_configured_by_its_own_block(tmp_path) -> None:
     for invalid in ({"ttl_seconds": 0}, {"max_entries": True}, {"ttl": 60}, []):
         with pytest.raises(ConfigurationError):
             config(model_cache=invalid)
+
+
+async def test_plugin_compiles_and_scans_with_reviewed_content_transforms(tmp_path, monkeypatch):
+    class Adapter:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            self.messages.append(messages)
+            return SimpleNamespace(chunks=[SimpleNamespace(probabilities=[0.9])])
+
+    adapter = Adapter()
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        {
+            "judge": {
+                "adapter": "fake",
+                "model": "synthetic/judge",
+                "classify": {"class_index": 0},
+            }
+        },
+        transforms={
+            "normalized": {
+                "operations": [{"op": "strip"}, {"op": "casefold"}],
+            }
+        },
+    )
+    rule = _rule('model("judge").classify(messages.transform("normalized")) > 0.5')
+
+    compilation = plugin.compile(rule_text=rule, visualize=True)
+    scanned = await plugin.scan(
+        rule_text=rule,
+        conversation={"messages": [{"role": "user", "content": "  MIXED  "}]},
+    )
+
+    assert (compilation["valid"], scanned["completion_state"], scanned["matched"]) == (
+        True,
+        "complete",
+        True,
+    )
+    assert adapter.messages == [[{"role": "user", "content": "mixed"}]]
+    labels = [
+        node["label"] for graph in compilation["visualization"]["graphs"] for node in graph["nodes"]
+    ]
+    assert any('messages.transform("normalized")' in label for label in labels)
+    assert all("_transform" not in label for label in labels)
+
+
+async def test_plugin_scans_transformed_span_inputs_with_original_coordinates(
+    tmp_path, monkeypatch
+):
+    class Adapter:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            self.messages.append(messages)
+            return SimpleNamespace(chunks=[SimpleNamespace(probabilities=[0.9])])
+
+        async def decode_spans(self, _config, _raw, messages, _threshold):
+            content = messages[0].content
+            start = content.index("alice@example.com")
+            return [Span(0, start, start + len("alice@example.com"), Score(0.9))]
+
+    adapter = Adapter()
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        {
+            "finder": {
+                "adapter": "fake",
+                "model": "synthetic/finder",
+                "category": "ENTITY",
+                "classify": {"class_index": 0},
+                "spans": {"class_index": 0},
+            }
+        },
+        transforms={
+            "normalized": {
+                "operations": [{"op": "strip"}, {"op": "casefold"}],
+            }
+        },
+    )
+    rule = (
+        'rule "r"\ncondition: true\ncollect:\n'
+        '  [span for span in model("finder").spans('
+        'messages.transform("normalized"), 0.5) if true]\n'
+    )
+
+    compilation = plugin.compile(rule_text=rule, visualize=True)
+    scanned = await plugin.scan(
+        rule_text=rule,
+        conversation={"messages": [{"role": "user", "content": " ALICE@EXAMPLE.COM "}]},
+    )
+
+    assert compilation["valid"] is True
+    assert (scanned["completion_state"], scanned["matched"]) == ("complete", True)
+    assert adapter.messages == [[{"role": "user", "content": "alice@example.com"}]]
+    value = scanned["matches"][0]["output"]["items"][0]["value"]
+    assert value == {
+        "message_index": 0,
+        "start": 1,
+        "end": 18,
+        "score": {"value": 0.9},
+        "source_ranges": [{"message_index": 0, "start": 1, "end": 18}],
+    }
+    assert "_transform" not in json.dumps(compilation)
+
+
+async def test_plugin_renders_and_scans_mixed_constructed_model_input(
+    tmp_path,
+    monkeypatch,
+):
+    class Adapter:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            self.messages.append(messages)
+            return SimpleNamespace(chunks=[SimpleNamespace(probabilities=[0.9])])
+
+    adapter = Adapter()
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        {
+            "judge": {
+                "adapter": "fake",
+                "model": "local/judge",
+                "classify": {"class_index": 0},
+            }
+        },
+    )
+    expression = 'messages[:1] + message("assistant", "review")'
+    rule = _rule(f'model("judge").classify({expression}) > 0.5')
+
+    compilation = plugin.compile(rule_text=rule, visualize=True)
+    scanned = await plugin.scan(
+        rule_text=rule,
+        conversation={"messages": [{"role": "user", "content": "request"}]},
+    )
+
+    assert compilation["valid"] is True
+    assert (scanned["completion_state"], scanned["matched"]) == ("complete", True)
+    assert adapter.messages == [
+        [
+            {"role": "user", "content": "request"},
+            {"role": "assistant", "content": "review"},
+        ]
+    ]
+    labels = [
+        node["label"] for graph in compilation["visualization"]["graphs"] for node in graph["nodes"]
+    ]
+    assert any('message("assistant", "review")' in label for label in labels)
+
+
+async def test_plugin_reports_unmapped_constructed_span_output(tmp_path, monkeypatch):
+    class Adapter:
+        async def classify_messages(self, _config, _messages, _tools, *, timeout=None):
+            return SimpleNamespace(chunks=[SimpleNamespace(probabilities=[0.9])])
+
+        async def decode_spans(self, _config, _raw, messages, _threshold):
+            assert messages[1].content == "note"
+            return [Span(1, 0, 4, Score(0.9))]
+
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        Adapter(),
+        {
+            "finder": {
+                "adapter": "fake",
+                "model": "local/finder",
+                "category": "TEXT",
+                "classify": {"class_index": 0},
+                "spans": {"class_index": 0},
+            }
+        },
+    )
+    rule = (
+        'rule "r"\ncondition: true\ncollect:\n'
+        '  [span for span in model("finder").spans('
+        'messages[:1] + message("assistant", "note"), 0.5) if true]\n'
+    )
+
+    scanned = await plugin.scan(
+        rule_text=rule,
+        conversation={"messages": [{"role": "user", "content": "request"}]},
+    )
+
+    assert (scanned["completion_state"], scanned["matched"]) == ("complete", True)
+    assert scanned["matches"][0]["output"]["items"][0]["value"] == {
+        "message_index": 1,
+        "start": 0,
+        "end": 4,
+        "score": {"value": 0.9},
+        "source_unmapped": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "messages.transform()",
+        'messages.transform("normalized", "extra")',
+        'messages.transform().transform("normalized", "extra")',
+    ],
+)
+def test_plugin_invalid_transform_arity_never_exposes_internal_renderer(
+    tmp_path, monkeypatch, expression
+):
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        object(),
+        {},
+        transforms={"normalized": {"operations": [{"op": "strip"}]}},
+    )
+
+    compilation = plugin.compile(
+        rule_text=_rule(f'model("judge").classify({expression}) > 0.5'),
+        visualize=True,
+    )
+
+    assert compilation["valid"] is False
+    assert "_transform" not in json.dumps(compilation)

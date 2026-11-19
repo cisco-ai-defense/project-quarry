@@ -1,0 +1,6 @@
+rule "Selected model input"
+variables:
+    selected = [item for item in messages if item.role == "user"]
+    input = messages[:1] + selected[-1:] if messages[-1].role == "user" else selected
+condition:
+    model("guard").classify(input) >= 0.8
