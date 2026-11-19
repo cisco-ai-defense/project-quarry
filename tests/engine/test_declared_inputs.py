@@ -126,7 +126,9 @@ def test_declarations_accept_descriptions_and_reject_rule_reserved_field_names()
     )["memory.writes"]
     assert declaration.describe()["description"] == "Writes recorded by the host"
     assert declaration.describe()["content"][0]["description"] == "Written text"
-    assert declaration.describe()["facts"]["metadata"]["fields"]["label"]["description"] == "A label"
+    assert (
+        declaration.describe()["facts"]["metadata"]["fields"]["label"]["description"] == "A label"
+    )
     with pytest.raises(ConfigurationError, match="reserved by the rule language"):
         parse_inputs({"memory.writes": {"facts": {"right_after": {"type": "string"}}}})
 
