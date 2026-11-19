@@ -2074,38 +2074,44 @@ class ModelInferenceBackend:
             if wait_timeout <= 0:
                 wait_timeout = None
         provider_timeout = timeout if timeout is not None else clamp_to_evaluation_deadline(None)
+        reader = result_cache.response_reader(cache_key)
         try:
-            async with asyncio.timeout(wait_timeout):
-                # A shared request is bounded by its owning provider call.
-                response = await result_cache.call(
-                    cache_key,
-                    request,
-                    budget=model_id,
-                    retry_on=_starters_limit,
-                    timeout=provider_timeout,
-                )
-        except TimeoutError as exc:
-            raise _llm_error(
-                "timeout",
-                f"Model call timed out for '{model_id}'",
-                model_id,
-            ) from exc
-        except LLMError as exc:
-            # A request another alias started fails under that alias's name; report it
-            # under this caller's.
-            other = exc.details.get("model")
-            if not isinstance(other, str) or other == model_id:
+            try:
+                async with asyncio.timeout(wait_timeout):
+                    # A shared request is bounded by its owning provider call.
+                    response = await reader.call(
+                        request,
+                        budget=model_id,
+                        retry_on=_starters_limit,
+                        timeout=provider_timeout,
+                    )
+            except TimeoutError as exc:
+                raise _llm_error(
+                    "timeout",
+                    f"Model call timed out for '{model_id}'",
+                    model_id,
+                ) from exc
+            except LLMError as exc:
+                # A request another alias started fails under that alias's name; report it
+                # under this caller's.
+                other = exc.details.get("model")
+                if not isinstance(other, str) or other == model_id:
+                    raise
+                raise LLMError(
+                    exc.message.replace(other, model_id), {**exc.details, "model": model_id}
+                ) from exc
+            try:
+                # A caller handed the raw response gets its own copy of a wire value, so it cannot
+                # change what later scans read; Quarry's own readers only read it.
+                value = await _read(_detached(response) if read is None else response, read)
+            except Exception:
+                reader.reject()
                 raise
-            raise LLMError(
-                exc.message.replace(other, model_id), {**exc.details, "model": model_id}
-            ) from exc
-        try:
-            # A caller handed the raw response gets its own copy of a wire value, so it cannot
-            # change what later scans read; Quarry's own readers only read it.
-            return await _read(_detached(response) if read is None else response, read)
-        except Exception:
-            result_cache.forget(cache_key)
-            raise
+            else:
+                reader.accept()
+                return value
+        finally:
+            reader.close()
 
     def _settings_digest(self, method: str, model: InferenceModelConfig) -> bytes:
         """The digest of what a model's settings put into a ``method`` request, computed once

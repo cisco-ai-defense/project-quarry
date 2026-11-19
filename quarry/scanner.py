@@ -17,6 +17,7 @@
 """Scanner engine."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import orjson
 
-from quarry.cache.async_cache import current_scan, result_cache, scan_scope
+from quarry.cache.async_cache import current_scan, result_cache, retain_scan, scan_scope
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
@@ -104,6 +105,34 @@ from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
 from quarry.types.text_resources import TextRef
 
 logger = get_app_logger()
+
+
+class _DeferredEvidence:
+    """One-shot evidence work with an explicitly releasable scan-response lease."""
+
+    def __init__(
+        self,
+        finish: Callable[[ScanResult], Awaitable[ScanResult]],
+        close: Callable[[], None],
+    ) -> None:
+        self._finish: Callable[[ScanResult], Awaitable[ScanResult]] | None = finish
+        self._close: Callable[[], None] | None = close
+
+    def close(self) -> None:
+        self._finish = None
+        close, self._close = self._close, None
+        if close is not None:
+            close()
+
+    async def __call__(self, result: ScanResult) -> ScanResult:
+        finish, self._finish = self._finish, None
+        if finish is None:
+            raise RuntimeError("Deferred evidence has already finished or been closed")
+        try:
+            return await finish(result)
+        finally:
+            self.close()
+            del finish, self
 
 
 def _failure_category(error: Exception) -> ScanFailureCategory:
@@ -1420,8 +1449,14 @@ class DSLScanner:
                     await gather_evidence()
                 return replace(result, decision_paths=decision_path_records(), **evidence())
 
-            deferred_evidence.append(finish)
-            return scan_result((datetime.now() - start_time).total_seconds())
+            result = scan_result((datetime.now() - start_time).total_seconds())
+            owner = _DeferredEvidence(finish, retain_scan().close)
+            try:
+                deferred_evidence.append(owner)
+            except BaseException:
+                owner.close()
+                raise
+            return result
 
         with evidence_deadline(self.limits.explore_timeout), model_call_budget(call_limit):
             await gather_evidence()

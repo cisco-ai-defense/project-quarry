@@ -38,7 +38,7 @@ from quarry.safety.timer import (
     remaining_evaluation_time,
     scan_deadline,
 )
-from quarry.scanner import DSLScanner
+from quarry.scanner import DSLScanner, _DeferredEvidence
 from quarry.types.parameters import (
     ParameterSpec,
     ParameterValue,
@@ -318,48 +318,66 @@ class CompiledPolicy:
         results: list[ScanResult] = []
         # The shared batch deadline covers verdicts. Evidence finishers run afterwards with
         # one bounded time and model-call budget per conversation.
-        finishers: list[tuple[int, Any]] = []
-        with scan_deadline(deadline_seconds, "Policy batch deadline exceeded"):
-            for index, conversation in enumerate(conversations):
-                remaining = remaining_evaluation_time()
-                if remaining is not None and remaining <= 0:
-                    if self._scanner.limits.fail_on_timeout:
-                        raise_if_evaluation_expired()
-                    results.extend(self._timeout_result() for _ in range(index, len(conversations)))
-                    break
-                deferred: list = []
-                result = await self._scanner._scan_data_with_parameters_async(
-                    conversation,
-                    effective,
-                    enable_explain=explain,
-                    record_traces=record_traces,
-                    rules_subset={self._rule_name},
-                    decision_paths=decision_paths,
-                    explore=explores(conversation_sha256(conversation), explore_rate),
-                    deferred_evidence=deferred,
-                )
-                remaining = remaining_evaluation_time()
-                if remaining is not None and remaining <= 0:
-                    if self._scanner.limits.fail_on_timeout:
-                        raise_if_evaluation_expired()
-                    results.append(self._timeout_result(scan_time=result.scan_time))
-                    results.extend(
-                        self._timeout_result() for _ in range(index + 1, len(conversations))
+        finishers: list[tuple[int, _DeferredEvidence]] = []
+        deferred: list[_DeferredEvidence] = []
+        try:
+            with scan_deadline(deadline_seconds, "Policy batch deadline exceeded"):
+                for index, conversation in enumerate(conversations):
+                    remaining = remaining_evaluation_time()
+                    if remaining is not None and remaining <= 0:
+                        if self._scanner.limits.fail_on_timeout:
+                            raise_if_evaluation_expired()
+                        results.extend(
+                            self._timeout_result() for _ in range(index, len(conversations))
+                        )
+                        break
+                    first_deferred = len(deferred)
+                    result = await self._scanner._scan_data_with_parameters_async(
+                        conversation,
+                        effective,
+                        enable_explain=explain,
+                        record_traces=record_traces,
+                        rules_subset={self._rule_name},
+                        decision_paths=decision_paths,
+                        explore=explores(conversation_sha256(conversation), explore_rate),
+                        deferred_evidence=deferred,
                     )
-                    break
-                finishers.extend((index, finish) for finish in deferred)
-                results.append(result)
-        limits = self._scanner.limits
+                    remaining = remaining_evaluation_time()
+                    if remaining is not None and remaining <= 0:
+                        if self._scanner.limits.fail_on_timeout:
+                            raise_if_evaluation_expired()
+                        results.append(self._timeout_result(scan_time=result.scan_time))
+                        results.extend(
+                            self._timeout_result() for _ in range(index + 1, len(conversations))
+                        )
+                        break
+                    finishers.extend((index, finish) for finish in deferred[first_deferred:])
+                    results.append(result)
+            limits = self._scanner.limits
 
-        async def finish_one(index: int, finish) -> None:
-            with (
-                evidence_deadline(limits.explore_timeout),
-                model_call_budget(limits.max_model_calls if limits.enforce_limits else None),
-            ):
-                results[index] = await finish(results[index])
+            async def finish_one(index: int, finish: _DeferredEvidence) -> None:
+                with (
+                    evidence_deadline(limits.explore_timeout),
+                    model_call_budget(limits.max_model_calls if limits.enforce_limits else None),
+                ):
+                    results[index] = await finish(results[index])
 
-        await asyncio.gather(*(finish_one(index, finish) for index, finish in finishers))
-        return [self._attach_provenance(result, digest, evidence) for result in results]
+            tasks = [asyncio.create_task(finish_one(index, finish)) for index, finish in finishers]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                # Failure of one finisher must not leave its siblings retaining scan replies.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            return [self._attach_provenance(result, digest, evidence) for result in results]
+        finally:
+            # Includes owners produced immediately before a post-await timeout or failure.
+            for finish in deferred:
+                finish.close()
+            deferred.clear()
+            finishers.clear()
 
     def _timeout_result(self, *, scan_time: float = 0.0) -> ScanResult:
         """Represent a batch item that could not finish within the shared deadline."""
