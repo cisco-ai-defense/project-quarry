@@ -392,12 +392,9 @@ _STRICT = ConfigDict(extra="forbid", validate_default=True, strict=True, validat
 def _field(
     annotation: Any, optional: bool, alias: str, description: str | None = None
 ) -> tuple[Any, Any]:
-    metadata = {"alias": alias}
-    if description is not None:
-        metadata["description"] = description
     if optional:
-        return (annotation | None, Field(default=None, **metadata))
-    return (annotation, Field(**metadata))
+        return (annotation | None, Field(default=None, alias=alias, description=description))
+    return (annotation, Field(alias=alias, description=description))
 
 
 def _model(
