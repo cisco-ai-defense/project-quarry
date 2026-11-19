@@ -477,6 +477,22 @@ def handoff_model_read():
     return _DISABLED if read is None or read._closed else _HandoffScope(read)
 
 
+def transfer_model_read():
+    """Consume an owned dispatch handoff and bind its replacement at the destination.
+
+    Copying a Context alone must never grant adoption to another task. The submitting
+    task first claims its existing single-use handoff with all normal ownership checks;
+    entering this scope then creates a handoff owned by the actual host invocation.
+    """
+    read = current_model_read()
+    pending = _PENDING.get()
+    if read is None or pending is None:
+        return _DISABLED
+    session = current_read_usage()
+    claimed = pending.claim(session, read.model, read.operation)
+    return _DISABLED if claimed is None else _TransferredRead(claimed)
+
+
 def current_model_read() -> ModelRead | None:
     read = _CURRENT.get()
     session = current_read_usage()
@@ -616,12 +632,17 @@ class _BatchInput:
         self.signatures = signatures
         self.pid, self.thread = os.getpid(), threading.get_ident()
 
+    def matches(self, read):
+        return (
+            self.read() is read
+            and not read._closed
+            and self.pid == os.getpid()
+            and self.thread == threading.get_ident()
+        )
+
     def take(self, read, index):
         if (
-            self.read() is not read
-            or read._closed
-            or self.pid != os.getpid()
-            or self.thread != threading.get_ident()
+            not self.matches(read)
             or type(index) is not int
             or not 0 <= index < len(self.signatures)
         ):
@@ -667,6 +688,53 @@ class _PartScope:
         self.carrier.signature = None
         _PENDING.reset(self.handoff_token)
         _PART.reset(self.part_token)
+        return False
+
+
+class _TransferredRead:
+    """Move only owned, bounded transform signatures with the approved read handoff."""
+
+    def __init__(self, read: ModelRead):
+        self.read = read
+        self.part_signature = _ABSENT
+        self.batch_signatures = None
+        part = _PART.get()
+        if part is not None and part.matches(read):
+            self.part_signature = part.signature
+            part.claimed, part.signature = True, None
+        batch = _BATCH.get()
+        if self.part_signature is _ABSENT and batch is not None and batch.matches(read):
+            self.batch_signatures, batch.signatures = batch.signatures, []
+
+    def __enter__(self):
+        read = self.read
+        if read is None:
+            raise RuntimeError("Read handoff was already released")
+        self.handoff = _Handoff(read)
+        self.part = (
+            None if self.part_signature is _ABSENT else _PartInput(read, self.part_signature)
+        )
+        self.batch = (
+            None if self.batch_signatures is None else _BatchInput(read, self.batch_signatures)
+        )
+        self.handoff_token = _PENDING.set(self.handoff)
+        self.part_token = _PART.set(self.part)
+        self.batch_token = _BATCH.set(self.batch)
+
+    def __exit__(self, *_args):
+        try:
+            self.handoff.claimed = True
+            if self.part is not None:
+                self.part.claimed, self.part.signature = True, None
+            if self.batch_signatures is not None:
+                self.batch_signatures.clear()
+        finally:
+            _BATCH.reset(self.batch_token)
+            _PART.reset(self.part_token)
+            _PENDING.reset(self.handoff_token)
+            del self.batch_token, self.part_token, self.handoff_token
+            self.read, self.part_signature, self.batch_signatures = None, _ABSENT, None
+            del self.handoff, self.part, self.batch
         return False
 
 

@@ -14,31 +14,34 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""How often long synchronous engine work hands control back to the event loop.
+"""Cooperative pauses for local engine work and ready host requests.
 
-Grounding a local atom awaits nothing, so a run, a capture enumeration or a reference check
-would otherwise hold the loop until it ends. Work pauses once ``INTERVAL`` has passed since
-its last pause; pauses never change a result, only when other tasks and deadlines run.
+Managed workers pause every 64 steps. Inline evaluation retains elapsed-time pacing.
+Pauses change when other tasks and deadlines run while preserving the result.
 """
 
 from __future__ import annotations
 
 import time
 
+from quarry.engine.dispatch import current_dispatch
+
 INTERVAL = 0.001
 
 
 class Pacer:
-    """Says when a pause is due; reads the clock only every ``every`` calls, so a tight loop
-    pays for it rarely."""
+    """Use an independent worker cadence, or sample the inline clock every ``every`` calls."""
 
     def __init__(self, every: int = 1) -> None:
         self._every = every
         self._calls = 0
         self._last = time.monotonic()
+        self._managed = current_dispatch() is not None
 
     def due(self) -> bool:
         self._calls += 1
+        if self._managed:
+            return self._calls % 64 == 0
         if self._calls % self._every:
             return False
         now = time.monotonic()

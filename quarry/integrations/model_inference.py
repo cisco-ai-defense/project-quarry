@@ -42,6 +42,7 @@ from urllib.parse import urljoin, urlsplit
 
 import orjson
 
+from quarry.async_runtime import call_host, call_host_async, call_host_sync
 from quarry.cache.async_cache import cache_retention, current_scan, result_cache
 from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
@@ -54,6 +55,7 @@ from quarry.integrations.adapter_transforms import (
     transform_error,
     transform_unit_snapshot,
 )
+from quarry.integrations.host_dispatch import call_backend, call_backend_sync
 from quarry.integrations.message_ranges import (
     MessageRangeIndex,
     RangeBudget,
@@ -1880,8 +1882,7 @@ async def _invoke_transform_adapter(name: str, operation: Callable[[], Any]) -> 
     """Keep host exception payloads out of transform diagnostics and retry metadata."""
 
     try:
-        raw = operation()
-        return await raw if inspect.isawaitable(raw) else raw
+        return await call_host(operation)
     except (DecodeLimitError, QuarryTimeoutError, TimeoutError):
         raise
     except LLMError as exc:
@@ -2290,7 +2291,7 @@ class ModelInferenceBackend:
                 MAX_TRANSFORM_OUTPUT_CHARACTERS,
             )
 
-            shared = self.transform_cache_identity(name) is not None
+            shared = (await call_backend_sync(self.transform_cache_identity, name)) is not None
             if type(units) not in (list, tuple) or len(units) > TRANSFORM_BATCH_SIZE:
                 raise transform_error(
                     name, "invalid_input", "transform batch exceeds its part limit"
@@ -2313,9 +2314,9 @@ class ModelInferenceBackend:
                 call = self.transform_message_unit if _message_value else self.transform_unit
                 with transform_part_read(self, name, unit, batch_index=index):
                     result = (
-                        await call(name, unit)
+                        await call_backend(call, name, unit)
                         if timeout is None
-                        else await call(name, unit, timeout=timeout)
+                        else await call_backend(call, name, unit, timeout=timeout)
                     )
                 result = read_transform(keep_transform(result, unit, name), unit)
                 output += len(result.text)
@@ -2413,8 +2414,8 @@ class ModelInferenceBackend:
             try:
                 with transform_part_read(self, name, unit):
                     if timeout is None:
-                        return await self.transform_unit(name, unit)
-                    return await self.transform_unit(name, unit, timeout=timeout)
+                        return await call_backend(self.transform_unit, name, unit)
+                    return await call_backend(self.transform_unit, name, unit, timeout=timeout)
             finally:
                 _MESSAGE_TRANSFORM_PART.reset(token)
 
@@ -2591,8 +2592,6 @@ class ModelInferenceBackend:
         transform reply before cache admission; its version is part of the caller's key.
         """
 
-        send = getattr(adapter, method) if dispatch is None else dispatch
-
         retry_history = ModelRetryHistory()
 
         async def request(*, timeout: float | None) -> Any:
@@ -2604,6 +2603,7 @@ class ModelInferenceBackend:
                     raise _attributed_failure(
                         exc.message, exc, model_id, private_model=rate_limit_model
                     ) from exc
+                send = getattr(adapter, method) if dispatch is None else dispatch
                 response = send(model, *arguments, timeout=attempt_timeout)
                 return await response if inspect.isawaitable(response) else response
 
@@ -2812,7 +2812,7 @@ class ModelInferenceBackend:
 
         model = self._model(model_id)
 
-        def calibrated(raw_score: Any) -> JudgeResult:
+        async def calibrated(raw_score: Any) -> JudgeResult:
             reason = None
             if isinstance(raw_score, JudgeResult):
                 try:
@@ -2826,7 +2826,7 @@ class ModelInferenceBackend:
                     reason = validated.reason
             normalized = _validated_score(raw_score, model_id, "Score adapter")
             try:
-                value = self.calibrators[model_id](normalized)
+                value = await call_host_sync(lambda: self.calibrators[model_id](normalized))
             except Exception as exc:
                 raise _llm_error("invalid_output", "Score calibration failed", model_id) from exc
             return JudgeResult(_validated_score(value, model_id, "Calibrated score"), reason)
@@ -2933,12 +2933,16 @@ class ModelInferenceBackend:
             )
         # A version 1 builder reads a conversation, which carries more than its messages'
         # text, such as their positions, so the request is named by the messages it built.
-        outbound = self._score_request(
-            model_id,
-            constitution,
-            _message_dicts(messages),
-            tool_dicts,
-            Conversation._from_parts(messages, tools=tools or (), tools_supplied=tools is not None),
+        outbound = await call_host(
+            lambda: self._score_request(
+                model_id,
+                constitution,
+                _message_dicts(messages),
+                tool_dicts,
+                Conversation._from_parts(
+                    messages, tools=tools or (), tools_supplied=tools is not None
+                ),
+            )
         )
         return await self._score_messages(
             model_id,
@@ -2961,19 +2965,22 @@ class ModelInferenceBackend:
             conversation = _as_conversation(conversation)
             if self.config.config_version == 2:
                 with handoff_model_read():
-                    return await self.model_score_messages(
+                    return await call_backend(
+                        self.model_score_messages,
                         model_id,
                         constitution,
                         conversation.messages,
                         conversation.tools,
                         timeout=timeout,
                     )
-            outbound = self._score_request(
-                model_id,
-                constitution,
-                _message_dicts(conversation.messages),
-                conversation.raw_tools,
-                conversation,
+            outbound = await call_host(
+                lambda: self._score_request(
+                    model_id,
+                    constitution,
+                    _message_dicts(conversation.messages),
+                    conversation.raw_tools,
+                    conversation,
+                )
             )
             if current_model_read() is not None:
                 record_model_input(
@@ -3486,18 +3493,18 @@ class ModelInferenceBackend:
                         "Window classifier returned an invalid selected token head",
                         model_id,
                     ) from exc
-            decoded = self.adapters[model.adapter].decode_window_spans(
-                model,
-                _detached(raw),
-                source,
-                windows,
-                float(threshold),
-                encoding=encoding,
-                token_scores=scores,
-                **({"token_head": True} if head else {}),
+            decoded = await call_host(
+                lambda: self.adapters[model.adapter].decode_window_spans(
+                    model,
+                    _detached(raw),
+                    source,
+                    windows,
+                    float(threshold),
+                    encoding=encoding,
+                    token_scores=scores,
+                    **({"token_head": True} if head else {}),
+                )
             )
-            if inspect.isawaitable(decoded):
-                decoded = await decoded
             return await decoded_collection(decoded, source)
 
         return await self._window_response(
@@ -3784,7 +3791,7 @@ class ModelInferenceBackend:
                     model_id, messages, threshold, timeout=timeout
                 )
             adapter = self.adapters[model.adapter]
-            decode_spans = getattr(adapter, "decode_spans", None)
+            decode_spans = await call_host_sync(lambda: getattr(adapter, "decode_spans", None))
             if not callable(decode_spans):
                 raise ConfigurationError(
                     f"Inference model '{model_id}' adapter '{model.adapter}' cannot decode spans"
@@ -3794,12 +3801,14 @@ class ModelInferenceBackend:
 
             async def spans(raw: Any) -> CollectionResult[Span]:
                 # The adapter's decoder is handed its own copy of the shared response.
-                decoded = await decode_spans(
-                    model,
-                    _detached(raw),
-                    messages,
-                    float(threshold),
-                    **({"token_head": True} if token_head else {}),
+                decoded = await call_host_async(
+                    lambda: decode_spans(
+                        model,
+                        _detached(raw),
+                        messages,
+                        float(threshold),
+                        **({"token_head": True} if token_head else {}),
+                    )
                 )
                 if isinstance(decoded, str | bytes) or not isinstance(decoded, Sequence):
                     raise TypeError("span adapter must return a sequence of Span values")
@@ -4153,7 +4162,8 @@ class ModelInferenceBackend:
         with model_read(model_id, "input_tokens", adopt=True):
             conversation = _as_conversation(conversation)
             with handoff_model_read():
-                return await self.model_input_tokens_messages(
+                return await call_backend(
+                    self.model_input_tokens_messages,
                     model_id,
                     conversation.messages,
                     conversation.tools,
@@ -4252,7 +4262,9 @@ class ModelInferenceBackend:
                         raise ValueError("trim score requires its policy text")
                     if observation is not None:
                         observation.value("constitution", constitution, slot="constitution")
-                    wire = self._score_request(model_id, constitution, wire, offered, None)
+                    wire = await call_host(
+                        lambda: self._score_request(model_id, constitution, wire, offered, None)
+                    )
                     offered = []  # The score builder already rendered its offered tools.
                 return await self._count_messages(
                     model_id,
