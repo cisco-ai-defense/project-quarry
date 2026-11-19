@@ -81,6 +81,12 @@ condition:
     count([msg for msg in user_messages if msg.content contains "sudo"]) >= 2
 ```
 
+Filtered event counts also accept constant Boolean predicates. For example,
+`count([msg for msg in user_messages if true])` counts the selected user messages,
+and an `if false` filter counts zero. `len` follows the same rules. Selection slices
+and named tool-call accessors still limit the members counted. Filters that read
+unrelated conversation-wide facts and existing count-bound limits remain restricted.
+
 ## Event flow
 
 Flow operators read the finite conversation trace. `A after B` requires a witness for `B` before a witness for `A`; `right_after` requires adjacent relevant events. `before`, `right_before`, `until`, and bounded `within` forms are also available. Use parentheses when combining flow and Boolean logic.
