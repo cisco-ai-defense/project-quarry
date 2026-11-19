@@ -64,6 +64,9 @@ when their structure is valid. Their written role, position and collection membe
 available. Reading their content or other documented fields fails only the reading rule with
 `invalid_input`. Raw serialization preserves the sender's data. Whole-message rewrites skip
 these messages, and model calls refuse them before cache or adapter access.
+Part and content transforms also preserve these holders unchanged while processing readable
+messages. A later field read still raises the holder's fault. Media inside an unreadable holder
+is not sent to an adapter merely to transform another message in the selection.
 
 Call and tool-result IDs may be omitted, null, or empty. Overlapping calls with the same ID and
 results without an exact preceding call remain in the transcript. Call names, argument text,
@@ -135,7 +138,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 17 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 18 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text

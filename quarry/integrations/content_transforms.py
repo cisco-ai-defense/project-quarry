@@ -25,7 +25,7 @@ from functools import lru_cache
 
 from quarry.engine.pacing import Pacer
 from quarry.safety.timer import raise_if_evaluation_expired
-from quarry.types.messages import Messages, MessageType
+from quarry.types.messages import Messages, MessageType, UnreadableMessage
 from quarry.types.transforms import (
     MAX_TRANSFORM_EXPANSION_RATIO,
     MAX_TRANSFORM_INPUT_CHARACTERS,
@@ -634,7 +634,9 @@ async def apply_content_transform(
         raise TypeError("content transform receiver must be Messages")
     if not isinstance(transform, ContentTransform):
         raise TypeError("content transform definition must be ContentTransform")
-    unique = {id(message): message for message in messages}
+    unique = {
+        id(message): message for message in messages if not isinstance(message, UnreadableMessage)
+    }
     input_characters = sum(len(message.content) for message in unique.values())
     if input_characters > MAX_TRANSFORM_INPUT_CHARACTERS:
         raise ValueError(
