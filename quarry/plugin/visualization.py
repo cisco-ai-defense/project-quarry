@@ -381,12 +381,17 @@ def build_runtime_attribution(
     *,
     matched_rules: set[str] | None = None,
     completion_state: str = "complete",
+    details: bool = True,
 ) -> dict[str, Any]:
     """Join canonical per-rule traces to an existing source graph bundle.
 
     This function does not independently evaluate Boolean, flow, temporal, or quantifier
     semantics. Verdicts come from the scanner, evidence comes from ``WitnessTrace``, and this
     projection only resolves compiled atom ids to authored node ids.
+
+    ``details`` includes the trace, node evidence, and selected-node convenience view used
+    by full-verbosity scans. Compact results retain attempt-level node states without
+    repeating those larger views.
     """
 
     matched = matched_rules or set()
@@ -412,21 +417,26 @@ def build_runtime_attribution(
                 None,
             )
         )
+        attribution: dict[str, Any] = {
+            "status": completion_state,
+            "matched": graph_matched,
+            "attempts": attempts,
+            "proof_attempt": proof_attempt,
+        }
+        if details:
+            attribution.update(
+                {
+                    "trace": trace.to_dict(),
+                    "node_evidence": _node_evidence(graph, trace),
+                    # An ambiguous multi-binding non-match deliberately has no combined path.
+                    "nodes": selected["nodes"] if selected is not None else [],
+                }
+            )
         graphs.append(
             {
                 "graph_id": graph.get("graph_id", rule_name),
                 "rule_name": rule_name,
-                "runtime_attribution": {
-                    "status": completion_state,
-                    "matched": graph_matched,
-                    "trace": trace.to_dict(),
-                    "node_evidence": _node_evidence(graph, trace),
-                    "attempts": attempts,
-                    "proof_attempt": proof_attempt,
-                    # Convenience view for the one selected/unambiguous attempt. An ambiguous
-                    # multi-binding non-match deliberately has no combined node path.
-                    "nodes": selected["nodes"] if selected is not None else [],
-                },
+                "runtime_attribution": attribution,
             }
         )
     return {
