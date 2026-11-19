@@ -143,7 +143,7 @@ async def quarry_reference(
     include_precedence: bool | None = None,
     include_models: bool | None = None,
 ) -> ReferenceResponse:
-    """Discover the installed Quarry language.
+    """Discover the installed Quarry language and configured input sections.
 
     Use ``search`` with plain words to find relevant features, ``get`` with exact IDs
     to read full descriptions and tested examples, or ``index`` to browse compact records.

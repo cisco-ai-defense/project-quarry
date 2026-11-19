@@ -106,6 +106,22 @@ class ModelExpression:
 
         return self.kind, self.value, tuple(child.content_key() for child in self.children)
 
+    @property
+    def inputs(self) -> frozenset[str]:
+        return frozenset({str(self.value)} if self.kind == "input_state" else ()).union(
+            *(child.inputs for child in self.children)
+        )
+
+    @property
+    def reads_messages(self) -> bool:
+        return self.kind in {"messages", "message_view", "tool_calls", "system_prompt"} or any(
+            child.reads_messages for child in self.children
+        )
+
+    @property
+    def reads_tools(self) -> bool:
+        return self.kind == "tools" or any(child.reads_tools for child in self.children)
+
 
 @dataclass(frozen=True)
 class StringSemantics:
