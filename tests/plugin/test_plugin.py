@@ -2864,6 +2864,8 @@ def test_the_model_cache_is_configured_by_its_own_block(tmp_path) -> None:
     for invalid in ({"ttl_seconds": 0}, {"max_entries": True}, {"ttl": 60}, []):
         with pytest.raises(ConfigurationError):
             config(model_cache=invalid)
+
+
 def test_reference_publishes_model_alias_operations_and_optional_descriptions(
     tmp_path, monkeypatch
 ):
