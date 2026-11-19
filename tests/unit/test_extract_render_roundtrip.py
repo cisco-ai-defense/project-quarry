@@ -13,6 +13,7 @@ from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
 from quarry.dsl.parser import DSLParser
 from quarry.plugin.visualization import build_rule_visualization
+from quarry.types.dsl import FunctionCall, Identifier
 from quarry.types.dsl.render import ConditionRenderError, render_condition
 from quarry.types.exceptions import RuleValidationError
 
@@ -248,3 +249,18 @@ def test_non_root_function_extraction_retains_renderer_limits(limits):
     condition = DSLParser().parse(PREFIX + _condition("messages[:1]", ",right=2")).condition
     with pytest.raises(ConditionRenderError):
         render_condition(condition, **limits)
+
+
+def test_extract_function_round_trips_for_a_sliced_receiver():
+    parser = DSLParser()
+    source = PREFIX + 'any s in $p.spans(messages) where extract(messages[:1], s) == "x"'
+    original = parser.parse(source).condition
+    rendered = render_condition(original)
+    assert "extract(messages[:1], s)" in rendered
+    assert parser.parse(PREFIX + rendered).condition == original
+
+
+def test_renderer_checks_list_budget_before_scanning_host_arguments():
+    condition = FunctionCall("extract", [Identifier("messages") for _ in range(100_000)])
+    with pytest.raises(ConditionRenderError, match="exceeds 2 condition nodes or edges"):
+        render_condition(condition, max_nodes=2)
