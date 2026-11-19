@@ -40,6 +40,11 @@ print(result.rule_matches, result.detailed_matches, result.outputs)
 
 `scan_data_async` serves async applications. `ScanResult.completion_state` is `complete`, `invalid`, or `incomplete`; `is_complete` is true only for an authoritative result. Explain evidence and typed `outputs` follow the same status rule.
 
+When constructing `SafetyLimits` in Python, `max_total_size` must be a nonnegative integer;
+booleans, floats, strings and `None` raise `ValueError` at construction. Zero is a real budget
+that rejects nonempty input. To disable limit enforcement for trusted input, set
+`enforce_limits=False` with a valid budget.
+
 Set `logical_reads=True` on scanner or compiled-policy scans to attach optional input-read
 snapshots. See [logical reads](logical-reads.md) for exact coverage unions, requesting-reader
 attribution, host reference token maps, limits and collection-lifetime semantics.
