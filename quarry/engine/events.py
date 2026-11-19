@@ -393,12 +393,21 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
 def build_evaluation_input(context: ScanContext) -> EvaluationInput:
     """Assemble the conversation and registered facts into one event word."""
     static = build_static_environment(context)
+    original = static
     static = replace(
         static,
-        surface_sizes={
-            **static.surface_sizes,
-            **{surface: len(items) for surface, items in context.extension_event_surfaces.items()},
-        },
+        surface_sizes=_SurfaceSizes(
+            {
+                **{
+                    key: lambda key=key: original.surface_sizes[key]
+                    for key in original.surface_sizes
+                },
+                **{
+                    surface: lambda items=items: len(items)
+                    for surface, items in context.extension_event_surfaces.items()
+                },
+            }
+        ),
         extension_state=context.extension_state_values,
         missing_extension_states=context.missing_extension_states,
     )
