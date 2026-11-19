@@ -50,6 +50,186 @@ def test_reference_lists_model_metadata_and_inputs_together_without_inference(tm
     )
 
 
+async def test_plugin_digest_ignores_unread_declared_input():
+    config = QuarryConfig(
+        config_version=2,
+        inputs={**INPUTS, "other.records": {"facts": {"value": {"type": "string"}}}},
+    )
+    plugin = QuarryPlugin(config)
+    baseline = await plugin.scan(rule_text=RULE, conversation=DATA, explore_rate=1.0)
+    with_unread = await plugin.scan(
+        rule_text=RULE,
+        conversation={**DATA, "other": object()},
+        explore_rate=1.0,
+    )
+
+    assert with_unread["completion_state"] == "complete"
+    assert (
+        with_unread["decision_path"]["conversation_sha256"]
+        == baseline["decision_path"]["conversation_sha256"]
+    )
+
+    invalid = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": {"writes": object()}},
+        explore_rate=1.0,
+    )
+    assert invalid["completion_state"] == "incomplete"
+    assert invalid["decision_path"]["conversation_sha256"] is None
+
+    class Hostile(dict):
+        def items(self):
+            raise AssertionError("overridden items must not run")
+
+        def __contains__(self, key):
+            raise AssertionError("overridden membership must not run")
+
+    bad_namespace = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": Hostile(DATA["memory"])},
+        explore_rate=1.0,
+    )
+    assert bad_namespace["completion_state"] == "incomplete"
+    assert bad_namespace["decision_path"]["conversation_sha256"] is None
+
+    bad_root = await plugin.scan(rule_text=RULE, conversation=Hostile(DATA), explore_rate=1.0)
+    assert bad_root["completion_state"] == "invalid"
+    assert bad_root["decision_path"]["conversation_sha256"] is None
+
+    class HostileKey:
+        def __hash__(self):
+            return hash("writes")
+
+        def __eq__(self, other):
+            raise AssertionError("untrusted key comparison must not run")
+
+    bad_keys = await plugin.scan(
+        rule_text=RULE,
+        conversation={"memory": {HostileKey(): []}},
+        explore_rate=1.0,
+    )
+    assert bad_keys["completion_state"] == "incomplete"
+    assert bad_keys["decision_path"]["conversation_sha256"] is None
+
+
+def test_malformed_json_container_faults_only_its_declared_input():
+    class HostileList(list):
+        def __iter__(self):
+            raise AssertionError("untrusted iterator must not run")
+
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(RULE, 'rule "Chat" condition: user_said("go")'),
+            inputs=INPUTS,
+        )
+    )
+    result = scanner.scan_data(
+        {"messages": [{"role": "user", "content": "go"}], "memory": {"writes": HostileList()}}
+    )
+    assert result.rule_matches == ["Chat"]
+    assert "Read" in result.evaluation_errors
+
+    class HostileId(str):
+        def __hash__(self):
+            raise AssertionError("untrusted ID hash must not run")
+
+    result = scanner.scan_data(
+        {
+            "messages": [{"role": "user", "content": "go"}],
+            "memory": {"writes": [{"id": HostileId("w"), "content": "x"}]},
+        }
+    )
+    assert result.rule_matches == ["Chat"]
+    assert "Read" in result.evaluation_errors
+
+
+def test_chat_tool_arguments_keep_string_subclass_support_with_declared_inputs():
+    class Argument(str):
+        __hash__ = None
+
+        def __str__(self):
+            raise AssertionError("overridden string method must not run")
+
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=('rule "Chat" condition: called_tool("lookup")',),
+            inputs=INPUTS,
+        )
+    )
+    data = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": Argument("{}")},
+                    }
+                ],
+            }
+        ]
+    }
+    assert scanner.scan_data(data).rule_matches == ["Chat"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("role",),
+        ("tool_calls", 0, "id"),
+        ("tool_calls", 0, "function", "name"),
+    ],
+)
+def test_chat_identifiers_cannot_stop_independent_inputs(path):
+    class Hostile(str):
+        def __hash__(self):
+            raise AssertionError("string hash hook ran")
+
+        def __eq__(self, other):
+            raise AssertionError("string equality hook ran")
+
+        def __len__(self):
+            raise AssertionError("string length hook ran")
+
+        def __str__(self):
+            raise AssertionError("string conversion hook ran")
+
+    data = {
+        **DATA,
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    }
+    target = data["messages"][0]
+    for step in path[:-1]:
+        target = target[step]
+    target[path[-1]] = Hostile(target[path[-1]])
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            inputs=INPUTS,
+            safety_limits=SafetyLimits(enforce_limits=False),
+            quarry_rule_texts=(RULE, 'rule "Chat" condition: called_tool("lookup")'),
+        )
+    )
+    result = scanner.scan_data(data)
+    assert result.error is None
+    assert "Read" in result.rule_matches
+    assert result.evaluation_errors
+
+
 def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     config = configured(tmp_path)
     policy = compile_policy(RULE, runtime_config=config)

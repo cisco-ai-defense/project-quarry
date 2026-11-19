@@ -87,6 +87,21 @@ def test_message_maps_preserve_written_order_and_selected_content(tmp_path, valu
     ]
 
 
+def test_concatenating_two_message_maps_preserves_both_occurrences(tmp_path):
+    scanner, adapter = scanner_for(
+        tmp_path,
+        "([item for item in messages] + [item for item in messages])",
+    )
+
+    result = scanner.scan_data(CONVERSATION)
+
+    assert result.is_complete
+    assert result.rule_matches == ["R"]
+    assert adapter.classification_messages == [
+        [*CONVERSATION["messages"], *CONVERSATION["messages"]]
+    ]
+
+
 def test_indexed_transformed_message_keeps_its_owning_view(tmp_path):
     scanner, adapter = scanner_for(tmp_path, 'messages.transform("clean")[-1]')
 

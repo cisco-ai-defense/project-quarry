@@ -55,6 +55,7 @@ class FactType:
     optional: bool = False
     items: str | None = None
     fields: Mapping[str, FactType] | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class ContentField:
 
     name: str
     optional: bool = False
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class InputDeclaration:
     role: str = "user"
     content: tuple[ContentField, ...] = ()
     facts: Mapping[str, FactType] = field(default_factory=dict)
+    description: str | None = None
 
     @property
     def namespace(self) -> str:
@@ -101,13 +104,22 @@ class InputDeclaration:
                 described["fields"] = {name: fact(item) for name, item in value.fields.items()}
             if value.optional:
                 described["optional"] = True
+            if value.description is not None:
+                described["description"] = value.description
             return described
 
         described: dict[str, Any] = {"section": self.section, "single": self.single}
+        if self.description is not None:
+            described["description"] = self.description
         if self.content:
             described["role"] = self.role
             described["content"] = [
-                {"name": item.name, "optional": item.optional} for item in self.content
+                {
+                    "name": item.name,
+                    "optional": item.optional,
+                    **({"description": item.description} if item.description is not None else {}),
+                }
+                for item in self.content
             ]
         described["facts"] = {name: fact(value) for name, value in self.facts.items()}
         return described
@@ -169,8 +181,27 @@ def _optional(fields: Mapping, owner: str) -> bool:
     return value
 
 
+def _description(fields: Mapping, owner: str) -> str | None:
+    value = fields.get("description")
+    if value is not None and not isinstance(value, str):
+        raise ConfigurationError(f"{owner} description must be a string")
+    return value
+
+
+def _rule_field_name(value: object, owner: str) -> str:
+    name = _name(value, owner)
+    from quarry.language.runtime import reserved_variable_names
+
+    flow_words = {"after", "before", "of", "right_after", "right_before", "until", "within"}
+    if name in reserved_variable_names() | flow_words:
+        raise ConfigurationError(f"{owner} name {name!r} is reserved by the rule language")
+    return name
+
+
 def _parse_fact(value: object, owner: str) -> FactType:
-    fields = _mapping(value, owner, {"type", "values", "optional", "items", "fields"})
+    fields = _mapping(
+        value, owner, {"type", "values", "optional", "items", "fields", "description"}
+    )
     kind = fields.get("type")
     if kind not in FACT_TYPES:
         raise ConfigurationError(f"{owner} type must be one of {', '.join(FACT_TYPES)}")
@@ -204,11 +235,11 @@ def _parse_fact(value: object, owner: str) -> FactType:
             raise ConfigurationError(f"{owner} fields must be a non-empty mapping")
         parsed_fields = MappingProxyType(
             {
-                _name(name, f"{owner} field"): _parse_fact(item, f"{owner}.{name}")
+                _rule_field_name(name, f"{owner} field"): _parse_fact(item, f"{owner}.{name}")
                 for name, item in nested.items()
             }
         )
-    return FactType(kind, values, optional, items, parsed_fields)
+    return FactType(kind, values, optional, items, parsed_fields, _description(fields, owner))
 
 
 def _matches_scalar(kind: str, value: object) -> bool:
@@ -232,7 +263,7 @@ def parse_declaration(section: object, value: object) -> InputDeclaration:
     namespace, name = section.split(".")
     _name(namespace, f"{owner} namespace")
     _name(name, owner)
-    fields = _mapping(value, owner, {"single", "role", "content", "facts"})
+    fields = _mapping(value, owner, {"single", "role", "content", "facts", "description"})
     single = fields.get("single", False)
     if not isinstance(single, bool):
         raise ConfigurationError(f"{owner} single must be true or false")
@@ -242,13 +273,18 @@ def parse_declaration(section: object, value: object) -> InputDeclaration:
         raise ConfigurationError(f"{owner} content must be a list of field names")
     for entry in raw_content:
         if isinstance(entry, str):
-            content.append(ContentField(_name(entry, f"{owner} content field")))
+            content.append(ContentField(_rule_field_name(entry, f"{owner} content field")))
         else:
-            entry_fields = _mapping(entry, f"{owner} content field", {"name", "optional"})
+            entry_fields = _mapping(
+                entry,
+                f"{owner} content field",
+                {"name", "optional", "description"},
+            )
             content.append(
                 ContentField(
-                    _name(entry_fields.get("name"), f"{owner} content field"),
+                    _rule_field_name(entry_fields.get("name"), f"{owner} content field"),
                     _optional(entry_fields, f"{owner} content field"),
+                    _description(entry_fields, f"{owner} content field"),
                 )
             )
     if "role" in fields and not content:
@@ -260,7 +296,9 @@ def parse_declaration(section: object, value: object) -> InputDeclaration:
     if not isinstance(raw_facts, Mapping):
         raise ConfigurationError(f"{owner} facts must be a mapping of name to type")
     facts = {
-        _name(fact_name, f"{owner} fact"): _parse_fact(fact_value, f"{owner} fact '{fact_name}'")
+        _rule_field_name(fact_name, f"{owner} fact"): _parse_fact(
+            fact_value, f"{owner} fact '{fact_name}'"
+        )
         for fact_name, fact_value in raw_facts.items()
     }
     names = [item.name for item in content] + list(facts)
@@ -273,7 +311,14 @@ def parse_declaration(section: object, value: object) -> InputDeclaration:
         )
     if not names or names == [ITEM_ID]:
         raise ConfigurationError(f"{owner} declares no content and no facts")
-    return InputDeclaration(section, single, role, tuple(content), MappingProxyType(facts))
+    return InputDeclaration(
+        section,
+        single,
+        role,
+        tuple(content),
+        MappingProxyType(facts),
+        _description(fields, owner),
+    )
 
 
 def parse_inputs(data: object) -> dict[str, InputDeclaration]:
@@ -344,10 +389,12 @@ def _annotation(value: FactType, label: str) -> Any:
 _STRICT = ConfigDict(extra="forbid", validate_default=True, strict=True, validate_by_name=False)
 
 
-def _field(annotation: Any, optional: bool, alias: str) -> tuple[Any, Any]:
+def _field(
+    annotation: Any, optional: bool, alias: str, description: str | None = None
+) -> tuple[Any, Any]:
     if optional:
-        return (annotation | None, Field(default=None, alias=alias))
-    return (annotation, Field(alias=alias))
+        return (annotation | None, Field(default=None, alias=alias, description=description))
+    return (annotation, Field(alias=alias, description=description))
 
 
 def _model(
@@ -355,10 +402,14 @@ def _model(
 ) -> type[BaseModel]:
     definitions: dict[str, Any] = {}
     for item in content:
-        definitions[f"f{len(definitions)}"] = _field(str, item.optional, item.name)
+        definitions[f"f{len(definitions)}"] = _field(
+            str, item.optional, item.name, item.description
+        )
     for name, value in facts.items():
         annotation = _annotation(value, f"{label}.{name}")
-        definitions[f"f{len(definitions)}"] = _field(annotation, value.optional, name)
+        definitions[f"f{len(definitions)}"] = _field(
+            annotation, value.optional, name, value.description
+        )
     model_name = "".join(part.capitalize() for part in re.split(r"[._]", label) if part)
     return create_model(model_name or "Input", __config__=_STRICT, **definitions)
 

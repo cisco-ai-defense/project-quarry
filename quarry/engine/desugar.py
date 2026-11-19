@@ -725,11 +725,7 @@ class Desugarer:
             conversation = surface_names(domain="event")
             if release_surface in extension or sustained_surfaces & extension:
                 self.ordering_sources.append(source or node)
-            ambient = (
-                sustained_surfaces & (conversation | (extension - {release_surface}))
-                if release_surface in extension
-                else sustained_surfaces & extension
-            )
+            ambient = (sustained_surfaces & (conversation | extension)) - {release_surface}
             if release_surface in extension and any(
                 isinstance(alt, _ToolsAlt) for alt in sustained
             ):

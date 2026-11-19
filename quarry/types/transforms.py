@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -363,6 +364,8 @@ def source_mapping_for(
     segments: tuple[ProvenanceSegment, ...],
     start: int,
     end: int,
+    *,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[tuple[ContentSourceRange, ...], bool]:
     """Return exact mapped ranges plus whether any requested character is unmapped."""
 
@@ -383,7 +386,19 @@ def source_mapping_for(
     indexed = True
     covered = start
     unmapped = False
+    work = 0
+
+    def charge_work(amount: int = 1) -> None:
+        nonlocal work
+        work = min(MAX_TRANSFORM_WORK + 1, work + amount)
+        if work > MAX_TRANSFORM_WORK:
+            raise ValueError(f"transformed source mapping exceeds {MAX_TRANSFORM_WORK} work units")
+        if check_deadline is not None and (work % 256 == 0 or work == amount):
+            check_deadline()
+
+    charge_work(0)
     for segment in segments:
+        charge_work()
         low, high = max(start, segment.start), min(end, segment.end)
         if low >= high:
             continue
@@ -412,6 +427,7 @@ def source_mapping_for(
                 ),
             )
         for source in sources:
+            charge_work()
             key = _native_range_key(source) if indexed else None
             if indexed and key is None:
                 indexed = False
@@ -460,10 +476,11 @@ def source_ranges_for(
     end: int,
     *,
     require_mappable: bool = False,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[ContentSourceRange, ...]:
     """Map one transformed range to original content-part ranges."""
 
-    ranges, unmapped = source_mapping_for(segments, start, end)
+    ranges, unmapped = source_mapping_for(segments, start, end, check_deadline=check_deadline)
     if require_mappable and unmapped:
         raise ValueError("transformed range includes inserted text with no source position")
     if require_mappable and not ranges:

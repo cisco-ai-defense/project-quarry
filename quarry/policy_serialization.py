@@ -1240,8 +1240,8 @@ def _artifact_from_wire(
         for atom_id, spec in artifact.atom_specs.items()
         if spec.detector == "computed_messages"
     }
-    if set(computed) != expected or set(computed) - artifact.automaton_atoms:
-        raise _fail("computed message specifications need exactly one live condition plan")
+    if set(computed) != expected:
+        raise _fail("computed message specifications need exactly one condition plan")
     for atom_id, plan in computed.items():
         _check_computed_source(artifact, atom_id, plan)
         cost = max(
