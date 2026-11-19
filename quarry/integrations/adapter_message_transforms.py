@@ -153,8 +153,8 @@ async def apply_adapter_transform(
         return await backend.transform_messages(name, messages)
     await require_readable_media(messages, selected)
     meter = _OperationMeter(_metrics if _metrics is not None else _TransformMetrics())
-    ordinals = tuple(dict.fromkeys(messages._ordinals))
-    input_characters = sum(len(messages._message_at(ordinal).content) for ordinal in ordinals)
+    unique = {id(message): message for message in messages}
+    input_characters = sum(len(message.content) for message in unique.values())
     if input_characters > MAX_TRANSFORM_INPUT_CHARACTERS:
         raise transform_error(
             name, "invalid_input", "selected message text exceeds its character limit"
@@ -167,11 +167,10 @@ async def apply_adapter_transform(
         callable(batch_transform) and callable(cache_identity) and cache_identity(name) is not None
     )
     pacer = Pacer()
-    for ordinal in ordinals:
+    for identity, message in unique.items():
         raise_if_evaluation_expired()
         if pacer.due():
             await asyncio.sleep(0)
-        message = messages._message_at(ordinal)
         units = await _partition_text_units(message, message._content_provenance(), meter)
         text_units = {part_index: (value, mapping) for part_index, value, mapping in units}
         raw = message.source_content
@@ -271,8 +270,18 @@ async def apply_adapter_transform(
         mapping_segments += len(mapped)
         _check_intermediate(output_characters, mapping_segments)
         if replacements:
-            overrides[ordinal] = message._with_transformed_content(
+            overrides[identity] = message._with_transformed_content(
                 replacements, tuple(mapped), replace_media=True
             )
     await meter.checkpoint(finish=True)
-    return messages if not overrides else await messages._with_overrides_async(overrides)
+    return (
+        messages
+        if not overrides
+        else await messages._with_position_overrides_async(
+            {
+                position: overrides[id(message)]
+                for position, message in enumerate(messages)
+                if id(message) in overrides
+            }
+        )
+    )
