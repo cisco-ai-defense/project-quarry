@@ -19,8 +19,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
 TransformKind = Literal["strip", "casefold", "replace", "prefix", "suffix"]
