@@ -110,10 +110,7 @@ def test_outer_count_owns_evidence_when_its_filter_contains_a_quantifier(
 
 @pytest.mark.parametrize("restored", [False, True])
 def test_indexed_tool_call_argument_arrays_keep_field_text_matching(restored):
-    condition = (
-        'any m in assistant_messages where '
-        'm.tool_calls[0].arguments.items ~ "^a"'
-    )
+    condition = 'any m in assistant_messages where m.tool_calls[0].arguments.items ~ "^a"'
     policy = compile_policy('rule "Read" condition: ' + condition)
     if restored:
         wire = policy.to_bytes()
