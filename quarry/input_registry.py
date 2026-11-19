@@ -919,7 +919,7 @@ class InputRegistry:
             if not isinstance(item, dict):
                 raise ConversationValidationError(f"{surface}[{index}] must be an object")
             item_id = item.get(ITEM_ID)
-            if not isinstance(item_id, str) or not item_id or item_id in ids:
+            if type(item_id) is not str or not item_id or item_id in ids:
                 raise ConversationValidationError(
                     f"{surface}[{index}] needs a unique non-empty string 'id'"
                 )
@@ -955,19 +955,27 @@ class InputRegistry:
             return entries
 
         def unread(entry: dict[str, Any]) -> bool:
-            section = entry.get("input")
+            # Leave malformed entries for order_timeline to report as a clock fault.
+            # Looking up a key in a subclass or alongside non-string keys could run
+            # user-defined equality methods before that validation happens.
+            if type(entry) is not dict or any(type(key) is not str for key in dict.__iter__(entry)):
+                return False
+            section = dict.get(entry, "input")
             if type(section) is str:
                 if section in read:
                     return False
                 namespace, _, name = section.partition(".")
                 holder = conversation.get(namespace)
                 return section in self.event_surfaces or (
-                    namespace in self.definitions and type(holder) is dict and name in holder
+                    namespace in self.definitions
+                    and type(holder) is dict
+                    and all(type(key) is str for key in dict.__iter__(holder))
+                    and name in holder
                 )
             # The chat no rule reads: every entry that names a chat item, whatever else it holds.
             return not chat_read and ("message_index" in entry or "tool_call_id" in entry)
 
-        return [entry for entry in entries if not (type(entry) is dict and unread(entry))]
+        return [entry for entry in list.__iter__(entries) if not unread(entry)]
 
     def order_timeline(
         self,
@@ -984,7 +992,18 @@ class InputRegistry:
         a temporal result; it may reorder a section's items.
         """
         if type(order) is not list:
-            raise ConversationValidationError("The timeline must be a list")
+            raise ConversationValidationError("The timeline must be an exact built-in list")
+        # Check only the shallow shape before measuring size: the projection above
+        # intentionally preserves malformed entries for this clock-local error.
+        if limits.enforce_limits and len(order) > limits.max_total_size:
+            raise ConversationValidationError("The timeline exceeds max_total_size")
+        for position, entry in enumerate(list.__iter__(order)):
+            if type(entry) is not dict:
+                raise ConversationValidationError(f"Timeline entry {position} must be an object")
+            if any(type(key) is not str for key in dict.__iter__(entry)):
+                raise ConversationValidationError(
+                    f"Timeline entry {position} keys must be exact built-in strings"
+                )
         if limits.enforce_limits and (
             json_size(order, limits.max_total_size) > limits.max_total_size
         ):
@@ -1021,7 +1040,11 @@ class InputRegistry:
                 raise ConversationValidationError(f"Timeline entry {position} must be an object")
             if set(entry) == {"input", ITEM_ID}:
                 surface, item_id = entry["input"], entry[ITEM_ID]
-                if type(surface) is not str or surface not in self.event_surfaces:
+                if type(surface) is not str:
+                    raise ConversationValidationError(
+                        f"Timeline entry {position} has invalid input name"
+                    )
+                if surface not in self.event_surfaces:
                     raise ConversationValidationError(
                         f"Timeline entry {position} names {surface!r}, not a list input"
                     )
@@ -1037,7 +1060,7 @@ class InputRegistry:
                 key = ("message_index", value)
             elif len(entry) == 1 and "tool_call_id" in entry:
                 value = entry["tool_call_id"]
-                if not isinstance(value, str) or not value:
+                if type(value) is not str or not value:
                     raise ConversationValidationError(
                         f"Timeline entry {position} has invalid tool_call_id"
                     )

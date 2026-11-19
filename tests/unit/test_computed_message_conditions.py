@@ -167,6 +167,19 @@ def test_native_explain_shape_does_not_gain_empty_child_fields():
     assert "value_conditions" not in result.explanations[0].to_dict()
 
 
+def test_folded_computed_condition_round_trips_without_a_live_dfa_atom():
+    source = (
+        'rule "R" condition: '
+        '(any m in (messages + messages) where m.content contains "x") or '
+        'count([n for n in messages if n.content contains "y"]) >= 0'
+    )
+    policy = compile_policy(source)
+
+    restored = load_compiled_policy(policy.to_bytes())
+
+    assert restored.to_bytes() == policy.to_bytes()
+
+
 @pytest.mark.asyncio
 async def test_decision_paths_never_retain_child_text_or_deferred_payload(tmp_path):
     secret = "private-child-text"

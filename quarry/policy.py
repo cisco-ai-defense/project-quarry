@@ -153,7 +153,9 @@ def _sampled_values(
     ordered: bool,
     registry: InputRegistry,
 ) -> dict[str, Any] | None:
-    if type(conversation) is not dict or any(type(key) is not str for key in conversation):
+    if type(conversation) is not dict:
+        return None
+    if any(type(key) is not str for key in dict.__iter__(conversation)):
         return None
     chat_read = bool(read & (surface_names() - {"tools"}))
     keys = (
@@ -169,8 +171,41 @@ def _sampled_values(
     for surface in sorted(read):
         namespace, _, name = surface.partition(".")
         holder = conversation.get(namespace)
-        if name and type(holder) is dict and name in holder:
-            sampled[surface] = holder[name]
+        if name and namespace in conversation:
+            if type(holder) is not dict:
+                return None
+            if any(type(key) is not str for key in dict.__iter__(holder)):
+                return None
+            if name in holder:
+                sampled[surface] = holder[name]
+    return sampled
+
+
+def _validated_sample(
+    conversation: Any,
+    read: frozenset[str],
+    adapter_keys: Iterable[str],
+    ordered: bool,
+    limits: SafetyLimits,
+    registry: InputRegistry,
+) -> dict[str, Any] | None:
+    """Return only JSON-safe rule inputs for best-effort hashing and exploration."""
+
+    try:
+        sampled = _sampled_values(conversation, read, adapter_keys, ordered, registry)
+    except Exception:
+        return None
+    if sampled is None:
+        return None
+    most = limits.max_total_size if limits.enforce_limits else None
+    for key, value in sampled.items():
+        try:
+            _validate_raw_json_container_types(value)
+            _validate_json_tree(value, key, limits.max_nesting_depth)
+        except ConversationValidationError:
+            return None
+        if most is not None and json_size(value, most) > most:
+            return None
     return sampled
 
 
@@ -183,19 +218,8 @@ def _sampled(
     limits: SafetyLimits,
     registry: InputRegistry,
 ) -> bool:
-    sampled = _sampled_values(conversation, read, adapter_keys, ordered, registry)
-    if sampled is None:
-        return False
-    most = limits.max_total_size if limits.enforce_limits else None
-    for key, value in sampled.items():
-        try:
-            _validate_raw_json_container_types(value)
-            if most is not None and json_size(value, most) > most:
-                return False
-            _validate_json_tree(value, key, limits.max_nesting_depth)
-        except ConversationValidationError:
-            return False
-    return explores(conversation_sha256(sampled), rate)
+    sampled = _validated_sample(conversation, read, adapter_keys, ordered, limits, registry)
+    return sampled is not None and explores(conversation_sha256(sampled), rate)
 
 
 @dataclass(frozen=True, slots=True)

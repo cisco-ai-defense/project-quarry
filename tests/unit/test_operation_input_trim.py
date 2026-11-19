@@ -10,8 +10,10 @@ import pytest
 
 from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
+from quarry.integrations.model_expression import ModelExpressionTrace, _evaluate_model_call
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.resources import ResourcePreparationError
+from quarry.types.context import ScanContext
 from quarry.types.results import Score, Span
 from tests.unit.model_fakes import ModelAdapter, NoWaitLimiter, model_entry, passthrough_builder
 
@@ -64,6 +66,7 @@ class TrimAdapter(ModelAdapter):
         super().__init__()
         self.complete_inputs = []
         self.token_inputs = []
+        self.span_inputs = []
 
     async def complete_message(self, config, messages, tools, *, timeout=None):
         self.completions += 1
@@ -71,6 +74,7 @@ class TrimAdapter(ModelAdapter):
         return {"role": "assistant", "content": '{"ok":true}'}
 
     async def decode_spans(self, config, raw_result, messages, threshold):
+        self.span_inputs.append(messages.to_openai_messages())
         return [Span(0, 0, 1, Score(0.9))]
 
     async def tokenize(self, config, messages, tools, *, timeout=None):
@@ -459,6 +463,71 @@ def test_span_over_a_partial_trim_keeps_the_boundary_message_coordinates(tmp_pat
     assert result.is_complete, result.evaluation_errors
     span = result.outputs["Read"].items[0].value
     assert (span.message_index, span.start, span.end) == (1, 0, 1)
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.asyncio
+async def test_empty_trim_does_not_leak_omission_evidence_to_a_later_spans_call(
+    tmp_path, restored, monkeypatch
+):
+    base, adapter, backend = trim_policy(
+        tmp_path, "spans", 'trim(messages, 6, cut_keep="none")', restored=restored
+    )
+    source = (
+        'rule "Read" condition: true collect: '
+        "[s for s in union("
+        'model("reader").spans(trim(messages, 1, cut_keep="none"), 0.5), '
+        'model("reader").spans(messages, 0.5)) if true]'
+    )
+    policy = compile_policy(
+        source,
+        runtime_config=base._scanner.config,
+        model_inference_backend=backend,
+    )
+    if restored:
+        wire = policy.to_bytes()
+        policy = load_compiled_policy(
+            wire,
+            runtime_config=base._scanner.config,
+            model_inference_backend=backend,
+        )
+        assert policy.to_bytes() == wire
+
+    artifact = policy._scanner.compiled_rules["Read"]
+    expression = artifact.collect_plan.source
+
+    def find_union(node):
+        if node.kind == "union":
+            return node
+        for child in node.children:
+            found = find_union(child)
+            if found is not None:
+                return found
+        return None
+
+    union = find_union(expression)
+    assert union is not None
+    context = ScanContext(
+        [{"role": "user", "content": "abcdef"}],
+        resource_manager=policy._scanner.resource_manager,
+    )
+    trace = ModelExpressionTrace()
+    await _evaluate_model_call(union.children[0], context, None, {}, trace, None)
+    await _evaluate_model_call(union.children[1], context, None, {}, trace, None)
+    assert trace.calls == []
+    assert trace.trim_omissions is None
+    assert adapter.span_inputs == [[{"role": "user", "content": "abcdef"}]]
+
+    result = await policy.scan_async(
+        {"messages": [{"role": "user", "content": "abcdef"}]}, explain=True
+    )
+
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == ["Read"]
+    assert adapter.span_inputs == [
+        [{"role": "user", "content": "abcdef"}],
+        [{"role": "user", "content": "abcdef"}],
+    ]
 
 
 async def test_trim_wait_respects_the_inspection_deadline(tmp_path):
