@@ -276,10 +276,12 @@ def _tool_dicts(tools: Sequence[Tool] | None) -> list[dict[str, Any]]:
 def _message_dicts(messages: Messages) -> list[dict[str, Any]]:
     """Validate a message selection before projecting it for a model call."""
 
+    if not messages:
+        raise ModelError("model input is empty; nothing to score")
     try:
         messages.assert_self_contained()
     except ValueError as exc:
-        raise ModelError(str(exc)) from exc
+        raise InvalidInputError("model input does not contain exact call/result links") from exc
     for message in messages:
         message._require_model_readable()
         require_message_media(message)
@@ -3427,9 +3429,9 @@ class ModelInferenceBackend:
     ) -> tuple[Messages, ...]:
         """Build the chunks after public argument validation."""
 
-        await require_model_messages(messages)
+        await require_model_messages(messages, standalone=False)
         if context is not None:
-            await require_model_messages(context)
+            await require_model_messages(context, standalone=False)
         range_budget = RangeBudget(_range_metrics)
         range_indexes: dict[int, MessageRangeIndex] = {}
         range_lock = asyncio.Lock()

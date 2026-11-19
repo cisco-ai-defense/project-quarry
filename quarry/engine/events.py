@@ -203,6 +203,18 @@ class StaticEnvironment:
     tool_count: int | None = None
     extension_state: dict[str, Any] = field(default_factory=dict)
     missing_extension_states: frozenset[str] = frozenset()
+    _system_prompt_reader: Callable[[], str | None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def __getattribute__(self, name: str):
+        if name == "system_prompt":
+            reader = object.__getattribute__(self, "_system_prompt_reader")
+            if reader is not None:
+                value = reader()
+                object.__setattr__(self, "system_prompt", value)
+                object.__setattr__(self, "_system_prompt_reader", None)
+        return object.__getattribute__(self, name)
 
     def has_tool(self, name: str) -> bool:
         """Return whether the static environment has a tool with the given name."""
@@ -371,12 +383,21 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     size_readers.update(
         tools=lambda: len(conv.tools), system_prompt=lambda: len(conv.system_prompt or "")
     )
+    size_readers.update(
+        {
+            surface: lambda items=items: len(items)
+            for surface, items in context.extension_event_surfaces.items()
+        }
+    )
     surface_sizes = _SurfaceSizes(size_readers)
     tool_call_name_counts = _DeferredMapping(conv.messages._name_counts)
     tool_response_name_counts = _DeferredMapping(lambda: conv.messages._name_counts(responses=True))
     return StaticEnvironment(
+        extension_state=context.extension_state_values,
+        missing_extension_states=context.missing_extension_states,
         tools=_DeferredMapping(conv._tool_index),
-        system_prompt=conv.system_prompt,
+        system_prompt=None,
+        _system_prompt_reader=lambda: conv.system_prompt,
         limits=context.limits,
         was_truncated=context.was_truncated,
         surface_sizes=surface_sizes,
@@ -389,24 +410,6 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
 def build_evaluation_input(context: ScanContext) -> EvaluationInput:
     """Assemble the conversation and registered facts into one event word."""
     static = build_static_environment(context)
-    original = static
-    static = replace(
-        static,
-        surface_sizes=_SurfaceSizes(
-            {
-                **{
-                    key: lambda key=key: original.surface_sizes[key]
-                    for key in original.surface_sizes
-                },
-                **{
-                    surface: lambda items=items: len(items)
-                    for surface, items in context.extension_event_surfaces.items()
-                },
-            }
-        ),
-        extension_state=context.extension_state_values,
-        missing_extension_states=context.missing_extension_states,
-    )
     conversation_events = build_events(context)
     if not context.extension_event_sequence and context.ordered_timeline is None:
         return EvaluationInput(static=static, events=conversation_events)

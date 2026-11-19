@@ -36,7 +36,10 @@ from quarry.integrations.content_transforms import apply_content_transform
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.types.dsl import FunctionCall
 from quarry.types.dsl.render import render_condition
-from quarry.types.exceptions import ConfigurationError, ConversationValidationError
+from quarry.types.exceptions import (
+    ConfigurationError,
+    InvalidInputError,
+)
 from quarry.types.messages import AssistantMessage, Messages, ToolMessage
 from quarry.types.results import Score, Span
 from quarry.types.transforms import ContentTransform, TransformOperation
@@ -518,7 +521,7 @@ async def test_independently_transformed_tool_views_relink_only_visible_variants
     assert calls_only[0].tool_calls[0].response is None
     responses_only = Messages.combine((response_view.tool_responses,))
     assert isinstance(responses_only[0], ToolMessage)
-    with pytest.raises(ConversationValidationError, match="unknown tool_call_id"):
+    with pytest.raises(InvalidInputError, match="no exact call link"):
         _ = responses_only[0].call
     with pytest.raises(ValueError, match="before its originating"):
         responses_only.assert_self_contained()
@@ -864,13 +867,17 @@ async def test_async_tool_relink_is_cancellable_during_clone_work(
 
 
 @pytest.mark.asyncio
-async def test_tool_relink_rejects_ambiguous_malformed_and_incompatible_identities(
+async def test_tool_relink_preserves_input_faults_and_rejects_incompatible_variants(
     monkeypatch,
 ) -> None:
-    duplicate = _many_tool_call_messages(2)
-    object.__setattr__(duplicate[0].tool_calls[1], "id", "call-0")
-    with pytest.raises(ValueError, match="ambiguous tool-call ID"):
-        Messages.combine((duplicate.assistant_messages,))
+    raw = _many_tool_call_messages(2).to_openai_messages()
+    raw[0]["tool_calls"][1]["id"] = "call-0"
+    duplicate = Messages.from_openai(raw)
+    combined = Messages.combine((duplicate.assistant_messages,))
+    assert len(combined.tool_calls) == 2
+    for call in combined.tool_calls:
+        with pytest.raises(InvalidInputError):
+            call.guard_read("id")
 
     source = _many_tool_call_messages(2)
     transformed = await apply_content_transform(
@@ -879,7 +886,7 @@ async def test_tool_relink_rejects_ambiguous_malformed_and_incompatible_identiti
     )
     malformed = transformed[0].tool_calls[0]
     object.__setattr__(malformed, "id", "")
-    with pytest.raises(ValueError, match="non-empty string tool identity"):
+    with pytest.raises(ValueError, match="does not match its source tool identity"):
         Messages.combine((transformed,))
     assert source[0].tool_calls[0].id == "call-0"
 

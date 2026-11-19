@@ -152,7 +152,8 @@ class Conversation:
                 canonical.append(raw)
                 continue
             role = raw["role"]
-            allowed = cls._ROLE_WIRE_KEYS.get(role, cls._DEFAULT_WIRE_KEYS)
+            # Preserve structurally valid cross-role fields for fault classification.
+            allowed = frozenset({"role", "content", "tool_calls", "tool_call_id", "refusal"})
             clean = {key: value for key, value in raw.items() if key in allowed}
             if role == "tool" and clean.get("content") is None:
                 clean["content"] = ""

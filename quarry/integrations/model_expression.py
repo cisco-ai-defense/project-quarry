@@ -996,7 +996,7 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     # split context, before handing control to host code.
     for argument in arguments:
         if isinstance(argument, Messages):
-            await require_model_messages(argument)
+            await require_model_messages(argument, standalone=operation != "split")
 
     if operation == "score":
         messages, constitution, *optional = arguments
