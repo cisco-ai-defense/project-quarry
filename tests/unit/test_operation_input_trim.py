@@ -471,11 +471,11 @@ async def test_empty_trim_does_not_leak_omission_evidence_to_a_later_spans_call(
     tmp_path, restored, monkeypatch
 ):
     base, adapter, backend = trim_policy(
-        tmp_path, "spans", "trim(messages, 6, cut_keep=\"none\")", restored=restored
+        tmp_path, "spans", 'trim(messages, 6, cut_keep="none")', restored=restored
     )
     source = (
         'rule "Read" condition: true collect: '
-        '[s for s in union('
+        "[s for s in union("
         'model("reader").spans(trim(messages, 1, cut_keep="none"), 0.5), '
         'model("reader").spans(messages, 0.5)) if true]'
     )
