@@ -805,7 +805,14 @@ def build_evidence(
 
     parts = artifact_parts(artifact)
     tool_body_atoms = {atom_id for body in parts.tool_bodies.values() for atom_id in body}
-    tools = len(evaluation_input.static.tools or {})
+    tools = evaluation_input.static.tool_count
+    if tools is None:
+        tools = (
+            len(evaluation_input.static.tools)
+            if tool_body_atoms
+            or any(is_per_tool_static(spec) for spec in artifact.atom_specs.values())
+            else 0
+        )
     source_nodes = leaf_source_nodes(artifact)
     checks = _atom_checks(artifact, parts)
     by_atom: dict[str, list[tuple]] = {}

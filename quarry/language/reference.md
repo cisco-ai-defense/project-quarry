@@ -707,7 +707,7 @@ Only the fields listed here are supported for rule authoring.
 | `tools` | `description` | `string` | Description shown to the model. |
 | `tools` | `name` | `string` | Exact offered function name. |
 | `tools` | `parameters` | `object` | JSON Schema for the function arguments. |
-| `tools` | `type` | `string` | Offered tool type; currently `function`. |
+| `tools` | `type` | `string` | Offered tool type; rules read named function tools. |
 | `user_messages` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `user_messages` | `role` | `string` | OpenAI message role. |
 

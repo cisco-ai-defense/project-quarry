@@ -725,7 +725,6 @@ def validate_conversation(
             raise ConversationValidationError(f"'tools' must be a list, got {type(tools).__name__}")
         tools = cast(list[dict[str, Any]], tools)
 
-        tool_names: set[str] = set()
         for i, tool in enumerate(tools):
             if type(tool) is not dict:
                 raise ConversationValidationError(f"Tool at index {i} is not a dict")
@@ -735,15 +734,10 @@ def validate_conversation(
                     f"Tool at index {i} has unsupported keys: "
                     f"{_unexpected_keys(tool, OPENAI_TOOL_KEYS)}. Expected OpenAI tool fields."
                 )
-            tool_type = tool.get("type")
-            if (
-                type(tool_type) is not str
-                or tool_type != "function"
-                or type(tool.get("function")) is not dict
-            ):
+            if type(tool.get("type")) is not str or type(tool.get("function")) is not dict:
                 raise ConversationValidationError(
                     f"Tool at index {i} has invalid format. "
-                    "Expected OpenAI format with type='function' and a function object. "
+                    "Expected an OpenAI tool with a string type and a function object. "
                     f"Got keys: {list(tool.keys())}"
                 )
             function = cast(dict[str, Any], tool["function"])
@@ -752,9 +746,9 @@ def validate_conversation(
                 raise ConversationValidationError(
                     f"Tool at index {i} function has unsupported keys: {unexpected_function_keys}"
                 )
-            if type(function.get("name")) is not str or not function["name"]:
+            if type(function.get("name")) is not str:
                 raise ConversationValidationError(
-                    f"Tool at index {i} function must have a non-empty string 'name'"
+                    f"Tool at index {i} function must have a string 'name'"
                 )
             if "description" in function and type(function["description"]) is not str:
                 raise ConversationValidationError(
@@ -768,13 +762,6 @@ def validate_conversation(
                 _validate_json_tree(
                     function["parameters"], f"tools[{i}].function.parameters", max_nesting_depth
                 )
-
-            tool_name = function["name"]
-            if tool_name in tool_names:
-                raise ConversationValidationError(
-                    f"Tool definitions contain duplicate function name '{tool_name}'"
-                )
-            tool_names.add(tool_name)
 
 
 def _validate_tool_call(
