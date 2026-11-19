@@ -27,4 +27,10 @@ The engine tests compare compiled verdicts with the frozen legacy corpus and dir
 
 Before a release, run `make build`, install the wheel and source distribution outside the checkout, run `pip check`, import `quarry`, invoke `quarry --help`, and scan a local example. CI runs quality checks and the test suite across the advertised Python versions. Provider tests use local adapters or a loopback HTTP server; they do not call external services.
 
+The test matrix runs the full suite and deterministic examples on Ubuntu and Windows
+with Python 3.11, 3.12, and 3.13. Both use the reviewed dependency lock and the same
+test selection. Windows steps use PowerShell, following the
+[GitHub Actions shell configuration](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell).
+Each job reports its platform-specific failures and skips in its own test log.
+
 The [generated language reference](../quarry/language/reference.md) is built from runtime annotations and must stay in sync with the code. Run `make language-generate` after changing its source metadata, then review the resulting diff.
