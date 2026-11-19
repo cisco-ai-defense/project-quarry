@@ -58,7 +58,7 @@ from quarry.integrations.message_ranges import (
     RangeMetrics,
     gather_split_tasks,
 )
-from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelUsage
+from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelRetryHistory, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.shared_transforms import (
     TRANSFORM_BATCH_SIZE,
@@ -178,9 +178,57 @@ class _ChunkPart(NamedTuple):
 
 
 def _llm_error(code: str, message: str, model_id: str) -> LLMError:
-    """Create a structured inference error tagged with its configured model."""
+    """Create a structured inference error that names its configured model."""
 
-    return LLMError(message, {"code": code, "model": model_id})
+    prefix = f"Inference model '{model_id}'"
+    public_message = message if message.startswith(prefix) else f"{prefix} {message}"
+    return LLMError(public_message, {"code": code, "model": model_id})
+
+
+def _attributed_failure(
+    message: str,
+    exc: LLMError,
+    model_id: str,
+    *,
+    private_model: str | None = None,
+) -> LLMError:
+    """Attribute a failure to an alias without rewriting arbitrary message substrings."""
+
+    prefix = f"Inference model '{model_id}'"
+    model_names = {
+        name for name in (private_model, exc.details.get("model")) if isinstance(name, str) and name
+    }
+    private_names = model_names - {model_id}
+
+    def names_private_model(text: str) -> bool:
+        return any(name in text for name in private_names)
+
+    for name in model_names:
+        source_prefix = f"Inference model '{name}'"
+        if message.startswith(source_prefix):
+            suffix = message[len(source_prefix) :]
+            public_message = (
+                f"{prefix} failed: provider request failed"
+                if names_private_model(suffix)
+                else f"{prefix}{suffix}"
+            )
+            break
+    else:
+        if message.startswith(prefix):
+            suffix = message[len(prefix) :]
+            public_message = (
+                f"{prefix} failed: provider request failed"
+                if names_private_model(suffix)
+                else message
+            )
+        else:
+            cause = "provider request failed" if names_private_model(message) else message
+            public_message = f"{prefix} failed: {cause}"
+
+    return LLMError(
+        public_message,
+        {**exc.details, "model": model_id},
+    )
 
 
 def _make_boundary(seed: int) -> str:
@@ -546,7 +594,10 @@ def _require_inline_media(value: Any) -> None:
     if "url" in value and (
         not isinstance(value["url"], str) or not value["url"].startswith("data:")
     ):
-        raise LLMError("Inference conversations require inline media", {"code": "invalid_output"})
+        raise LLMError(
+            "the conversation has a media URL that is not inline",
+            {"code": "invalid_output"},
+        )
     for nested in value.values():
         _require_inline_media(nested)
 
@@ -2445,10 +2496,18 @@ class ModelInferenceBackend:
 
         send = getattr(adapter, method) if dispatch is None else dispatch
 
+        retry_history = ModelRetryHistory()
+
         async def request(*, timeout: float | None) -> Any:
             async def invoke(attempt_timeout):
                 # Construct a fresh payload for each retry. A host adapter may mutate it.
-                response = send(model, *payload(), timeout=attempt_timeout)
+                try:
+                    arguments = payload()
+                except LLMError as exc:
+                    raise _attributed_failure(
+                        exc.message, exc, model_id, private_model=rate_limit_model
+                    ) from exc
+                response = send(model, *arguments, timeout=attempt_timeout)
                 return await response if inspect.isawaitable(response) else response
 
             try:
@@ -2457,6 +2516,7 @@ class ModelInferenceBackend:
                     rate_limit_model,
                     invoke,
                     timeout=timeout,
+                    retry_history=retry_history,
                 )
             except LLMError as exc:
                 reason = _refusal_reason(exc) if refusals else None
@@ -2494,10 +2554,8 @@ class ModelInferenceBackend:
                         timeout=provider_timeout,
                     )
             except TimeoutError as exc:
-                raise _llm_error(
-                    "timeout",
-                    f"Model call timed out for '{model_id}'",
-                    model_id,
+                raise ModelUsage._timeout_error(
+                    model_id, retry_history.last_failure, retry_history.failed_attempts
                 ) from exc
             except LLMError as exc:
                 # A request another alias started fails under that alias's name; report it
@@ -2505,9 +2563,7 @@ class ModelInferenceBackend:
                 other = exc.details.get("model")
                 if not isinstance(other, str) or other == model_id:
                     raise
-                raise LLMError(
-                    exc.message.replace(other, model_id), {**exc.details, "model": model_id}
-                ) from exc
+                raise _attributed_failure(exc.message, exc, model_id, private_model=other) from exc
             try:
                 # A caller handed the raw response gets its own copy of a wire value, so it cannot
                 # change what later scans read; Quarry's own readers only read it.
@@ -2565,6 +2621,7 @@ class ModelInferenceBackend:
         operation: Callable[[float | None], Awaitable[Any]],
         *,
         timeout: float | None,
+        retry_history: ModelRetryHistory,
     ) -> Any:
         """Run one logical model call and normalize its final provider failure."""
 
@@ -2574,12 +2631,15 @@ class ModelInferenceBackend:
                 operation,
                 budget_alias=model_id,
                 timeout=timeout,
+                retry_history=retry_history,
             )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the
-            # trusted Quarry alias. Keep provider details behind the configuration boundary.
-            public_message = exc.message.replace(rate_limit_model, model_id)
-            raise LLMError(public_message, {**exc.details, "model": model_id}) from exc
+            # trusted Quarry alias. Rewrite only the structured leading model label; if an
+            # unstructured message embeds a provider model, replace the cause with fixed text.
+            raise _attributed_failure(
+                exc.message, exc, model_id, private_model=rate_limit_model
+            ) from exc
         except (QuarryError, QuarryTimeoutError):
             raise
         except TimeoutError:
@@ -2602,25 +2662,30 @@ class ModelInferenceBackend:
         if score_config is None:
             raise ConfigurationError(f"Inference model '{model_id}' has no score configuration")
         builder = self.message_builders[score_config.message_builder]
-        # The registered builders follow the config version's signature: the defaults are
-        # chosen by version in ``__init__``, and a caller-supplied builder must match it.
-        if self.config.config_version == 2:
-            outbound = cast(MessageBuilderV2, builder)(
-                constitution,
-                message_dicts,
-                tool_dicts,
-                self.boundaries[model_id],
-                score_config,
-            )
-        else:
-            assert legacy_conversation is not None
-            outbound = cast(MessageBuilderV1, builder)(
-                constitution,
-                legacy_conversation,
-                self.boundaries[model_id],
-                score_config,
-            )
-        _require_inline_media(outbound)
+        try:
+            # The registered builders follow the config version's signature: the defaults are
+            # chosen by version in ``__init__``, and a caller-supplied builder must match it.
+            if self.config.config_version == 2:
+                outbound = cast(MessageBuilderV2, builder)(
+                    constitution,
+                    message_dicts,
+                    tool_dicts,
+                    self.boundaries[model_id],
+                    score_config,
+                )
+            else:
+                assert legacy_conversation is not None
+                outbound = cast(MessageBuilderV1, builder)(
+                    constitution,
+                    legacy_conversation,
+                    self.boundaries[model_id],
+                    score_config,
+                )
+            _require_inline_media(outbound)
+        except LLMError as exc:
+            raise _attributed_failure(
+                exc.message, exc, model_id, private_model=model.model
+            ) from exc
         return outbound
 
     async def _score_messages(
@@ -3104,7 +3169,10 @@ class ModelInferenceBackend:
             raise ConfigurationError(
                 f"Inference model '{model_id}' adapter '{model.adapter}' cannot complete"
             )
-        _require_inline_media(message_dicts)
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(message_dicts)
+            return message_dicts, tool_dicts
 
         def message(wire: Any) -> Any:
             if not isinstance(wire, dict):
@@ -3119,7 +3187,7 @@ class ModelInferenceBackend:
             adapter,
             "complete_message",
             model,
-            lambda: (message_dicts, tool_dicts),
+            payload,
             key=key,
             timeout=timeout,
             read=message,
@@ -3186,7 +3254,10 @@ class ModelInferenceBackend:
             raise ConfigurationError(
                 f"Inference model '{model_id}' adapter '{model.adapter}' cannot complete"
             )
-        _require_inline_media(message_dicts)
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(message_dicts)
+            return message_dicts, raw_tools
 
         def text(content: Any) -> str:
             if not isinstance(content, str):
@@ -3199,7 +3270,7 @@ class ModelInferenceBackend:
             adapter,
             "complete",
             model,
-            lambda: (message_dicts, raw_tools),
+            payload,
             key=key,
             timeout=timeout,
             read=text,
@@ -3265,12 +3336,15 @@ class ModelInferenceBackend:
                 f"Inference model '{model_id}' has no input-token configuration",
                 model_id,
             )
-        _require_inline_media(messages)
         # ``messages`` and ``tools`` are fresh wire projections (``to_openai_messages`` /
         # ``raw_tools`` rebuild new dicts each call); the tokenizer treats them as read-only, so
         # they are passed by reference — no defensive copy. The split reuses one ``tools`` list
         # across probes under this same read-only contract already relied on for ``messages``.
         count_field = tokens_config.count_field
+
+        def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            _require_inline_media(messages)
+            return messages, tools
 
         def count(result: Any) -> int:
             if not isinstance(result, dict):
@@ -3288,7 +3362,7 @@ class ModelInferenceBackend:
             self.adapters[tokens_config.adapter],
             "tokenize",
             model,
-            lambda: (messages, tools),
+            payload,
             key=key,
             timeout=timeout,
             read=count,

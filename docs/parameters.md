@@ -31,6 +31,12 @@ result.raise_for_status()
 
 `compile_policy` checks parameter names, types, bindings, and use. It compiles the rule once, and repeated `scan` or `scan_async` calls reuse the prepared policy. `scan_many` and `scan_many_async` preserve input order under a batch deadline.
 
-Results include policy and parameter digests. Numeric parameter evidence can include its value; text evidence stays redacted and uses a keyed digest. Pass an `evidence_key` of at least 16 bytes to `compile_policy` when you need stable digests across prepared instances. Protect the key as an application secret. Keep sensitive text out of logs. Serialization rejects policies with bound text parameters or `text_ref` resources; compile those policies from source in the host process.
+Results include `policy_digest` and `parameter_digest`. In `parameter_evidence`, numeric parameters
+include their value; text parameters contain only their type, binding, and `redacted: true` marker,
+not a digest. The separate `parameter_digest` covers all effective parameter values and is keyed
+when text is present. Pass an `evidence_key` of at least 16 bytes to `compile_policy` when you need
+stable digests across prepared instances. Protect the key as an application secret. Keep sensitive
+text out of logs. Serialization rejects policies with bound text parameters or `text_ref`
+resources; compile those policies from source in the host process.
 
 The [parameter example](../examples/parameters/) uses a local adapter and makes no network request.

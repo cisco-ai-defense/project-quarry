@@ -27,6 +27,7 @@ from typing import Any, cast
 import orjson
 
 from quarry.cache.regex_cache import regex_cache
+from quarry.engine.matchers import Modifiers, apply_modifiers
 from quarry.language.runtime import (
     accessor_functions,
     external_function_costs,
@@ -232,7 +233,15 @@ def _follow_fields(
     return current, None
 
 
-def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _ValueShape]:
+def _is_extension_collection(node: ConditionNode, extension_event_surfaces: frozenset[str]) -> bool:
+    while isinstance(node, FunctionCall) and node.name == "_slice" and node.args:
+        node = node.args[0]
+    return isinstance(node, Identifier) and node.name in extension_event_surfaces
+
+
+def _scopes_from_ancestors(
+    ancestors: tuple[ConditionNode, ...], extension_event_surfaces: frozenset[str] = frozenset()
+) -> dict[str, _ValueShape]:
     scopes: dict[str, _ValueShape] = {}
     comprehension_types = (
         AnyComprehension,
@@ -246,6 +255,10 @@ def _scopes_from_ancestors(ancestors: tuple[ConditionNode, ...]) -> dict[str, _V
         collection = _expression_shape(ancestor.collection, scopes)
         if collection is not None and collection.element is not None:
             scopes[ancestor.variable] = collection.element
+        elif _is_extension_collection(ancestor.collection, extension_event_surfaces):
+            # The scanner's registered extension schema types this collection.
+            # Its element must still shadow any outer binding of the same name.
+            scopes[ancestor.variable] = _ValueShape("extension event", open_fields=True)
     return scopes
 
 
@@ -304,7 +317,13 @@ def _is_model_input_selector_field(argument: ConditionNode, node: FieldAccess) -
 def _unexpected_keys(value: dict, allowed: set[str] | frozenset[str]) -> list[str]:
     """Return keys outside the accepted OpenAI conversation shape."""
 
+    _require_string_keys(value)
     return sorted(set(value) - set(allowed))
+
+
+def _require_string_keys(value: dict) -> None:
+    if any(type(key) is not str for key in dict.__iter__(value)):
+        raise ConversationValidationError("Conversation object keys must be exact strings")
 
 
 def _validate_json_arguments(
@@ -348,13 +367,13 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
         if exiting:
             active_containers.remove(id(current))
             continue
-        if current is None or isinstance(current, str | bool | int):
+        if current is None or issubclass(type(current), str | bool | int):
             continue
-        if isinstance(current, float):
-            if isfinite(current):
+        if issubclass(type(current), float):
+            if isfinite(float.__float__(cast(Any, current))):
                 continue
             raise ConversationValidationError(f"{path} contains a non-finite number")
-        if isinstance(current, list):
+        if type(current) is list:
             current_id = id(current)
             if current_id in active_containers:
                 raise ConversationValidationError(f"{path} contains a cyclic reference")
@@ -366,8 +385,8 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
             stack.append((current, depth, True))
             stack.extend((child, depth + 1, False) for child in current)
             continue
-        if isinstance(current, dict):
-            if not all(isinstance(key, str) for key in current):
+        if type(current) is dict:
+            if not all(type(key) is str for key in current):
                 raise ConversationValidationError(f"{path} contains a non-string object key")
             current_id = id(current)
             if current_id in active_containers:
@@ -387,16 +406,21 @@ def _validate_json_tree(value: object, path: str, max_nesting_depth: int) -> Non
 
 def _validate_content_part(part: object, message_index: int, part_index: int) -> None:
     """Validate one supported OpenAI multimodal content part."""
-    if not isinstance(part, dict):
+    if type(part) is not dict:
         raise ConversationValidationError(
             f"Message at index {message_index} content[{part_index}] must be an object"
         )
     part = cast(dict[str, Any], part)
+    _require_string_keys(part)
 
     part_type = part.get("type")
+    if type(part_type) is not str:
+        raise ConversationValidationError(
+            f"Message at index {message_index} content[{part_index}] must have a string type"
+        )
     if part_type == "text":
         unexpected = _unexpected_keys(part, OPENAI_TEXT_PART_KEYS)
-        if unexpected or not isinstance(part.get("text"), str):
+        if unexpected or type(part.get("text")) is not str:
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
                 "text part with string 'text'"
@@ -405,12 +429,16 @@ def _validate_content_part(part: object, message_index: int, part_index: int) ->
 
     if part_type == "image_url":
         image_url = part.get("image_url")
+        detail = image_url.get("detail") if type(image_url) is dict else None
         if (
             _unexpected_keys(part, OPENAI_IMAGE_PART_KEYS)
-            or not isinstance(image_url, dict)
+            or type(image_url) is not dict
             or _unexpected_keys(image_url, OPENAI_IMAGE_URL_KEYS)
-            or not isinstance(image_url.get("url"), str)
-            or ("detail" in image_url and image_url["detail"] not in {"auto", "low", "high"})
+            or type(image_url.get("url")) is not str
+            or (
+                "detail" in image_url
+                and (type(detail) is not str or detail not in {"auto", "low", "high"})
+            )
         ):
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
@@ -420,12 +448,14 @@ def _validate_content_part(part: object, message_index: int, part_index: int) ->
 
     if part_type == "input_audio":
         input_audio = part.get("input_audio")
+        audio_format = input_audio.get("format") if type(input_audio) is dict else None
         if (
             _unexpected_keys(part, OPENAI_AUDIO_PART_KEYS)
-            or not isinstance(input_audio, dict)
+            or type(input_audio) is not dict
             or _unexpected_keys(input_audio, OPENAI_AUDIO_KEYS)
-            or not isinstance(input_audio.get("data"), str)
-            or input_audio.get("format") not in {"wav", "mp3"}
+            or type(input_audio.get("data")) is not str
+            or type(audio_format) is not str
+            or audio_format not in {"wav", "mp3"}
         ):
             raise ConversationValidationError(
                 f"Message at index {message_index} content[{part_index}] must be an OpenAI "
@@ -445,9 +475,9 @@ def _validate_message_content(
     """Validate string or ordered OpenAI content-part-array message content."""
     if content is None and allow_null:
         return
-    if isinstance(content, str):
+    if type(content) is str:
         return
-    if isinstance(content, list):
+    if type(content) is list:
         if not content:
             raise ConversationValidationError(
                 f"Message at index {message_index} content-part arrays must not be empty"
@@ -518,6 +548,7 @@ def validate_conversation(
     data: dict,
     *,
     parse_arguments: bool = True,
+    allow_empty: bool = False,
     allowed_roles: set[str] | frozenset[str] | None = None,
     max_nesting_depth: int = 100,
 ) -> None:
@@ -542,7 +573,7 @@ def validate_conversation(
     if allowed_roles is None:
         allowed_roles = OPENAI_MESSAGE_ROLES
 
-    if not isinstance(data, dict):
+    if type(data) is not dict:
         raise ConversationValidationError(
             f"Expected dict, got {type(data).__name__}. "
             "Conversation must be a JSON object with 'messages' key."
@@ -564,22 +595,24 @@ def validate_conversation(
         )
 
     messages = data["messages"]
-    if not isinstance(messages, list):
+    if type(messages) is not list:
         raise ConversationValidationError(
             f"'messages' must be a list, got {type(messages).__name__}"
         )
+    messages = cast(list[dict[str, Any]], messages)
 
-    if not messages:
+    if not messages and not allow_empty:
         raise ConversationValidationError("'messages' list is empty. Nothing to scan.")
 
     seen_call_ids: set[str] = set()
 
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+        if type(msg) is not dict:
             raise ConversationValidationError(
                 f"Message at index {i} is not a dict (got {type(msg).__name__}). "
                 "Each message must be an object with 'role' and 'content' keys."
             )
+        _require_string_keys(msg)
 
         if "role" not in msg:
             raise ConversationValidationError(
@@ -587,7 +620,11 @@ def validate_conversation(
             )
 
         role = msg["role"]
-        if not isinstance(role, str) or role not in allowed_roles:
+        if type(role) is not str:
+            raise ConversationValidationError(
+                f"Message at index {i} role must be an exact built-in string"
+            )
+        if role not in allowed_roles:
             raise ConversationValidationError(
                 f"Message at index {i} has invalid role '{role}'. Valid roles: "
                 f"{sorted(allowed_roles)}"
@@ -610,7 +647,7 @@ def validate_conversation(
             if "content" not in msg:
                 raise ConversationValidationError(f"Tool message at index {i} must have 'content'")
             _validate_message_content(msg["content"], i, max_nesting_depth)
-            if not isinstance(msg.get("tool_call_id"), str) or not msg["tool_call_id"]:
+            if type(msg.get("tool_call_id")) is not str or not msg["tool_call_id"]:
                 raise ConversationValidationError(
                     f"Tool message at index {i} must have a non-empty string 'tool_call_id'"
                 )
@@ -628,11 +665,7 @@ def validate_conversation(
             _validate_message_content(msg["content"], i, max_nesting_depth)
 
         if role == "assistant":
-            if (
-                "refusal" in msg
-                and msg["refusal"] is not None
-                and not isinstance(msg["refusal"], str)
-            ):
+            if "refusal" in msg and msg["refusal"] is not None and type(msg["refusal"]) is not str:
                 raise ConversationValidationError(
                     f"Assistant message at index {i} 'refusal' must be a string or null"
                 )
@@ -645,7 +678,7 @@ def validate_conversation(
                 )
             if "tool_calls" in msg:
                 tool_calls = msg["tool_calls"]
-                if not isinstance(tool_calls, list) or not tool_calls:
+                if type(tool_calls) is not list or not tool_calls:
                     raise ConversationValidationError(
                         f"Assistant message at index {i} 'tool_calls' must be a non-empty list"
                     )
@@ -688,11 +721,12 @@ def validate_conversation(
 
     if "tools" in data:
         tools = data["tools"]
-        if not isinstance(tools, list):
+        if type(tools) is not list:
             raise ConversationValidationError(f"'tools' must be a list, got {type(tools).__name__}")
+        tools = cast(list[dict[str, Any]], tools)
 
         for i, tool in enumerate(tools):
-            if not isinstance(tool, dict):
+            if type(tool) is not dict:
                 raise ConversationValidationError(f"Tool at index {i} is not a dict")
 
             if _unexpected_keys(tool, OPENAI_TOOL_KEYS):
@@ -700,31 +734,30 @@ def validate_conversation(
                     f"Tool at index {i} has unsupported keys: "
                     f"{_unexpected_keys(tool, OPENAI_TOOL_KEYS)}. Expected OpenAI tool fields."
                 )
-            if not isinstance(tool.get("type"), str) or not isinstance(tool.get("function"), dict):
+            if type(tool.get("type")) is not str or type(tool.get("function")) is not dict:
                 raise ConversationValidationError(
                     f"Tool at index {i} has invalid format. "
                     "Expected an OpenAI tool with a string type and a function object. "
                     f"Got keys: {list(tool.keys())}"
                 )
-            function = tool["function"]
+            function = cast(dict[str, Any], tool["function"])
             unexpected_function_keys = _unexpected_keys(function, OPENAI_FUNCTION_KEYS)
             if unexpected_function_keys:
                 raise ConversationValidationError(
                     f"Tool at index {i} function has unsupported keys: {unexpected_function_keys}"
                 )
-            if not isinstance(function.get("name"), str):
+            if type(function.get("name")) is not str:
                 raise ConversationValidationError(
                     f"Tool at index {i} function must have a string 'name'"
                 )
-            if "description" in function and not isinstance(function["description"], str):
+            if "description" in function and type(function["description"]) is not str:
                 raise ConversationValidationError(
                     f"Tool at index {i} function 'description' must be a string"
                 )
-            if "parameters" in function and not isinstance(function["parameters"], dict):
+            if "parameters" in function and type(function["parameters"]) is not dict:
                 raise ConversationValidationError(
                     f"Tool at index {i} function 'parameters' must be an object"
                 )
-
             if "parameters" in function:
                 _validate_json_tree(
                     function["parameters"], f"tools[{i}].function.parameters", max_nesting_depth
@@ -742,7 +775,7 @@ def _validate_tool_call(
 ) -> None:
     """Validate one OpenAI assistant tool call without parsing its arguments."""
 
-    if not isinstance(tool_call, dict):
+    if type(tool_call) is not dict:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             f"is not an object (got {type(tool_call).__name__})"
@@ -755,7 +788,7 @@ def _validate_tool_call(
             f"has unsupported keys: {unexpected}"
         )
     call_id = tool_call.get("id")
-    if not isinstance(call_id, str) or not call_id:
+    if type(call_id) is not str or not call_id:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "must have a non-empty string 'id'"
@@ -764,7 +797,12 @@ def _validate_tool_call(
         raise ConversationValidationError(
             f"Duplicate tool-call id '{call_id}' at assistant message index {message_index}"
         )
-    if tool_call.get("type") != "function" or not isinstance(tool_call.get("function"), dict):
+    call_type = tool_call.get("type")
+    if (
+        type(call_type) is not str
+        or call_type != "function"
+        or type(tool_call.get("function")) is not dict
+    ):
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "must use type='function' with a function object"
@@ -776,7 +814,7 @@ def _validate_tool_call(
             f"Assistant message at index {message_index} tool_calls[{call_index}].function "
             f"has unsupported keys: {unexpected_function_keys}"
         )
-    if not isinstance(function.get("name"), str) or not function["name"]:
+    if type(function.get("name")) is not str or not function["name"]:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
             "function must have a non-empty string 'name'"
@@ -797,7 +835,8 @@ def _validate_tool_call(
 class RuleValidator:
     """Validates rules for performance and correctness issues."""
 
-    def __init__(self):
+    def __init__(self, extension_event_surfaces: frozenset[str] = frozenset()):
+        self.extension_event_surfaces = extension_event_surfaces
         self.max_flow_ops = 5
         self.max_nested_comprehensions = 3
         self.max_total_comprehensions = 10
@@ -854,11 +893,23 @@ class RuleValidator:
             patterns_to_check = pattern if isinstance(pattern, list) else [pattern]
 
             for p in patterns_to_check:
-                error = self._validate_single_regex(str(p))
+                error = self._validate_single_regex(self._declared_regex(str(p), modifiers))
                 if error:
                     errors.append(RegexError(variable=var_name, pattern=str(p), error=error))
 
         return errors
+
+    @staticmethod
+    def _declared_regex(pattern: str, modifiers: StringModifiers | None) -> str:
+        """The regex to check for a declared pattern. A `regex` declaration is checked as
+        written. A `fullword` literal is escaped before matching, so check the escaped form:
+        `"C++" fullword` is valid even though `C++` is not a regex."""
+        if modifiers is None or modifiers.regex:
+            return pattern
+        effective, _ = apply_modifiers(
+            pattern, Modifiers(fullword=modifiers.fullword, base64=modifiers.base64)
+        )
+        return effective
 
     @staticmethod
     def _validate_string_arrays(strings: dict) -> list[SemanticError]:
@@ -937,7 +988,9 @@ class RuleValidator:
                 checked_names.add(name)
                 value = strings[name]
                 pattern, modifiers = value if isinstance(value, tuple) else (value, None)
-                if self._is_regex_pattern(modifiers):
+                # The strings block already checked a `regex` declaration as `~` compiles
+                # it. A `fullword` literal was checked escaped, but `~` compiles it as written.
+                if isinstance(modifiers, StringModifiers) and modifiers.regex:
                     continue
                 for item in pattern if isinstance(pattern, list) else [pattern]:
                     error = self._validate_single_regex(str(item))
@@ -1110,7 +1163,7 @@ class RuleValidator:
             ):
                 self._check_field_access(
                     current,
-                    _scopes_from_ancestors(visit.ancestors),
+                    _scopes_from_ancestors(visit.ancestors, self.extension_event_surfaces),
                     errors,
                 )
 
@@ -1165,7 +1218,7 @@ class RuleValidator:
         parent = ancestors[-1]
         if parent.operator != "matches" or parent.right is not pattern:
             return
-        scopes = _scopes_from_ancestors(ancestors)
+        scopes = _scopes_from_ancestors(ancestors, self.extension_event_surfaces)
         subject = _expression_shape(parent.left, scopes)
         if subject is None:
             return
