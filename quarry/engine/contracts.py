@@ -39,16 +39,19 @@ from quarry.engine.symbolic_dfa import DFA
 from quarry.engine.temporal import Formula
 
 if TYPE_CHECKING:
+    from quarry.engine.atoms import ModelExpression
     from quarry.engine.witness import ModelResultEvidence
 
-# Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-27 preserves extraction operation kinds and
-# explicit default bounds in labels while retaining eager admission and guarded calls.
-COMPILER_VERSION = "compiler-27"
+# Bump when compilation or admission changes invalidate earlier artifacts.
+# Compiler-28 retains computed message frames and grouped map values. Format 11
+# carries their child plans; earlier saved policies require source recompilation.
+COMPILER_VERSION = "compiler-28"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64
 MAX_NESTED_RULE_CHECKS = 4096
+MAX_COMPUTED_CONDITIONS = 256
+MAX_COMPUTED_CONDITION_DEPTH = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +89,14 @@ class FlowRequirement:
     static_formula: Formula | None = None
     static_sustained: tuple[Formula, ...] = ()
     clock_surfaces: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ComputedConditionPlan:
+    """A full compiled condition evaluated over a computed message selection."""
+
+    source: ModelExpression
+    artifact: CompiledRuleArtifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +233,7 @@ class CompiledRuleArtifact:
     tool_quantifiers: dict[str, ToolQuantifierPlan] = field(default_factory=dict)
     # Each closed part's atom (a part of a body that reads no element) and its automaton.
     closed_conditions: dict[str, ClosedPlan] = field(default_factory=dict)
+    computed_conditions: dict[str, ComputedConditionPlan] = field(default_factory=dict)
     # A public rule call compiles its condition as a nested rule over selected messages.
     split_checks: dict[str, CompiledRuleArtifact] = field(default_factory=dict)
     # Source declarations survive constant folding so prepared-policy reload preserves
@@ -276,15 +288,16 @@ class CompiledRuleArtifact:
 
     def _atom_reads(self, atom_id: str, *, clocks: bool = True) -> frozenset[str]:
         spec = self.atom_specs[atom_id]
-        expression = spec.model_expression
-        reads = {spec.selector}
+        computed = self.computed_conditions.get(atom_id)
+        expression = computed.source if computed is not None else spec.model_expression
+        reads = {spec.selector} if spec.selector else set()
         if expression is not None:
             reads.update(expression.inputs)
             if expression.reads_tools:
                 reads.add("tools")
             if spec.domain == AtomDomain.STATIC and not expression.reads_messages:
                 reads.discard(spec.selector)
-        check = self.split_checks.get(atom_id)
+        check = computed.artifact if computed is not None else self.split_checks.get(atom_id)
         if check is not None:
             inner = (
                 check.read_surfaces if clocks else check.read_surfaces - check.clock_only_surfaces
@@ -294,15 +307,18 @@ class CompiledRuleArtifact:
             reads.update(inner)
         return frozenset(reads)
 
+    def _child_checks(self):
+        yield from self.split_checks.items()
+        for atom_id, plan in self.computed_conditions.items():
+            yield atom_id, plan.artifact
+
     @cached_property
     def orders_input_items(self) -> bool:
         """Whether a live flow orders input items against other timeline items."""
 
         active = self.automaton_atoms
         return "orders input items" in self.notes or any(
-            check.orders_input_items
-            for atom_id, check in self.split_checks.items()
-            if atom_id in active
+            check.orders_input_items for atom_id, check in self._child_checks() if atom_id in active
         )
 
     @cached_property
@@ -310,7 +326,7 @@ class CompiledRuleArtifact:
         """Sections read only as steps of a bounded shared clock."""
 
         active = self.automaton_atoms
-        checks = [check for atom_id, check in self.split_checks.items() if atom_id in active]
+        checks = [check for atom_id, check in self._child_checks() if atom_id in active]
         clocks = {
             surface
             for requirement in self.flow_requirements
@@ -326,6 +342,33 @@ class CompiledRuleArtifact:
         for requirement in self.flow_requirements:
             read.update(requirement.ambient_surfaces)
         return frozenset(clocks - read)
+
+
+def validate_child_artifact_limits(artifact: CompiledRuleArtifact) -> None:
+    """Bound the complete occurrence graph, including across public rule calls."""
+    pending: list[tuple[CompiledRuleArtifact, tuple[int, ...], int]] = [(artifact, (), 0)]
+    count = computed = 0
+    while pending:
+        current, path, depth = pending.pop()
+        if id(current) in path:
+            raise ValueError("called-rule artifact contains a cycle")
+        if len(path) > MAX_NESTED_RULE_DEPTH:
+            raise ValueError(f"called-rule depth exceeds {MAX_NESTED_RULE_DEPTH}")
+        count += 1
+        if count > MAX_NESTED_RULE_CHECKS:
+            raise ValueError(f"called-rule check count exceeds {MAX_NESTED_RULE_CHECKS}")
+        if depth > MAX_COMPUTED_CONDITION_DEPTH:
+            raise ValueError(
+                f"computed message condition depth exceeds {MAX_COMPUTED_CONDITION_DEPTH}"
+            )
+        computed += len(current.computed_conditions)
+        if computed > MAX_COMPUTED_CONDITIONS:
+            raise ValueError(f"computed message condition count exceeds {MAX_COMPUTED_CONDITIONS}")
+        ancestors = (*path, id(current))
+        pending.extend((child, ancestors, depth) for child in current.split_checks.values())
+        pending.extend(
+            (plan.artifact, ancestors, depth + 1) for plan in current.computed_conditions.values()
+        )
 
 
 AtomEvaluationStatus = Literal["evaluated_true", "evaluated_false", "skipped"]

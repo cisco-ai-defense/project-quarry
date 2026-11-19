@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-27",
+  "compiler_version": "compiler-28",
   "examples": [
     {
       "checks": [],
@@ -1715,7 +1715,7 @@
       "syntax": "comparison: in_expr \"<=\" in_expr"
     },
     {
-      "description": "Project selected items into messages or text values in written order.\n\nA message-valued map can be used as typed model input. A text-valued map is\nsupported as the first argument of `join()` in `message()` content.\nThe projection and optional filter cannot call a model. Message maps keep\nsource provenance, flatten each projected message sequence in order, and\napply `max_comprehension_size` to both source and output. Structural limits\nalways cap each map at 10,000 source/output items and 2,000,000 output text\ncharacters; the existing constructed-message limits also apply.",
+      "description": "Project selected items into messages or text values in written order.\n\nA message-valued map can be used as typed model input. A text-valued map is\nsupported as the first argument of `join()` in `message()` content.\nThe projection and optional filter cannot call a model. Message maps keep\nsource provenance and keep each projected message sequence as one map entry.\nModel input and quantifiers combine those entries in order. Bare len/count\nmeasure map entries, and indexing/slicing preserve their collection values. Maps\napply `max_comprehension_size` to both source and output. Structural limits\nalways cap each map at 10,000 source/output items and 2,000,000 output text\ncharacters; the existing constructed-message limits also apply.",
       "handler": "map_comp",
       "id": "construct:map-comprehension",
       "kind": "construct",
@@ -4262,6 +4262,11 @@
     {
       "description": "A message of the conversation, such as `user_messages[-1]` or the element `m` of `any m in messages`, is the model input that holds only that message. A message the conversation does not have is an empty model input, which makes no model call.",
       "from": "message",
+      "to": "model_input"
+    },
+    {
+      "description": "A message-valued map becomes one model input by combining its entries in written order. Counting or indexing the map still addresses its entries.",
+      "from": "collection<model_input>",
       "to": "model_input"
     }
   ]

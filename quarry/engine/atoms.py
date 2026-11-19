@@ -140,6 +140,21 @@ MAX_CONSTRUCTED_TEXT_BYTES = 4_000_000
 MAX_MESSAGE_MAP_ITEMS = 10_000
 MAX_MESSAGE_MAP_CHARACTERS = 2_000_000
 
+
+def is_message_group_expression(expression: ModelExpression) -> bool:
+    """Whether a validated expression has the map-entry collection representation."""
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind == "conditional":
+            pending.extend(node.children[1:])
+        elif node.kind == "slice":
+            pending.append(node.children[0])
+        elif node.kind != "message_map":
+            return False
+    return True
+
+
 _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "absent": (0, 0),
     "add_message": (3, 3),
@@ -154,6 +169,7 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "extract_windows": (5, 5),
     "field": (1, 1),
     "field_text": (1, 1),
+    "flatten_messages": (1, 1),
     "if_refused": (2, 2),
     "index": (1, 1),
     "input_message": (3, MAX_MODEL_EXPRESSION_FANOUT),
@@ -161,6 +177,7 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "join": (1, 1),
     "literal": (0, 0),
     "local_transform": (1, 1),
+    "length": (1, 1),
     "map": (3, 3),
     "message": (2, 2),
     "message_map": (3, 3),
@@ -208,8 +225,10 @@ _NONE_VALUE_KINDS = frozenset(
         "extract_span",
         "extract_windows",
         "field_text",
+        "flatten_messages",
         "if_refused",
         "message",
+        "length",
         "messages",
         "not",
         "or",
@@ -408,11 +427,46 @@ def validate_model_expression(expression: ModelExpression) -> None:
                 "message_select",
                 "message_map",
                 "as_messages",
+                "flatten_messages",
                 "binding",
                 "slice",
                 "field",
             }:
                 raise ValueError("a message map must produce message values")
+
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind in {"length", "flatten_messages"}:
+            sources = [node.children[0]]
+            while sources:
+                source = sources.pop()
+                if source.kind == "conditional":
+                    sources.extend(source.children[1:])
+                elif source.kind == "slice":
+                    sources.append(source.children[0])
+                elif node.kind == "length":
+                    if source.kind != "message_map":
+                        raise ValueError("map cardinality requires message-valued entries")
+                elif source.kind not in {
+                    "messages",
+                    "message_view",
+                    "message",
+                    "add_message",
+                    "message_map",
+                    "message_select",
+                    "as_messages",
+                    "flatten_messages",
+                    "binding",
+                    "index",
+                    "field",
+                    "concat",
+                    "transform",
+                    "local_transform",
+                    "model_transform",
+                }:
+                    raise ValueError("message conversion requires a message collection")
+        pending.extend(node.children)
 
     # These predicates and per-item values have the same model-free contract when loaded
     # from a prepared policy as when compiled from source.

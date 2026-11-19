@@ -249,7 +249,13 @@ class Desugarer:
         if counted is not None:
             return counted
         if isinstance(node, FunctionCall) and node.name in _FLOW_FUNCTIONS:
-            return self.fact(node)
+            fact = self.fact(node)
+            return (
+                C.Parent(fact) if any(binding.coll.value is not None for binding in scope) else fact
+            )
+        value_size = self._t.message_value_size(node, scope)
+        if value_size is not None:
+            return C.Size(node, value_size)
         if self._t.is_size(node):
             return C.Size(node)
         test = self._t.value_test(node)
@@ -386,13 +392,17 @@ class Desugarer:
             chunk = self._bind(node.variable, "\x00chunks", C.Events("\x00chunks"))
             return C.ChunkQuant(q, chunk.var, node.collection, self.cond(node.condition, (chunk,)))
         outer = _without_check_bodies(node.condition)
-        if self._t.contains_model_call(outer):
+        if self._t.is_chunked(outer):
+            raise UnsupportedConstruct(_NESTED_CHUNKS)
+        if self._t.contains_real_model_call(outer):
             self._check_model_comprehension(replace(node, condition=outer), scope)
         if self._t.is_tools(node.collection):
             binding = self._bind(node.variable, "tools", C.Events("tools"))
             body = self.cond(node.condition, (*scope, binding))
             return C.ToolsExists(binding.var, body, q, src=node)
-        binding = self.binding(node.variable, node.collection, src=node)
+        binding = self.binding(node.variable, node.collection, src=node, scope=scope)
+        if binding.coll.value is not None:
+            self._t.check_value_body(node.condition, binding.coll.value)
         body = self.cond(self._aliased(node, binding), (*scope, binding))
         return C.Quant(q, binding.var, binding.coll, None, body)
 
@@ -417,10 +427,18 @@ class Desugarer:
                     "every model call in an any comprehension must depend on its bound item"
                 )
 
-    def binding(self, var: str, collection, src=None) -> _Binding:
+    def binding(self, var: str, collection, src=None, scope=()) -> _Binding:
         """``var`` over ``collection``; ``src`` is the syntax that binds it (its
         comprehension), for attributing the collection's atoms."""
-        surface, name, window, alias = self._t.resolve_collection(collection)
+        try:
+            surface, name, window, alias = self._t.resolve_collection(collection)
+        except UnsupportedConstruct:
+            if isinstance(collection, Identifier) and collection.name not in {
+                binding.name for binding in scope
+            }:
+                raise
+            value = self._t.message_value(collection, scope)
+            return self._bind(var, "messages", C.Events("messages", src=src, value=value))
         return self._bind(var, surface, C.Events(surface, name, window, src=src), alias)
 
     def _aliased(self, node, binding: _Binding):
@@ -432,9 +450,15 @@ class Desugarer:
         if shape is None:
             return None
         comp, op, n = shape
-        binding = self.binding(comp.variable, comp.collection, src=comp)
+        binding = self.binding(comp.variable, comp.collection, src=comp, scope=scope)
+        if binding.coll.value is not None:
+            self._t.check_value_body(comp.condition, binding.coll.value)
         body = self.cond(self._aliased(comp, binding), (*scope, binding))
-        if not free_only(body, binding.var):
+        if (
+            not C.free_vars(body) <= {binding.var}
+            if binding.coll.value is not None
+            else not free_only(body, binding.var)
+        ):
             raise UnsupportedConstruct(
                 f"count([x for x in {binding.surface} if ...]) needs a filter that only reads "
                 "the element itself"
@@ -444,7 +468,7 @@ class Desugarer:
     def flow(self, node: FlowOp, scope, source: FlowOp | None = None) -> C.Formula:
         """Desugar a flow node into a core formula."""
         source = source or node
-        if self._t.contains_model_call(node):
+        if self._t.contains_real_model_call(node):
             raise UnsupportedConstruct("model calls cannot be operands of temporal flow")
         if node.operator == "until":
             return self.until(node, scope, source)
@@ -533,7 +557,7 @@ class Desugarer:
                                     clock_surfaces=clock_surfaces,
                                 )
                             )
-                pairs.append(self._after(late, early, within, clock))
+                pairs.append(self._after(late, early, within, clock, source))
         if not pairs:
             raise UnsupportedConstruct(
                 "a flow cannot relate an element to itself: both operands read the same "
@@ -547,7 +571,9 @@ class Desugarer:
             return C.AllEvents()
         return C.AllEvents(tuple(sorted({"messages", "tool_calls"} | EVENT_SURFACES.get())))
 
-    def _after(self, late: _Alternative, early: _Alternative, within, clock: str) -> C.Formula:
+    def _after(
+        self, late: _Alternative, early: _Alternative, within, clock: str, source: FlowOp
+    ) -> C.Formula:
         if isinstance(early, _ToolsAlt):
             # A static condition holds at every step from the boot step on, so some step
             # right before every event satisfies it, within any bound.
@@ -562,7 +588,7 @@ class Desugarer:
                             "exists",
                             self.fresh(),
                             self._clock_events(clock),
-                            C.Rel(early.element, "after", 1, within, clock),
+                            C.Rel(early.element, "after", 1, within, clock, source),
                             C.TRUE,
                         ),
                     ]
@@ -581,7 +607,7 @@ class Desugarer:
                             "exists",
                             nxt,
                             self._clock_events(clock),
-                            C.Rel(early.var, "after", 1, within, clock),
+                            C.Rel(early.var, "after", 1, within, clock, source),
                             C.TRUE,
                         ),
                     ]
@@ -590,7 +616,7 @@ class Desugarer:
         if isinstance(late, _ElementAlt):
             if isinstance(early, _ElementAlt):
                 at = self.fresh()
-                anchor = C.Rel(early.element, "after", 1, within, clock)
+                anchor = C.Rel(early.element, "after", 1, within, clock, source)
                 later = C.Quant(
                     "exists", at, self._clock_events(clock), anchor, C.Same(at, late.element)
                 )
@@ -602,7 +628,7 @@ class Desugarer:
                         "exists",
                         early.var,
                         early.coll,
-                        C.Rel(late.element, "before", 1, within, clock),
+                        C.Rel(late.element, "before", 1, within, clock, source),
                         early.body,
                     ),
                 ]
@@ -615,7 +641,7 @@ class Desugarer:
                         "exists",
                         late.var,
                         late.coll,
-                        C.Rel(early.element, "after", 1, within, clock),
+                        C.Rel(early.element, "after", 1, within, clock, source),
                         late.body,
                     ),
                 ]
@@ -632,7 +658,7 @@ class Desugarer:
                         "exists",
                         late.var,
                         late.coll,
-                        C.Rel(early.var, "after", 1, within, clock),
+                        C.Rel(early.var, "after", 1, within, clock, source),
                         late.body,
                     ),
                 ]
@@ -697,7 +723,12 @@ class Desugarer:
             if isinstance(release, _ElementAlt):
                 out.append(
                     C.conj(
-                        [release.body, self._sustain(sustained, release.element, release.surface)]
+                        [
+                            release.body,
+                            self._sustain(
+                                sustained, release.element, release.surface, source or node
+                            ),
+                        ]
                     )
                 )
             else:
@@ -710,7 +741,9 @@ class Desugarer:
                         C.conj(
                             [
                                 release.body,
-                                self._sustain(sustained, release.var, release.coll.surface),
+                                self._sustain(
+                                    sustained, release.var, release.coll.surface, source or node
+                                ),
                             ]
                         ),
                     )
@@ -718,7 +751,7 @@ class Desugarer:
         return C.disj(out)
 
     def _sustain(
-        self, alternatives: list[_Alternative], release: str, release_surface: str
+        self, alternatives: list[_Alternative], release: str, release_surface: str, source: FlowOp
     ) -> C.Formula:
         """Every event of the sustained side's kinds before ``release`` satisfies one of its
         alternatives there."""
@@ -758,7 +791,7 @@ class Desugarer:
             "forall",
             a,
             C.AllEvents(tuple(sorted(event_surfaces))),
-            C.Rel(release, "before", 1, None),
+            C.Rel(release, "before", 1, None, source=source),
             body,
         )
 
@@ -779,7 +812,7 @@ class Desugarer:
                 return [_ToolsAlt(self.comprehension(node, scope))]
             if self._t.is_special_collection(node):
                 raise UnsupportedConstruct("this collection cannot be a flow operand")
-            binding = self.binding(node.variable, node.collection, src=node)
+            binding = self.binding(node.variable, node.collection, src=node, scope=scope)
             body = self.cond(self._aliased(node, binding), (*scope, binding))
             return [_EventAlt(binding.var, binding.coll, body)]
         if isinstance(node, FunctionCall) and node.name in _FLOW_FUNCTIONS:
@@ -952,6 +985,13 @@ def _has_closed_part(formula: C.Formula, var: str) -> bool:
 def rename(formula: C.Formula, old: str, new: str) -> C.Formula:
     """``formula`` with the element variable ``old`` renamed to ``new``."""
     match formula:
+        case C.Size(value=value) if value is not None:
+            return replace(
+                formula,
+                value=replace(
+                    value, variables=tuple(new if var == old else var for var in value.variables)
+                ),
+            )
         case C.Pred(node=node, var=var, surface=surface, name=name):
             if old != var:
                 return formula
@@ -989,7 +1029,7 @@ def rename(formula: C.Formula, old: str, new: str) -> C.Formula:
             if var == old:
                 return formula
             anchor = (
-                C.Rel(new, anchor.side, anchor.lo, anchor.hi, anchor.clock)
+                C.Rel(new, anchor.side, anchor.lo, anchor.hi, anchor.clock, anchor.source)
                 if anchor is not None and anchor.of_var == old
                 else anchor
             )
@@ -1088,20 +1128,50 @@ def _hoist(formula: C.Formula) -> C.Formula:
         case C.Or(parts):
             return C.disj(_hoist(p) for p in parts)
         case C.Quant(q, var, coll, anchor, body):
-            body = _close(_hoist(body))
+            body = _hoist(body)
 
             def build(b: C.Formula) -> C.Formula:
                 return C.quant(q, var, coll, anchor, b)
 
-            # `all` distributes over `and` and `any` over `or`: each part is then a quantifier
-            # of its own, whose closed parts move out without splitting the others.
-            if q == "forall" and isinstance(body, C.And):
-                return C.conj(_expand(p, var, build) for p in body.parts)
-            if q == "exists" and isinstance(body, C.Or):
-                return C.disj(_expand(p, var, build) for p in body.parts)
-            return _expand(body, var, build)
+            def local(b):
+                b = _close(b)
+                # `all` distributes over `and` and `any` over `or`.
+                if q == "forall" and isinstance(b, C.And):
+                    return C.conj(_expand(p, var, build) for p in b.parts)
+                if q == "exists" and isinstance(b, C.Or):
+                    return C.disj(_expand(p, var, build) for p in b.parts)
+                return _expand(b, var, build)
+
+            if isinstance(coll, C.Events) and coll.value is not None:
+                return _expand(
+                    body,
+                    var,
+                    local,
+                    keep_static=False,
+                    parents_only=True,
+                    false_result=C.FALSE if q == "exists" else None,
+                )
+            return local(body)
         case C.Count(var, coll, body, op, n):
-            return C.Count(var, coll, _hoist(body), op, n)
+            body = _hoist(body)
+            if coll.value is not None:
+                zero = {
+                    "=": n == 0,
+                    "!=": n != 0,
+                    ">": n < 0,
+                    ">=": n <= 0,
+                    "<": n > 0,
+                    "<=": n >= 0,
+                }[op]
+                return _expand(
+                    body,
+                    var,
+                    lambda b: C.Count(var, coll, _close(b), op, n),
+                    keep_static=False,
+                    parents_only=True,
+                    false_result=C.Const(zero),
+                )
+            return C.Count(var, coll, body, op, n)
         case C.ChunkQuant(q, var, collection, body):
             body = _hoist(body)
             return _expand(
@@ -1231,7 +1301,7 @@ def _rebind(f: C.Formula, var: str) -> C.Formula:
     match f:
         case C.Same(a, of_var) if of_var == var:
             return C.AtCandidate(a)
-        case C.Quant(q, y, coll, C.Rel(of_var, "before", lo, hi, clock), body) if (
+        case C.Quant(q, y, coll, C.Rel(of_var, "before", lo, hi, clock, source), body) if (
             of_var == var and not _local(body, y)
         ):
             # `y` before the candidate, related to it from `y`'s side: closed in `var`.
@@ -1240,7 +1310,7 @@ def _rebind(f: C.Formula, var: str) -> C.Formula:
                 "exists",
                 z,
                 Desugarer._clock_events(clock),
-                C.Rel(y, "after", lo, hi, clock),
+                C.Rel(y, "after", lo, hi, clock, source),
                 C.AtCandidate(z),
             )
             inner = _rebind(body, var)
@@ -1263,7 +1333,9 @@ def is_static(f: C.Formula) -> bool:
     """A closed leaf read off static atoms (a size, a tools or chunk test, a static
     predicate, a closed part): it has one value at every step, so it lowers where it
     stands."""
-    return isinstance(f, (C.Size, C.ToolsExists, C.ChunkQuant, C.Closed)) or (
+    if isinstance(f, C.Size):
+        return not C.free_vars(f)
+    return isinstance(f, (C.ToolsExists, C.ChunkQuant, C.Closed, C.Parent)) or (
         isinstance(f, C.Pred) and f.var is None
     )
 
@@ -1283,7 +1355,15 @@ def _local(f: C.Formula, var: str) -> bool:
     return is_static(f)
 
 
-def _expand(body: C.Formula, var: str, build, keep_static: bool = True) -> C.Formula:
+def _expand(
+    body: C.Formula,
+    var: str,
+    build,
+    keep_static: bool = True,
+    *,
+    parents_only: bool = False,
+    false_result: C.Formula | None = None,
+) -> C.Formula:
     """``build(body)`` with the closed groups of ``body`` moved out by Shannon expansion, one
     group at a time, found again in each branch so that none is left behind; with
     ``keep_static``, groups of static leaves stay (``is_static``). At most
@@ -1293,8 +1373,10 @@ def _expand(body: C.Formula, var: str, build, keep_static: bool = True) -> C.For
     def go(b: C.Formula, depth: int) -> C.Formula:
         # A step copies and walks the whole body: charge it by the body's size.
         charge(_size(b))
-        found = _groups(b, var, keep_static)
+        found = _groups(b, var, keep_static, parents_only=parents_only)
         if not found:
+            if depth and b == C.FALSE and false_result is not None:
+                return false_result
             return build(b)
         if depth == _MAX_HOISTED_PARTS:
             _too_many(var)
@@ -1340,7 +1422,9 @@ class _Group:
         return C.conj(self.members) if self.conjunctive else C.disj(self.members)
 
 
-def _groups(body: C.Formula, var: str, keep_static: bool) -> list[_Group]:
+def _groups(
+    body: C.Formula, var: str, keep_static: bool, *, parents_only: bool = False
+) -> list[_Group]:
     """The distinct closed groups of ``body`` that must move out of ``var``'s quantifier: with
     ``keep_static``, not a group of static leaves only."""
     found: list[_Group] = []
@@ -1360,6 +1444,15 @@ def _groups(body: C.Formula, var: str, keep_static: bool) -> list[_Group]:
             found.append(group)
 
     def walk(f: C.Formula) -> None:
+        if parents_only:
+            if isinstance(f, C.Parent):
+                add([f], True)
+            elif isinstance(f, C.Not):
+                walk(f.body)
+            elif isinstance(f, C.And | C.Or):
+                for part in f.parts:
+                    walk(part)
+            return
         match f:
             case C.Const():
                 return
@@ -1475,6 +1568,8 @@ def _canonical(f: C.Formula, level: int) -> C.Formula:
             return C.Not(_canonical(body, level))
         case C.Closed(body):
             return C.Closed(_canonical(body, level))
+        case C.Parent(body):
+            return C.Parent(_canonical(body, level))
         case C.And(parts):
             return C.And(tuple(_canonical(p, level) for p in parts))
         case C.Or(parts):

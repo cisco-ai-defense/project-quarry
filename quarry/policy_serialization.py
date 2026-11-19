@@ -43,6 +43,7 @@ from quarry.engine.atoms import (
     Cost,
     ModelExpression,
     StringSemantics,
+    is_message_group_expression,
     model_expression_requires_model,
     validate_constructed_message_graph,
     validate_model_expression,
@@ -52,10 +53,13 @@ from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, Elemen
 from quarry.engine.collect import CollectPlan
 from quarry.engine.contracts import (
     COMPILER_VERSION,
+    MAX_COMPUTED_CONDITION_DEPTH,
+    MAX_COMPUTED_CONDITIONS,
     MAX_NESTED_RULE_CHECKS,
     MAX_NESTED_RULE_DEPTH,
     ClosedPlan,
     CompiledRuleArtifact,
+    ComputedConditionPlan,
     DecisionTree,
     FlowCandidate,
     FlowRequirement,
@@ -79,7 +83,7 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 FORMAT_KIND = "quarry.compiled-policy"
-FORMAT_VERSION = 10
+FORMAT_VERSION = 11
 _WIRE_SCHEMAS: list[tuple[type[DataclassInstance], set[str]]] = []
 _RESOURCE_REQUIREMENT_KEYS = frozenset(
     {
@@ -135,7 +139,7 @@ _RULE_KEYS = {"metadata", "artifact"}
 _ARTIFACT_KEYS = _wire_fields(
     CompiledRuleArtifact,
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
-    "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions "
+    "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions computed_conditions "
     "full_trace_proof decision_tree split_checks flow_requirements declared_resources",
     unserialized="node_atom_ids",
 )
@@ -145,6 +149,7 @@ _FLOW_REQUIREMENT_FIELDS = _wire_fields(
 )
 _TOOL_QUANTIFIER_FIELDS = _wire_fields(ToolQuantifierPlan, "body kind body_source_nodes")
 _CLOSED_PLAN_FIELDS = _wire_fields(ClosedPlan, "dfa")
+_COMPUTED_PLAN_FIELDS = _wire_fields(ComputedConditionPlan, "source artifact")
 _DECISION_TREE_FIELDS = _wire_fields(DecisionTree, "nodes")
 _TREE_NODE_FIELDS = _wire_fields(TreeNode, "atom_id label source_node")
 _DFA_KEYS = {
@@ -317,10 +322,21 @@ def _called_rule_path(path: tuple[int, ...], identity: int, count: list[int]) ->
 
 
 def _artifact_to_wire(
-    artifact: CompiledRuleArtifact, *, _path: tuple[int, ...] = (), _count: list[int] | None = None
+    artifact: CompiledRuleArtifact,
+    *,
+    _path: tuple[int, ...] = (),
+    _count: list[int] | None = None,
+    _computed_depth: int = 0,
+    _computed_count: list[int] | None = None,
 ) -> dict[str, Any]:
     count = [0] if _count is None else _count
+    computed_count = [0] if _computed_count is None else _computed_count
+    if _computed_depth > MAX_COMPUTED_CONDITION_DEPTH:
+        raise _fail(f"computed message condition depth exceeds {MAX_COMPUTED_CONDITION_DEPTH}")
     path = _called_rule_path(_path, id(artifact), count)
+    computed_count[0] += len(artifact.computed_conditions)
+    if computed_count[0] > MAX_COMPUTED_CONDITIONS:
+        raise _fail(f"computed message condition count exceeds {MAX_COMPUTED_CONDITIONS}")
     return {
         "rule_name": artifact.rule_name,
         "dfa_hash": artifact.dfa_hash,
@@ -341,12 +357,35 @@ def _artifact_to_wire(
             [atom_id, _dfa_to_wire(plan.dfa)]
             for atom_id, plan in sorted(artifact.closed_conditions.items())
         ],
+        "computed_conditions": [
+            [
+                atom_id,
+                _json_value(plan.source),
+                _artifact_to_wire(
+                    plan.artifact,
+                    _path=path,
+                    _count=count,
+                    _computed_depth=_computed_depth + 1,
+                    _computed_count=computed_count,
+                ),
+            ]
+            for atom_id, plan in sorted(artifact.computed_conditions.items())
+        ],
         "full_trace_proof": artifact.full_trace_proof,
         "declared_resources": _json_value(artifact.declared_resources),
         "decision_tree": _decision_tree_to_wire(artifact.decision_tree),
         "dfa": _dfa_to_wire(artifact.dfa),
         "split_checks": [
-            [atom_id, _artifact_to_wire(check, _path=path, _count=count)]
+            [
+                atom_id,
+                _artifact_to_wire(
+                    check,
+                    _path=path,
+                    _count=count,
+                    _computed_depth=_computed_depth,
+                    _computed_count=computed_count,
+                ),
+            ]
             for atom_id, check in sorted(artifact.split_checks.items())
         ],
         "flow_requirements": [
@@ -986,7 +1025,12 @@ def _check_closed_conditions(artifact: CompiledRuleArtifact) -> None:
 
 
 def _split_checks_from_wire(
-    raw: object, inputs: frozenset[str], path: tuple[int, ...], count: list[int]
+    raw: object,
+    inputs: frozenset[str],
+    path: tuple[int, ...],
+    count: list[int],
+    computed_depth: int,
+    computed_count: list[int],
 ) -> dict[str, CompiledRuleArtifact]:
     checks: dict[str, CompiledRuleArtifact] = {}
     for index, entry in enumerate(_list(raw, "rule.artifact.split_checks")):
@@ -997,7 +1041,14 @@ def _split_checks_from_wire(
         atom_id = _string(row[0], f"{name}.atom_id")
         if atom_id in checks:
             raise _fail(f"{name} duplicates atom id {atom_id!r}")
-        checks[atom_id] = _artifact_from_wire(row[1], inputs, _path=path, _count=count)
+        checks[atom_id] = _artifact_from_wire(
+            row[1],
+            inputs,
+            _path=path,
+            _count=count,
+            _computed_depth=computed_depth,
+            _computed_count=computed_count,
+        )
     return checks
 
 
@@ -1081,6 +1132,8 @@ def _artifact_from_wire(
     *,
     _path: tuple[int, ...] = (),
     _count: list[int] | None = None,
+    _computed_depth: int = 0,
+    _computed_count: list[int] | None = None,
 ) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
     compiler_version = _string(value.get("compiler_version"), "rule.artifact.compiler_version")
@@ -1090,6 +1143,9 @@ def _artifact_from_wire(
         )
     _exact_keys(value, _ARTIFACT_KEYS, "rule.artifact")
     count = [0] if _count is None else _count
+    computed_count = [0] if _computed_count is None else _computed_count
+    if _computed_depth > MAX_COMPUTED_CONDITION_DEPTH:
+        raise _fail(f"computed message condition depth exceeds {MAX_COMPUTED_CONDITION_DEPTH}")
     path = _called_rule_path(_path, id(value), count)
     specs = [
         _atom_from_wire(item, index)
@@ -1110,12 +1166,54 @@ def _artifact_from_wire(
         collect_plan=_collect_from_wire(value["collect_plan"]),
         tool_quantifiers=_tool_quantifiers_from_wire(value["tool_quantifiers"]),
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
-        split_checks=_split_checks_from_wire(value["split_checks"], inputs, path, count),
+        split_checks=_split_checks_from_wire(
+            value["split_checks"], inputs, path, count, _computed_depth, computed_count
+        ),
         declared_resources=_declared_resources_from_wire(value["declared_resources"]),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
         flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),
     )
+    computed = {}
+    computed_rows = _list(value["computed_conditions"], "computed_conditions")
+    computed_count[0] += len(computed_rows)
+    if computed_count[0] > MAX_COMPUTED_CONDITIONS:
+        raise _fail(f"computed message condition count exceeds {MAX_COMPUTED_CONDITIONS}")
+    for index, raw_plan in enumerate(computed_rows):
+        row = _list(raw_plan, f"computed_conditions[{index}]")
+        if len(row) != 3:
+            raise _fail("a computed message condition needs an atom id, source and artifact")
+        atom_id = _string(row[0], "computed condition atom id")
+        if atom_id in computed or atom_id not in artifact.atom_specs:
+            raise _fail("computed message condition ids must be unique specification ids")
+        computed[atom_id] = ComputedConditionPlan(
+            _required_model_expression(row[1], "computed message source"),
+            _artifact_from_wire(
+                row[2],
+                inputs,
+                _path=path,
+                _count=count,
+                _computed_depth=_computed_depth + 1,
+                _computed_count=computed_count,
+            ),
+        )
+    artifact = replace(artifact, computed_conditions=computed)
+    expected = {
+        atom_id
+        for atom_id, spec in artifact.atom_specs.items()
+        if spec.detector == "computed_messages"
+    }
+    if set(computed) != expected:
+        raise _fail("computed message specifications need exactly one condition plan")
+    for atom_id, plan in computed.items():
+        _check_computed_source(artifact, atom_id, plan)
+        cost = max(
+            (spec.cost.rank for spec in plan.artifact.atom_specs.values()), default=Cost.PURE.rank
+        )
+        if model_expression_requires_model(plan.source):
+            cost = Cost.LLM.rank
+        if artifact.atom_specs[atom_id].cost.rank < cost:
+            raise _fail("a computed message condition cannot hide its source or child cost")
     missing_specs = sorted(artifact.automaton_atoms - set(artifact.atom_specs))
     if missing_specs:
         raise _fail("DFA atoms lack specifications: " + ", ".join(missing_specs))
@@ -1140,6 +1238,81 @@ def _artifact_from_wire(
     _check_split_checks(artifact)
     _check_decision_tree(artifact)
     return artifact
+
+
+def _check_computed_source(
+    artifact: CompiledRuleArtifact, atom_id: str, plan: ComputedConditionPlan
+) -> None:
+    """Keep prepared child frames within the source compiler's scope and type contract."""
+    parameters = {parameter.name: parameter for parameter in artifact.parameter_schema}
+    if any(parameters.get(child.name) != child for child in plan.artifact.parameter_schema):
+        raise _fail("computed child parameters must match the parent parameter schema")
+    free_bindings = set()
+    pending = [(plan.source, frozenset())]
+    while pending:
+        expression, bound = pending.pop()
+        if expression.kind == "parameter" and expression.value not in parameters:
+            raise _fail("computed source parameters must be declared by the parent")
+        if expression.kind == "binding" and expression.value not in bound:
+            free_bindings.add(expression.value)
+        for index, child in enumerate(expression.children):
+            local = bound
+            if index and expression.kind in {"map", "message_map", "message_select", "split_any"}:
+                local = bound | {expression.value}
+            pending.append((child, local))
+    spec = artifact.atom_specs[atom_id]
+    if len(free_bindings) > 1 or bool(free_bindings) != (spec.domain is AtomDomain.EVENT):
+        raise _fail("computed source bindings must match its current-event domain")
+    if spec.predicate != "external" or spec.model_expression is not None:
+        raise _fail("computed message specifications must use the child-plan detector")
+    # Every branch that supplies a frame must produce messages. The wire expression
+    # validator separately checks nested maps, transform plans, constructors and arities.
+    pending = [plan.source]
+    if plan.source.kind == "message_map":
+        raise _fail("computed map sources require conversion to Messages")
+    while pending:
+        expression = pending.pop()
+        if expression.kind in {"conditional"}:
+            pending.extend(expression.children[1:])
+        elif expression.kind == "concat":
+            pending.extend(expression.children)
+        elif expression.kind in {
+            "transform",
+            "local_transform",
+            "model_transform",
+            "slice",
+            "message_select",
+        }:
+            pending.append(expression.children[0])
+        elif expression.kind == "field":
+            if expression.value not in {
+                "system_messages",
+                "developer_messages",
+                "user_messages",
+                "assistant_messages",
+                "tool_responses",
+            }:
+                raise _fail("a computed message source field must select messages")
+            pending.append(expression.children[0])
+        elif expression.kind == "as_messages":
+            child = expression.children[0]
+            if child.kind == "index":
+                pending.append(child.children[0])
+            elif child.kind != "binding":
+                raise _fail("a computed message source must convert a message binding or index")
+        elif expression.kind == "flatten_messages":
+            pending.append(expression.children[0])
+        elif expression.kind == "index":
+            if not is_message_group_expression(expression.children[0]):
+                raise _fail("computed collection indexing requires message-valued map entries")
+        elif expression.kind not in {
+            "messages",
+            "message_view",
+            "message",
+            "add_message",
+            "message_map",
+        }:
+            raise _fail("a computed message source must produce Messages")
 
 
 def _check_capture_plan(artifact: CompiledRuleArtifact, inputs: frozenset[str]) -> None:

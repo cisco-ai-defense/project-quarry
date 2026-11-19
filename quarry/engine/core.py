@@ -27,6 +27,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from quarry.engine.atoms import ModelExpression
+
+
+@dataclass(frozen=True)
+class MessageValue:
+    """A compiler-resolved message value whose conditions use a separate event frame."""
+
+    key: str
+    expression: ModelExpression = field(compare=False)
+    variables: tuple[str, ...] = ()
+    syntax: object = field(default=None, compare=False, repr=False)
+    surface: str = "messages"
+
 
 @dataclass(frozen=True)
 class Events:
@@ -42,6 +55,7 @@ class Events:
     # The rule syntax these events come from (a comprehension or a function call), for
     # attributing the atoms they gate to it; not part of the collection's identity.
     src: object = field(default=None, compare=False, repr=False)
+    value: MessageValue | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,8 @@ class Rel:
     lo: int = 1
     hi: int | None = None
     clock: str = "timeline"
+    # Compile-only attribution survives value-frame rebasing; absent from semantic identity.
+    source: object = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -179,6 +195,7 @@ class Size:
     rule's syntax subtree: a static atom compared with the bound as written."""
 
     node: object
+    value: MessageValue | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +263,13 @@ class Closed:
     body: Formula
 
 
+@dataclass(frozen=True)
+class Parent:
+    """An original-conversation fact referenced from a computed value condition."""
+
+    body: Formula
+
+
 Formula = (
     Const
     | Pred
@@ -264,6 +288,7 @@ Formula = (
     | ChunkQuant
     | Static
     | Closed
+    | Parent
 )
 
 
@@ -302,9 +327,10 @@ def disj(parts) -> Formula:
 def quant(q: str, var: str, coll: Collection, anchor: Rel | None, body: Formula) -> Formula:
     """``Quant`` with a constant body folded: no event satisfies ``False``, and every event
     satisfies ``True``."""
-    if q == "exists" and body == FALSE:
+    effectful = isinstance(coll, Events) and coll.value is not None
+    if not effectful and q == "exists" and body == FALSE:
         return FALSE
-    if q == "forall" and body == TRUE:
+    if not effectful and q == "forall" and body == TRUE:
         return TRUE
     return Quant(q, var, coll, anchor, body)
 
@@ -323,7 +349,7 @@ def children(formula: Formula) -> tuple[Formula, ...]:
     match formula:
         case Not(body) | Quant(body=body) | Count(body=body) | ToolsExists(body=body):
             return (body,)
-        case ChunkQuant(body=body) | Closed(body) | ValueQuantifier(body=body):
+        case ChunkQuant(body=body) | Closed(body) | Parent(body) | ValueQuantifier(body=body):
             return (body,)
         case And(parts) | Or(parts):
             return tuple(parts)
@@ -334,7 +360,9 @@ def free_vars(formula: Formula) -> set[str]:
     """Element variables ``formula`` reads without binding them: through a ``Pred``, a
     ``Rel`` anchor or ``Same``."""
     match formula:
-        case Const() | Size() | Static() | Closed():
+        case Size(value=value):
+            return set(value.variables) if value is not None else set()
+        case Const() | Static() | Closed() | Parent():
             return set()
         case Join(test_var=test_var, bound_var=bound_var):
             return {test_var, bound_var}
@@ -348,11 +376,14 @@ def free_vars(formula: Formula) -> set[str]:
             return free_vars(body)
         case And(parts) | Or(parts):
             return set().union(*(free_vars(p) for p in parts))
-        case Quant(var=var, anchor=anchor, body=body):
+        case Quant(var=var, coll=coll, anchor=anchor, body=body):
             inner = free_vars(body) - {var}
-            return inner | ({anchor.of_var} if anchor is not None else set())
-        case Count(var=var, body=body):
-            return free_vars(body) - {var}
+            value_vars = (
+                set(coll.value.variables) if isinstance(coll, Events) and coll.value else set()
+            )
+            return inner | value_vars | ({anchor.of_var} if anchor is not None else set())
+        case Count(var=var, coll=coll, body=body):
+            return (free_vars(body) - {var}) | (set(coll.value.variables) if coll.value else set())
         case Member(var=var) | AtCandidate(var=var):
             return {var}
         case Same(var=var, of_var=of_var):

@@ -18,8 +18,10 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
@@ -30,7 +32,6 @@ from quarry.cache.async_cache import current_scan, result_cache, retain_scan, sc
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
-from quarry.core.conversation import Conversation
 from quarry.core.logging import get_app_logger
 from quarry.dsl.composition import label_called_rule_artifact, link_public_rule_calls
 from quarry.dsl.functions import (
@@ -62,7 +63,12 @@ from quarry.engine.flow_requirements import (
 from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.oracle import Grounded
-from quarry.engine.witness import MAX_JUDGE_REASONS, ModelResultEvidence, build_evidence
+from quarry.engine.witness import (
+    MAX_JUDGE_REASONS,
+    DeferredValueEvidence,
+    ModelResultEvidence,
+    build_evidence,
+)
 from quarry.input_registry import InputRegistry, MissingInputState
 from quarry.inputs import InputAdapter, load_input_adapters
 from quarry.integrations.collection import evaluate_collect_plan
@@ -70,6 +76,8 @@ from quarry.integrations.model_expression import (
     ModelExpressionTrace,
     build_model_result_evidence,
     evaluate_model_expression,
+    evaluate_scoped_model_expression,
+    scoped_model_expression,
 )
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.rate_limiter import LLMRateLimiter
@@ -115,7 +123,13 @@ from quarry.types.exceptions import (
     RuleValidationError,
 )
 from quarry.types.failures import ScanFailureCategory, _category_from_metadata
-from quarry.types.messages import Messages, ToolCall, ToolCallTypeRegistry
+from quarry.types.messages import (
+    Message,
+    Messages,
+    ToolCall,
+    ToolCallTypeRegistry,
+    UnreadableMessage,
+)
 from quarry.types.origins import SourceText
 from quarry.types.parameters import ParameterValue
 from quarry.types.rules import DSLRule, ExplainLevel, ScanResult
@@ -150,6 +164,55 @@ class _DeferredEvidence:
         finally:
             self.close()
             del finish, self
+
+
+def _value_event_origin(event) -> dict[str, Any]:
+    """Bounded coordinate metadata for one child witness, without reading guarded text."""
+    source = event.source
+    origin: dict[str, Any] = {
+        "position": event.position,
+        "kind": event.kind.value,
+        "message_index": source.message_index,
+    }
+    if isinstance(source, ToolCall):
+        origin["call_index"] = source._call_index
+        return origin
+    if isinstance(source, UnreadableMessage):
+        origin["opaque"] = True
+        return origin
+    if not isinstance(source, Message):
+        return origin
+    ranges = []
+    parts = []
+    unmapped = False
+    truncated = False
+    for segment in source._provenance_steps():
+        if segment is None:
+            continue
+        unmapped |= not segment.sources
+        for ref in segment.sources:
+            item = ref.to_dict()
+            if item not in ranges:
+                ranges.append(item)
+            if len(ranges) == 32:
+                truncated = True
+                break
+        for ref in segment.parts:
+            item = ref.to_dict()
+            if item not in parts:
+                parts.append(item)
+            if len(parts) == 32:
+                truncated = True
+                break
+        if truncated:
+            break
+    origin.update(
+        source_ranges=ranges,
+        source_parts=parts,
+        source_unmapped=True if unmapped else None if truncated else False,
+        truncated=truncated,
+    )
+    return origin
 
 
 def _failure_category(error: Exception) -> ScanFailureCategory:
@@ -762,6 +825,7 @@ class DSLScanner:
         artifact: CompiledRuleArtifact | None = None,
         explain: bool = False,
         regex_backend=None,
+        value_details: bool = False,
     ):
         """Build the async external-atom grounding backend for one rule evaluation.
 
@@ -824,6 +888,59 @@ class DSLScanner:
                 "constructed_input": constructed,
             }
 
+        def frame_input(child, selected: Messages, check: CompiledRuleArtifact) -> EvaluationInput:
+            """Project this frame's source-backed messages onto its own required input clock."""
+            required = check.read_surfaces & self.input_registry.event_surfaces
+            child.extension_event_surfaces = {
+                surface: items
+                for surface, items in rule_ctx.extension_event_surfaces.items()
+                if surface in required
+            }
+            included = {
+                id(item) for items in child.extension_event_surfaces.values() for item in items
+            }
+            child.extension_event_sequence = tuple(
+                item for item in rule_ctx.extension_event_sequence if id(item) in included
+            )
+            child.ordered_timeline = None
+            if required and check.orders_input_items and rule_ctx.ordered_timeline is not None:
+                parent_extensions = {id(item) for item in rule_ctx.extension_event_sequence}
+                child.extension_event_sequence = tuple(
+                    item for _, item in rule_ctx.ordered_timeline if id(item) in included
+                )
+                if selected.shares_root_with(
+                    rule_ctx.conversation.messages
+                ) or selected.shares_source_with(rule_ctx.conversation.messages):
+                    positions = {
+                        _timeline_key(item): position
+                        for position, item in rule_ctx.ordered_timeline
+                        if id(item) not in parent_extensions
+                    }
+                    extensions = tuple(
+                        (position, item)
+                        for position, item in rule_ctx.ordered_timeline
+                        if id(item) in included
+                    )
+                    child.ordered_timeline = _project_chunk_timeline(
+                        positions, extensions, child.timeline
+                    )
+            evaluation_input = build_evaluation_input(child)
+            if (
+                required
+                and child.ordered_timeline is None
+                and cross_source_flow_has_candidates(
+                    check, evaluation_input, regex_backend or RE2_REGEX, raise_if_evaluation_expired
+                )
+            ):
+                if rule_ctx.ordered_timeline is None:
+                    raise ConversationValidationError(
+                        "An explicit timeline is required for before/after across conversation and input items"
+                    )
+                raise ConversationValidationError(
+                    "The input timeline cannot order a derived messages check"
+                )
+            return evaluation_input
+
         async def detector(spec, text: str | tuple[str, ...], event=None) -> bool | Grounded:
             name = spec.detector
             arg = spec.detector_arg
@@ -842,177 +959,346 @@ class DSLScanner:
                     selected = rule_ctx.conversation.messages[0:0]
                 if not isinstance(selected, Messages):
                     raise TypeError("called rule input must be a Messages value")
-                nested_ctx = rule_ctx.copy()
-                nested_ctx.conversation = Conversation._from_parts(
-                    selected,
-                    rule_ctx.conversation._tools,
-                    tools_supplied=rule_ctx.conversation._tools_supplied,
-                )
-                nested_ctx._timeline_cache = None
-                nested_ctx.evaluation_warnings = rule_ctx.evaluation_warnings
-                check = artifact.split_checks[spec.atom_id]
-                uses_events = bool(check.read_surfaces & self.input_registry.event_surfaces)
-                nested_ctx.ordered_timeline = None
-                if not uses_events:
-                    nested_ctx.extension_event_surfaces = {}
-                    nested_ctx.extension_event_sequence = ()
-                elif rule_ctx.ordered_timeline is not None:
-                    extension_ids = {id(item) for item in rule_ctx.extension_event_sequence}
-                    nested_ctx.extension_event_sequence = tuple(
-                        item for _, item in rule_ctx.ordered_timeline if id(item) in extension_ids
-                    )
-                    if check.orders_input_items and selected.shares_root_with(
-                        rule_ctx.conversation.messages
-                    ):
-                        positions = {
-                            _timeline_key(item): position
-                            for position, item in rule_ctx.ordered_timeline
-                            if id(item) not in extension_ids
-                        }
-                        extensions = tuple(
-                            (position, item)
-                            for position, item in rule_ctx.ordered_timeline
+                nested_ctx = rule_ctx.for_messages(selected)
+                try:
+                    nested_ctx.evaluation_warnings = rule_ctx.evaluation_warnings
+                    check = artifact.split_checks[spec.atom_id]
+                    uses_events = bool(check.read_surfaces & self.input_registry.event_surfaces)
+                    nested_ctx.ordered_timeline = None
+                    if not uses_events:
+                        nested_ctx.extension_event_surfaces = {}
+                        nested_ctx.extension_event_sequence = ()
+                    elif rule_ctx.ordered_timeline is not None:
+                        extension_ids = {id(item) for item in rule_ctx.extension_event_sequence}
+                        nested_ctx.extension_event_sequence = tuple(
+                            item
+                            for _, item in rule_ctx.ordered_timeline
                             if id(item) in extension_ids
                         )
-                        nested_ctx.ordered_timeline = _project_chunk_timeline(
-                            positions, extensions, nested_ctx.timeline
+                        if check.orders_input_items and selected.shares_root_with(
+                            rule_ctx.conversation.messages
+                        ):
+                            positions = {
+                                _timeline_key(item): position
+                                for position, item in rule_ctx.ordered_timeline
+                                if id(item) not in extension_ids
+                            }
+                            extensions = tuple(
+                                (position, item)
+                                for position, item in rule_ctx.ordered_timeline
+                                if id(item) in extension_ids
+                            )
+                            nested_ctx.ordered_timeline = _project_chunk_timeline(
+                                positions, extensions, nested_ctx.timeline
+                            )
+                    nested_input = build_evaluation_input(nested_ctx)
+                    if (
+                        uses_events
+                        and nested_ctx.ordered_timeline is None
+                        and check.flow_requirements
+                        and cross_source_flow_has_candidates(
+                            check,
+                            nested_input,
+                            regex_backend or RE2_REGEX,
+                            raise_if_evaluation_expired,
                         )
-                nested_input = build_evaluation_input(nested_ctx)
-                if (
-                    uses_events
-                    and nested_ctx.ordered_timeline is None
-                    and check.flow_requirements
-                    and cross_source_flow_has_candidates(
+                    ):
+                        if rule_ctx.ordered_timeline is None:
+                            raise ConversationValidationError(
+                                "An explicit timeline is required for before/after across "
+                                "conversation and input items"
+                            )
+                        raise ConversationValidationError(
+                            "The input timeline cannot order a derived messages check"
+                        )
+                    # A called rule has the same model-input preflight as a top-level
+                    # rule, against the actual selected conversation.
+                    self._reject_out_of_range_dynamic_indexes(check, nested_ctx.conversation)
+                    nested_detector = self._make_async_detector(
+                        nested_ctx,
+                        artifact=check,
+                        explain=explain,
+                        regex_backend=regex_backend,
+                        value_details=value_details,
+                    )
+                    evidence: list[ModelResultEvidence] = []
+
+                    async def grounded(nested_spec, nested_text, nested_event=None):
+                        result = await nested_detector(nested_spec, nested_text, nested_event)
+                        if isinstance(result, Grounded) and isinstance(
+                            result.evidence, ModelResultEvidence
+                        ):
+                            evidence.append(result.evidence)
+                        return result
+
+                    nested = await evaluate_async(
                         check,
                         nested_input,
-                        regex_backend or RE2_REGEX,
-                        raise_if_evaluation_expired,
+                        async_detector=grounded,
+                        async_collector=self._make_async_collector(
+                            nested_ctx, regex_backend=regex_backend
+                        ),
+                        regex_backend=regex_backend,
+                        minimize_witness=False,
+                        record_trace=False,
+                        time_left=remaining_evaluation_time,
                     )
-                ):
-                    if rule_ctx.ordered_timeline is None:
-                        raise ConversationValidationError(
-                            "An explicit timeline is required for before/after across "
-                            "conversation and input items"
-                        )
-                    raise ConversationValidationError(
-                        "The input timeline cannot order a derived messages check"
+                    if not explain:
+                        return nested.matched
+                    measured = evidence[0] if len(evidence) == 1 else None
+                    score = None if measured is None else measured.expression_value
+                    score = (
+                        float(score)
+                        if isinstance(score, int | float) and not isinstance(score, bool)
+                        else None
                     )
-                # A called rule has the same model-input preflight as a top-level
-                # rule, against the actual selected conversation.
-                self._reject_out_of_range_dynamic_indexes(check, nested_ctx.conversation)
-                nested_detector = self._make_async_detector(
-                    nested_ctx,
-                    artifact=check,
-                    explain=explain,
-                    regex_backend=regex_backend,
-                )
-                evidence: list[ModelResultEvidence] = []
-
-                async def grounded(nested_spec, nested_text, nested_event=None):
-                    result = await nested_detector(nested_spec, nested_text, nested_event)
-                    if isinstance(result, Grounded) and isinstance(
-                        result.evidence, ModelResultEvidence
-                    ):
-                        evidence.append(result.evidence)
-                    return result
-
-                nested = await evaluate_async(
-                    check,
-                    nested_input,
-                    async_detector=grounded,
-                    async_collector=self._make_async_collector(
-                        nested_ctx, regex_backend=regex_backend
-                    ),
-                    regex_backend=regex_backend,
-                    minimize_witness=False,
-                    record_trace=False,
-                    time_left=remaining_evaluation_time,
-                )
-                if not explain:
-                    return nested.matched
-                measured = evidence[0] if len(evidence) == 1 else None
-                score = None if measured is None else measured.expression_value
-                score = (
-                    float(score)
-                    if isinstance(score, int | float) and not isinstance(score, bool)
-                    else None
-                )
-                if selected.shares_root_with(rule_ctx.conversation.messages):
-                    all_pieces = [
-                        selected[index : index + 1].span.to_dict() for index in range(len(selected))
-                    ]
-                    constructed = False
-                else:
-                    all_pieces = []
-                    constructed = False
-                    for ordinal in selected._ordinals:
-                        origin = selected._root._origins[ordinal]
-                        if origin is None:
-                            constructed = True
-                            continue
-                        item = selected._root._items[ordinal]
-                        all_pieces.extend(
-                            SourceText(item.content, origin, item.message_index).pieces(
-                                0, len(item.content)
+                    if selected.shares_root_with(rule_ctx.conversation.messages):
+                        all_pieces = [
+                            selected[index : index + 1].span.to_dict()
+                            for index in range(len(selected))
+                        ]
+                        constructed = False
+                    else:
+                        all_pieces = []
+                        constructed = False
+                        for ordinal in selected._ordinals:
+                            origin = selected._root._origins[ordinal]
+                            if origin is None:
+                                constructed = True
+                                continue
+                            item = selected._root._items[ordinal]
+                            all_pieces.extend(
+                                SourceText(item.content, origin, item.message_index).pieces(
+                                    0, len(item.content)
+                                )
                             )
+                    pieces = all_pieces[:16]
+                    chunk = {
+                        "ordinal": 0,
+                        "context": None,
+                        "pieces": pieces,
+                        "outcome": nested.matched,
+                        "value": score,
+                        "refused": any(item.refusals for item in evidence),
+                    }
+                    if len(all_pieces) > len(pieces):
+                        chunk["omitted_pieces"] = len(all_pieces) - len(pieces)
+                    if constructed:
+                        chunk["constructed"] = True
+                    summary = {"chunks": [chunk]}
+                    if nested.matched:
+                        summary["deciding"] = 0
+                    assert trace is not None
+                    judge_reasons = list(trace.judge_reasons)
+                    omitted_judge_reasons = trace.omitted_judge_reasons
+                    call_count = len(trace.calls)
+                    for item in evidence:
+                        for ordinal, model, reason in item.judge_reasons:
+                            if len(judge_reasons) < MAX_JUDGE_REASONS:
+                                judge_reasons.append((call_count + ordinal, model, reason))
+                            else:
+                                omitted_judge_reasons += 1
+                        omitted_judge_reasons += item.omitted_judge_reasons
+                        call_count += item._call_count
+                    return Grounded(
+                        nested.matched,
+                        ModelResultEvidence.bounded(
+                            operation="messages",
+                            models=[
+                                *(call[0] for call in trace.calls),
+                                *(model for item in evidence for model in item.models),
+                            ],
+                            arguments=[
+                                *((f"parameter:{key}", value) for key, value in trace.parameters),
+                                *(pair for item in evidence for pair in item.arguments),
+                            ],
+                            expression_value=score,
+                            operator=None if measured is None else measured.operator,
+                            threshold=None if measured is None else measured.threshold,
+                            matched=nested.matched,
+                            source_path=event.source_path if event is not None else None,
+                            score_summary=summary,
+                            input_span=evidence[-1].input_span if evidence else None,
+                            refusals=[refusal for item in evidence for refusal in item.refusals],
+                            judge_reasons=judge_reasons,
+                            omitted_judge_reasons=omitted_judge_reasons,
+                            call_count=call_count,
+                        ),
+                    )
+
+                finally:
+                    nested_ctx.message_value_memo.close()
+            if name == "computed_messages":
+                if artifact is None or spec.atom_id not in artifact.computed_conditions:
+                    raise RuntimeError("computed message condition has no compiled child plan")
+                plan = artifact.computed_conditions[spec.atom_id]
+                trace = ModelExpressionTrace() if explain else None
+
+                async def run_child(selected, source_lease):
+                    child = rule_ctx.for_messages(selected)
+                    try:
+                        retain_details = value_details and rule_ctx.value_evidence_budget[0] > 0
+                        if retain_details:
+                            rule_ctx.value_evidence_budget[0] -= 1
+                        child_input = frame_input(child, selected, plan.artifact)
+                        self._reject_out_of_range_dynamic_indexes(plan.artifact, child.conversation)
+                        child_record = ScanRecord() if explain else None
+                        warnings = []
+                        child_models: list[ModelResultEvidence] = []
+                        observed_models = {}
+                        child_detector = self._make_async_detector(
+                            child,
+                            explain=explain,
+                            regex_backend=regex_backend,
+                            artifact=plan.artifact,
+                            value_details=value_details,
                         )
-                pieces = all_pieces[:16]
-                chunk = {
-                    "ordinal": 0,
-                    "context": None,
-                    "pieces": pieces,
-                    "outcome": nested.matched,
-                    "value": score,
-                    "refused": any(item.refusals for item in evidence),
-                }
-                if len(all_pieces) > len(pieces):
-                    chunk["omitted_pieces"] = len(all_pieces) - len(pieces)
-                if constructed:
-                    chunk["constructed"] = True
-                summary = {"chunks": [chunk]}
-                if nested.matched:
-                    summary["deciding"] = 0
-                assert trace is not None
-                judge_reasons = list(trace.judge_reasons)
-                omitted_judge_reasons = trace.omitted_judge_reasons
-                call_count = len(trace.calls)
-                for item in evidence:
-                    for ordinal, model, reason in item.judge_reasons:
-                        if len(judge_reasons) < MAX_JUDGE_REASONS:
-                            judge_reasons.append((call_count + ordinal, model, reason))
-                        else:
-                            omitted_judge_reasons += 1
-                    omitted_judge_reasons += item.omitted_judge_reasons
-                    call_count += item._call_count
-                return Grounded(
-                    nested.matched,
-                    ModelResultEvidence.bounded(
-                        operation="messages",
-                        models=[
-                            *(call[0] for call in trace.calls),
-                            *(model for item in evidence for model in item.models),
-                        ],
-                        arguments=[
-                            *((f"parameter:{key}", value) for key, value in trace.parameters),
-                            *(pair for item in evidence for pair in item.arguments),
-                        ],
-                        expression_value=score,
-                        operator=None if measured is None else measured.operator,
-                        threshold=None if measured is None else measured.threshold,
-                        matched=nested.matched,
-                        source_path=event.source_path if event is not None else None,
-                        score_summary=summary,
-                        input_span=evidence[-1].input_span if evidence else None,
-                        refusals=[refusal for item in evidence for refusal in item.refusals],
-                        judge_reasons=judge_reasons,
-                        omitted_judge_reasons=omitted_judge_reasons,
-                        call_count=call_count,
-                    ),
-                )
+
+                        async def grounded_child(child_spec, child_text, child_event=None):
+                            observed = await child_detector(child_spec, child_text, child_event)
+                            if isinstance(observed, Grounded) and isinstance(
+                                observed.evidence, ModelResultEvidence
+                            ):
+                                child_models.append(observed.evidence)
+                                observed_models[
+                                    (child_spec.atom_id, getattr(child_event, "position", None))
+                                ] = observed.evidence
+                            return observed
+
+                        result = await evaluate_async(
+                            plan.artifact,
+                            child_input,
+                            async_detector=grounded_child,
+                            async_collector=self._make_async_collector(
+                                child, regex_backend=regex_backend
+                            ),
+                            warnings=warnings,
+                            regex_backend=regex_backend,
+                            minimize_witness=False,
+                            record_trace=explain,
+                            record=child_record,
+                            time_left=remaining_evaluation_time,
+                        )
+                        rule_ctx.evaluation_warnings.extend(child.evaluation_warnings)
+                        rule_ctx.evaluation_warnings.extend(warnings)
+                        if not explain:
+                            return result.matched
+                        assert trace is not None and child_record is not None
+                        child_record.entries = [
+                            (*entry[:6], observed_models.get((entry[0], entry[1])))
+                            if entry[-1] is None
+                            else entry
+                            for entry in child_record.entries
+                        ]
+                        judge_reasons = list(trace.judge_reasons)
+                        omitted_judge_reasons = trace.omitted_judge_reasons
+                        call_count = len(trace.calls)
+                        for item in child_models:
+                            for ordinal, model, reason in item.judge_reasons:
+                                if len(judge_reasons) < MAX_JUDGE_REASONS:
+                                    judge_reasons.append((call_count + ordinal, model, reason))
+                                else:
+                                    omitted_judge_reasons += 1
+                            omitted_judge_reasons += item.omitted_judge_reasons
+                            call_count += item._call_count
+                        summary = ModelResultEvidence.bounded(
+                            operation="computed_messages",
+                            models=[alias for alias, *_ in trace.calls]
+                            + [alias for model in child_models for alias in model.models],
+                            arguments=[("messages", len(selected)), *trace.parameters],
+                            expression_value=result.matched,
+                            operator=None,
+                            threshold=None,
+                            matched=result.matched,
+                            source_path=getattr(event, "source_path", None),
+                            judge_reasons=judge_reasons,
+                            omitted_judge_reasons=omitted_judge_reasons,
+                            call_count=call_count,
+                            refusals=[
+                                *trace.refusals,
+                                *(refusal for item in child_models for refusal in item.refusals),
+                            ],
+                            # Coordinates must not semantically read content: opaque holders can
+                            # be counted or ignored by a body without making the scan invalid.
+                            input_span={
+                                "message_indices": [
+                                    item.message_index for item in islice(selected, 128)
+                                ],
+                                "omitted_messages": max(0, len(selected) - 128),
+                                "constructed": not selected.shares_root_with(
+                                    rule_ctx.conversation.messages
+                                ),
+                            },
+                        )
+                        summary = replace(
+                            summary, omitted_value_details=value_details and not retain_details
+                        )
+                        evidence_lease = None
+                        if retain_details:
+                            assert source_lease is not None
+                            evidence_lease = rule_ctx.value_evidence_memory.try_retain_snapshot(
+                                (
+                                    selected,
+                                    child_record,
+                                    child_input,
+                                    result.witness,
+                                    result.captured_value,
+                                    result.model_results,
+                                )
+                            )
+                            if evidence_lease is None:
+                                retain_details = False
+                                summary = replace(summary, omitted_value_details=True)
+                        if retain_details:
+                            input_span = summary.input_span
+                            child_matched = result.matched
+                            child_witness = result.witness
+                            child_captured = result.captured_value
+                            child_results = result.model_results
+
+                            def details():
+                                evidence = build_evidence(
+                                    plan.artifact.rule_name,
+                                    child_matched,
+                                    child_record,
+                                    plan.artifact,
+                                    child_input,
+                                    trace=child_witness,
+                                    captured_value=child_captured,
+                                    model_results=child_results,
+                                )
+                                positions = {step.position for step in evidence.steps}
+                                origins = [
+                                    _value_event_origin(item)
+                                    for item in child_input.events
+                                    if item.position in positions
+                                ]
+                                return {
+                                    "matched": child_matched,
+                                    "input_span": input_span,
+                                    "origins": origins,
+                                    "minimized": child_witness.minimized,
+                                    "condition": evidence.to_dict(),
+                                }
+
+                            assert evidence_lease is not None
+                            holder = DeferredValueEvidence(details, release=evidence_lease.close)
+                            rule_ctx.deferred_value_evidence.append(holder)
+                            summary = replace(summary, value_details=holder)
+                        return Grounded(result.matched, summary)
+                    finally:
+                        child.message_value_memo.close()
+
+                async with scoped_model_expression(
+                    plan.source, rule_ctx, event=event, regex_backend=regex_backend, trace=trace
+                ) as (selected, source_lease):
+                    if not isinstance(selected, Messages):
+                        raise TypeError("computed message condition source must be Messages")
+                    return await run_child(selected, source_lease)
             if name == "model_expression":
                 trace = ModelExpressionTrace() if explain else None
                 value = truth(
-                    await evaluate_model_expression(
+                    await evaluate_scoped_model_expression(
                         spec.model_expression,
                         rule_ctx,
                         event=event,
@@ -1318,6 +1604,37 @@ class DSLScanner:
         self,
         data: dict[str, Any],
         *,
+        file_path: Path | None,
+        enable_explain: ExplainLevel,
+        record_traces: bool,
+        rules_subset: set[str] | None,
+        parameters: dict[str, ParameterValue] | None,
+        decision_paths: bool = False,
+        explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
+        deferred_evidence: list | None = None,
+    ) -> ScanResult:
+        """Close rule value ownership on success, failures and cancellation."""
+        with ExitStack() as value_lifetimes:
+            return await self._scan_data_with_values_async(
+                data,
+                file_path=file_path,
+                enable_explain=enable_explain,
+                record_traces=record_traces,
+                rules_subset=rules_subset,
+                parameters=parameters,
+                decision_paths=decision_paths,
+                explore=explore,
+                explore_selector=explore_selector,
+                deferred_evidence=deferred_evidence,
+                value_lifetimes=value_lifetimes,
+            )
+
+    async def _scan_data_with_values_async(
+        self,
+        data: dict[str, Any],
+        *,
+        value_lifetimes: ExitStack,
         file_path: Path | None,
         enable_explain: ExplainLevel,
         record_traces: bool,
@@ -1711,6 +2028,7 @@ class DSLScanner:
         async def evaluate_rule(rule_name: str, rule) -> dict[str, Any]:
             """Evaluate a single rule with isolated context."""
             rule_ctx = context.copy()
+            value_lifetimes.callback(rule_ctx.close_message_values)
             rule_timeout = self.limits.rule_timeout
             if self.config.config_version == 1 and self._rule_grounds_external(rule_name):
                 rule_timeout = self.limits.inference_timeout
@@ -1779,6 +2097,7 @@ class DSLScanner:
                         artifact=artifact,
                         explain=bool(enable_explain) or reports_path,
                         regex_backend=regex_backend,
+                        value_details=bool(enable_explain),
                     )
                     collector = self._make_async_collector(
                         rule_ctx,
@@ -2027,16 +2346,21 @@ class DSLScanner:
                 entries = []
                 for *fields, observed_evidence in record.entries:
                     if isinstance(observed_evidence, ModelResultEvidence) and (
-                        observed_evidence.judge_reasons or observed_evidence.omitted_judge_reasons
+                        observed_evidence.judge_reasons
+                        or observed_evidence.omitted_judge_reasons
+                        or observed_evidence.value_details is not None
                     ):
                         observed_evidence = replace(
-                            observed_evidence, judge_reasons=(), omitted_judge_reasons=0
+                            observed_evidence,
+                            judge_reasons=(),
+                            omitted_judge_reasons=0,
+                            value_details=None,
                         )
                     entries.append((*fields, observed_evidence))
                 records[name] = replace(record, entries=entries)
             return records or None
 
-        def scan_result(scan_time: float) -> ScanResult:
+        def scan_result(scan_time: float, *, include_evidence: bool = True) -> ScanResult:
             return ScanResult(
                 file_path=file_path,
                 rule_matches=matches,
@@ -2054,7 +2378,7 @@ class DSLScanner:
                 else None,
                 outputs=outputs,
                 decision_paths=decision_path_records(),
-                **evidence(),
+                **(evidence() if include_evidence else {}),
             )
 
         if deferred_evidence is not None:
@@ -2067,8 +2391,12 @@ class DSLScanner:
                     await gather_evidence()
                 return replace(result, decision_paths=decision_path_records(), **evidence())
 
-            result = scan_result((datetime.now() - start_time).total_seconds())
-            owner = _DeferredEvidence(finish, retain_scan().close)
+            result = scan_result(
+                (datetime.now() - start_time).total_seconds(), include_evidence=False
+            )
+            value_lifetimes.callback(retain_scan().close)
+            continued_values = value_lifetimes.pop_all()
+            owner = _DeferredEvidence(finish, continued_values.close)
             try:
                 deferred_evidence.append(owner)
             except BaseException:
