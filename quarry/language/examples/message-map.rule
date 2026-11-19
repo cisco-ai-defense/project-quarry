@@ -1,0 +1,4 @@
+rule "Mapped model input"
+condition:
+    model("judge").classify(
+        [message("user", item.content) for item in messages if item.role == "user"]) > 0.5

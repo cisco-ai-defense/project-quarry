@@ -560,6 +560,18 @@ condition:
         backend_required=True,
     ),
     ExampleRecord(
+        id="example:message-map",
+        rule_text="""rule "Mapped model input"
+condition:
+    model("judge").classify(
+        [message("user", item.content) for item in messages if item.role == "user"]) > 0.5
+""",
+        covered_item_ids=("construct:map-comprehension",),
+        backend_required=True,
+        matching={"messages": [{"role": "user", "content": "selected input"}]},
+        non_matching={"messages": [{"role": "assistant", "content": "excluded input"}]},
+    ),
+    ExampleRecord(
         id="example:content-transform",
         rule_text="""rule "Normalized model input"
 condition:

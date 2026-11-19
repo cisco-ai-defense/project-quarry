@@ -33,6 +33,7 @@ from quarry.types.transforms import (
     MAX_TRANSFORM_MAPPING_SEGMENTS,
     MAX_TRANSFORM_OUTPUT_CHARACTERS,
     MAX_TRANSFORM_WORK,
+    ContentSourcePart,
     ContentSourceRange,
     ContentTransform,
     MappingKind,
@@ -180,7 +181,7 @@ def _slice_segments(
             and segment.end - segment.start == sources[0].end - sources[0].start
         ):
             sources = (_slice_source(sources[0], low - segment.start, high - low),)
-        sliced.append(ProvenanceSegment(low - start, high - start, sources, kind))
+        sliced.append(ProvenanceSegment(low - start, high - start, sources, kind, segment.parts))
     return _merge_segments(sliced)
 
 
@@ -189,7 +190,11 @@ def _shift_segments(
 ) -> tuple[ProvenanceSegment, ...]:
     return tuple(
         ProvenanceSegment(
-            segment.start + offset, segment.end + offset, segment.sources, segment.kind
+            segment.start + offset,
+            segment.end + offset,
+            segment.sources,
+            segment.kind,
+            segment.parts,
         )
         for segment in segments
     )
@@ -208,11 +213,16 @@ def _append_segment(merged: list[ProvenanceSegment], segment: ProvenanceSegment)
     """Append one segment, merging the exact adjacent case in constant time."""
 
     last = merged[-1] if merged else None
-    if last is None or last.end != segment.start or last.kind != segment.kind:
+    if (
+        last is None
+        or last.end != segment.start
+        or last.kind != segment.kind
+        or last.parts != segment.parts
+    ):
         merged.append(segment)
         return
     if last.kind == "whole" and last.sources == segment.sources:
-        merged[-1] = ProvenanceSegment(last.start, segment.end, last.sources, "whole")
+        merged[-1] = ProvenanceSegment(last.start, segment.end, last.sources, "whole", last.parts)
         return
     if (
         last.kind == "linear"
@@ -230,7 +240,7 @@ def _append_segment(merged: list[ProvenanceSegment], segment: ProvenanceSegment)
             last.sources[0].message_start,
             segment.sources[0].message_end,
         )
-        merged[-1] = ProvenanceSegment(last.start, segment.end, (source,))
+        merged[-1] = ProvenanceSegment(last.start, segment.end, (source,), parts=last.parts)
         return
     merged.append(segment)
 
@@ -255,6 +265,7 @@ class _MappedPiece:
     end: int
     sources: tuple[ContentSourceRange, ...]
     kind: MappingKind
+    parts: tuple[ContentSourcePart, ...] = ()
 
 
 class _MappingCursor:
@@ -308,7 +319,7 @@ class _MappingCursor:
             self._meter.record(segments=1)
             if self._meter._pending >= _LOOP_CHECK_INTERVAL:
                 await self._meter.checkpoint()
-            pieces.append(_MappedPiece(self._position, high, sources, segment.kind))
+            pieces.append(_MappedPiece(self._position, high, sources, segment.kind, segment.parts))
             self._position = high
         return tuple(pieces)
 
@@ -361,6 +372,28 @@ def _replacement_sources(
     return tuple(ranges)
 
 
+def _replacement_parts(
+    pieces: tuple[_MappedPiece, ...], meter: _OperationMeter
+) -> tuple[ContentSourcePart, ...]:
+    if not pieces or any(not (piece.sources or piece.parts) for piece in pieces):
+        return ()
+    parts: dict[ContentSourcePart, None] = {}
+    contextual = any(piece.parts for piece in pieces)
+    for piece in pieces:
+        for part in piece.parts:
+            parts[part] = None
+            meter.record(sources=1)
+        if contextual:
+            for source in piece.sources:
+                parts[ContentSourcePart(source.message_index, source.part_index)] = None
+                meter.record(sources=1)
+        if len(parts) > MAX_TRANSFORM_MAPPING_SEGMENTS:
+            raise ValueError("content transform has too many source parts")
+        if meter._pending >= _LOOP_CHECK_INTERVAL:
+            raise_if_evaluation_expired()
+    return tuple(parts)
+
+
 def _append_kept_pieces(
     mapped: list[ProvenanceSegment],
     pieces: tuple[_MappedPiece, ...],
@@ -370,7 +403,9 @@ def _append_kept_pieces(
         length = piece.end - piece.start
         _append_segment(
             mapped,
-            ProvenanceSegment(output_at, output_at + length, piece.sources, piece.kind),
+            ProvenanceSegment(
+                output_at, output_at + length, piece.sources, piece.kind, piece.parts
+            ),
         )
         output_at += length
         if index % _LOOP_CHECK_INTERVAL == 0:
@@ -421,7 +456,7 @@ async def _casefold(
                 kind = "linear" if exact_linear and len(folded) == 1 else "whole"
                 _append_segment(
                     mapped,
-                    ProvenanceSegment(output, output + len(folded), sources, kind),
+                    ProvenanceSegment(output, output + len(folded), sources, kind, piece.parts),
                 )
                 pieces.append(folded)
                 output += len(folded)
@@ -464,6 +499,7 @@ async def _replace(
                     output_at + len(new),
                     _replacement_sources(matched_pieces, meter),
                     "whole",
+                    _replacement_parts(matched_pieces, meter),
                 ),
             )
             output_at += len(new)
@@ -555,6 +591,7 @@ async def _partition_text_units(
                 piece.end - start,
                 piece.sources,
                 piece.kind,
+                piece.parts,
             )
             for piece in pieces
         )

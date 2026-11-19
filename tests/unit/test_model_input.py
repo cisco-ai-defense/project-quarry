@@ -317,7 +317,7 @@ def test_mutating_the_input_after_a_scan_cannot_change_what_was_scored(v1_config
 
 # A version 1 function cannot read content that join() computes.
 _VERSION_2_ONLY = "content computed with join() is supported only in a version 2 model expression"
-_MAP_FORM = "a map comprehension is supported only as the first argument of join()"
+_MAP_FORM = "a map comprehension outside join() must produce message values"
 
 
 @pytest.mark.parametrize(
@@ -1598,7 +1598,7 @@ _SPAN_FILTER = (
         ),
         pytest.param(
             _SCORED.format(_NAMES),
-            "a map comprehension is supported only as the first argument of join()",
+            "a map comprehension outside join() must produce message values",
             id="map-comprehension-outside-join",
         ),
         pytest.param(

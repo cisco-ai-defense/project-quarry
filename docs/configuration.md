@@ -66,11 +66,96 @@ has no source position; a span that touches it is rejected instead of receiving 
 coordinates. Replacements map to the complete source range they replaced, deletions map no output,
 and unchanged characters retain exact message and content-part offsets.
 
-The registry supports at most 64 transforms, each with at most 16 operations. A rule may apply at
-most 16 transforms in one expression. Runtime work is capped at 1,000,000 input characters,
+The registry supports at most 64 transforms; an operation plan has at most 16 operations. A rule
+may apply at most 16 transforms in one expression. Operation-plan work is capped at 1,000,000 input characters,
 2,000,000 output characters, 8x expansion plus 4,096 inserted characters, 8,192 provenance
 segments, and 4,000,000 character-work units. `strip` uses Unicode whitespace rules; `casefold`
 processes each Unicode character deterministically and maps expansions back to that character.
+
+Named transforms can also use adapters registered by the host application:
+
+```yaml
+transforms:
+  upper:
+    adapter: uppercase
+    settings: {}
+    parts: [text]
+  extracted:
+    model: extractor
+    parts: [image_url]
+```
+
+The `adapter` form receives an immutable `LocalTransformConfig` containing bounded JSON
+`settings`. The `model` form names a configured model alias and passes its `InferenceModelConfig`
+to that model's adapter. These forms cannot be mixed with each other or with `operations`.
+The host registers adapter instances with `ModelInferenceBackend`; configuration never imports
+adapter code. An adapter declares `transform_parts` as a tuple of supported types (`text`,
+`image_url`, `input_audio`) and implements `transform(config, part, *, timeout=None)`:
+
+```python
+class Uppercase:
+    local = True
+    transform_parts = ("text",)
+
+    def transform(self, config, part, *, timeout=None):
+        return part["text"].upper()
+
+
+backend = ModelInferenceBackend(config, adapters={"uppercase": Uppercase()})
+```
+
+The method may be synchronous or asynchronous. Synchronous adapters must check deadlines during
+long work. A transform adapter must declare a boolean `local`: `True` for an `adapter` entry and
+`False` for a `model` entry. A mismatch fails while loading rules. Omitting `parts` selects every
+type the adapter declares; other parts pass through. Adapter capabilities may be a tuple or
+`frozenset`; configuration `parts` remains a list.
+Selected media parts become text parts in their original positions. Local work does not consume
+model-call budget. Model-backed work uses the configured alias's limiter, timeout, retry and
+model-call budget, sharing identical requests and validating results before cache admission.
+
+An adapter returns a string or `TransformResult(text, runs)`. Each immutable `TransformRun`
+contains an output `[start, end)` range, optional `source_start`/`source_end` character offsets,
+and `kind="linear"` or `"whole"`. Runs must cover the output in order, without gaps or overlap.
+Linear ranges have equal input/output lengths; whole ranges associate their output with the
+complete source range. A changed plain string reply maps to the entire input text. Media output
+has no input character offsets and instead reports its source message/content part. Results are
+bounded and validated before caching; malformed results are errors, not provider refusals.
+
+Prepared policies contain a configuration fingerprint rather than adapter settings. Reload them
+with the same transform registry and registered capabilities. Changed or missing definitions fail
+at load time. Model-backed transforms cannot run inside local map values, selection predicates,
+or conditional predicates.
+
+A local adapter can instead implement `transform_messages(config, wire_messages)`. This method
+receives the selected messages once and returns one wire message per input in the same order.
+The operation runs locally without caching, model-call charges or rate-limiter tickets. Do not
+set `parts` for a whole-message adapter. If both transform methods exist, `transform_messages`
+takes precedence.
+
+Each output must be the original wire value or a valid message holding the same flattened text.
+A changed message and its source must make no tool calls. For example, a host can reinterpret an
+assistant's plain text as a user turn:
+
+```python
+class AssistantTextAsUser:
+    local = True
+
+    def transform_messages(self, config, messages):
+        return [
+            {"role": "user", "content": message["content"]}
+            if message["role"] == "assistant"
+            and not message.get("tool_calls")
+            and isinstance(message.get("content"), str)
+            else message
+            for message in messages
+        ]
+```
+
+Role views and tool-result associations follow the rewritten value. Message indexes and character
+provenance still point to the source conversation. A changed non-text layout retains message-level
+context rather than inventing original content-part indexes. The current message-view contract
+requires repeated occurrences of one source message to receive the same rewrite; conflicting
+variants fail instead of overwriting an earlier occurrence.
 
 ## Model aliases
 
@@ -181,3 +266,10 @@ definitions after environment references expand. Each referenced environment var
 before inheritance fanout is charged. Templates are load-time configuration only; after
 resolution, models use the same strict validation and immutable runtime representation as fully
 written-out aliases.
+
+Prepared policies bind registered transforms to their complete reviewed definition. This layer
+uses compiler 11 and compiled-policy format 9; policies from earlier formats must be recompiled
+from their saved rule source. The format change records transform resource requirements.
+
+Adapter diagnostics omit host exception messages and arbitrary exception details. Known retry
+and refusal codes are retained so model accounting and recovery still apply.

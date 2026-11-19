@@ -42,10 +42,12 @@ from quarry.language.metadata import (
 from quarry.types.exceptions import ConversationValidationError, EvaluationError
 from quarry.types.results import Span
 from quarry.types.transforms import (
+    ContentSourcePart,
     ContentSourceRange,
     ProvenanceSegment,
     slice_provenance,
     source_mapping_for,
+    source_part_mapping_for,
     source_ranges_for,
 )
 
@@ -65,6 +67,56 @@ def messages_digest(digests: Iterable[bytes]) -> bytes:
     from quarry.cache.keys import combine_digests
 
     return combine_digests("messages", digests)
+
+
+def _checked_rewrite_json(value: object, maximum_depth: int) -> None:
+    """Bound adapter-owned JSON before equality, copying or message construction."""
+
+    stack = [(value, 0, False)]
+    active: set[int] = set()
+    nodes = characters = 0
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(item))
+            continue
+        nodes += 1
+        if nodes % 256 == 0:
+            _raise_if_combine_expired()
+        if nodes > 100_000 or depth > maximum_depth:
+            raise ValueError("message rewrite exceeds JSON graph limits")
+        if type(item) is str:
+            characters += len(item)
+            if characters > 2_000_000:
+                raise ValueError("message rewrite exceeds its text limit")
+        elif type(item) is int:
+            if item.bit_length() > 64:
+                raise ValueError("message rewrite integer exceeds JSON wire bounds")
+        elif item is None or type(item) is bool:
+            continue
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("message rewrite numbers must be finite")
+        elif type(item) in {dict, list}:
+            if id(item) in active:
+                raise ValueError("message rewrite contains a JSON cycle")
+            container = cast(dict | list, item)
+            if len(container) + len(stack) + nodes > 100_000:
+                raise ValueError("message rewrite exceeds JSON graph limits")
+            active.add(id(item))
+            stack.append((item, depth, True))
+            if type(item) is dict:
+                if 2 * len(container) + len(stack) + nodes > 100_000:
+                    raise ValueError("message rewrite exceeds JSON graph limits")
+                for key, child in cast(dict, item).items():
+                    if type(key) is not str:
+                        raise ValueError("rewritten message keys must be strings")
+                    stack.append((key, depth + 1, False))
+                    stack.append((child, depth + 1, False))
+            else:
+                stack.extend((child, depth + 1, False) for child in cast(list, item))
+        else:
+            raise ValueError("rewritten messages must contain only JSON values")
 
 
 class _FrozenDict(Mapping[str, Any]):
@@ -344,6 +396,8 @@ class Message(OpenAIObject):
     _segment: tuple[int, int] | None = PrivateAttr(default=None)
     _provenance: tuple[ProvenanceSegment, ...] | None = PrivateAttr(default=None)
     _synthetic_identity: object | None = PrivateAttr(default=None)
+    _rewrite_source: Message | None = PrivateAttr(default=None)
+    _rewrite_content_changed: bool = PrivateAttr(default=False)
 
     @property
     def digest(self) -> bytes:
@@ -507,6 +561,8 @@ class Message(OpenAIObject):
         self,
         replacements: Mapping[int | None, str],
         provenance: tuple[ProvenanceSegment, ...],
+        *,
+        replace_media: bool = False,
     ) -> Self:
         """Return an immutable content variant retaining role, index, and tool links."""
 
@@ -518,11 +574,14 @@ class Message(OpenAIObject):
             for part_index, part in enumerate(source):
                 if (
                     isinstance(part, Mapping)
-                    and part.get("type") == "text"
+                    and (part.get("type") == "text" or replace_media)
                     and part_index in replacements
                 ):
-                    updated = dict(part)
-                    updated["text"] = replacements[part_index]
+                    updated = (
+                        {**dict(part), "text": replacements[part_index]}
+                        if part.get("type") == "text"
+                        else {"type": "text", "text": replacements[part_index]}
+                    )
                     parts.append(updated)
                 else:
                     parts.append(part)
@@ -537,6 +596,13 @@ class Message(OpenAIObject):
         object.__setattr__(transformed, "_segment", None)
         object.__setattr__(transformed, "_provenance", provenance)
         return transformed
+
+    def _readable_for_rewrite(self) -> bool:
+        """Whether a whole-message adapter may inspect this message's wire value."""
+
+        return not isinstance(self, AssistantMessage) or all(
+            call._readable_for_rewrite() for call in self.tool_calls
+        )
 
     def contains(self, text: str, case_sensitive: bool = False) -> bool:
         """Return whether flattened text contains ``text``."""
@@ -618,6 +684,12 @@ class ToolCall(OpenAIObject):
     function: ToolCallFunction
 
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
+
+    def _readable_for_rewrite(self) -> bool:
+        """Whether a containing message may be handed to a whole-message adapter."""
+
+        return True
+
     _message_index: int = PrivateAttr(default=-1)
     _max_nesting_depth: int = PrivateAttr(default=100)
     _response: ToolMessage | None = PrivateAttr(default=None)
@@ -713,7 +785,7 @@ class ToolMessage(Message):
     """Canonical tool-result message linked to the call it answers."""
 
     role: Literal["tool"]  # ty: ignore[invalid-mutable-override]
-    source_content: str = Field(alias="content")
+    source_content: str | tuple[Any, ...] = Field(alias="content")
     tool_call_id: str
     DSL_FIELDS: ClassVar[frozenset[str]] = Message.DSL_FIELDS | {
         "tool_call_id",
@@ -761,9 +833,9 @@ class ToolMessage(Message):
 
     @property
     def result(self) -> str:
-        """Compatibility alias for tool-result content."""
+        """Compatibility alias for flattened tool-result text."""
 
-        return self.source_content
+        return self.content
 
 
 class ToolFunction(OpenAIObject):
@@ -1023,12 +1095,18 @@ def _variant_value_steps(
                 child = getattr(value, attribute)
                 fields.append((yield from _variant_value_steps(child, meter, active)))
             return (8, tuple(fields))
+        if isinstance(value, ContentSourcePart):
+            yield from _charge_combine_steps(meter, "variant_projection_visits", 2)
+            return (11, value.message_index, value.part_index)
         if isinstance(value, ProvenanceSegment):
             fields = []
             for attribute in ("start", "end", "sources", "kind"):
                 yield from _charge_combine_steps(meter, "variant_projection_visits")
                 child = getattr(value, attribute)
                 fields.append((yield from _variant_value_steps(child, meter, active)))
+            if value.parts:
+                yield from _charge_combine_steps(meter, "variant_projection_visits")
+                fields.append((yield from _variant_value_steps(value.parts, meter, active)))
             return (9, tuple(fields))
     finally:
         active.remove(identity)
@@ -1093,6 +1171,9 @@ def _message_variant_steps(
         yield from _charge_combine_steps(meter, "variant_projection_visits")
         value = getattr(message, attribute)
         fields.append((yield from _variant_value_steps(value, meter, active)))
+    if message._rewrite_content_changed:
+        yield from _charge_combine_steps(meter, "variant_projection_visits")
+        fields.append(("rewritten_content", True))
     yield from _charge_combine_steps(meter, "variant_projection_visits")
     fields.append(
         (
@@ -1203,6 +1284,7 @@ def _same_message_variant(left: Message, right: Message) -> bool:
         left.to_openai_dict() == right.to_openai_dict()
         and left._segment == right._segment
         and left._provenance == right._provenance
+        and left._rewrite_content_changed == right._rewrite_content_changed
         and _synthetic_key(left) == _synthetic_key(right)
     )
 
@@ -1636,6 +1718,153 @@ class Messages(Sequence[MessageType]):
         return view
 
     def _with_overrides(self, overrides: Mapping[int, MessageType]) -> Messages:
+        """Apply content variants with the same graph validation as the async path."""
+
+        steps = self._override_steps(overrides)
+        count = 0
+        _raise_if_combine_expired()
+        while True:
+            try:
+                next(steps)
+            except StopIteration as finished:
+                _raise_if_combine_expired()
+                return finished.value
+            count += 1
+            if count % 256 == 0:
+                _raise_if_combine_expired()
+
+    def rewritten(self, wires: Sequence[Mapping[str, Any]]) -> Messages:
+        """Return text-preserving message variants, retaining original indexes and provenance.
+
+        A changed entry and its source must make no tool calls. Reordered selections keep
+        their order. Conflicting rewrites of one repeated source ordinal are rejected by
+        the current canonical-view representation.
+        """
+
+        steps = self._rewrite_steps(wires)
+        while True:
+            try:
+                next(steps)
+            except StopIteration as finished:
+                return self if not finished.value else self._with_overrides(finished.value)
+            _raise_if_combine_expired()
+
+    async def _rewritten_async(
+        self, wires: Sequence[Mapping[str, Any]], *, positions: tuple[int, ...] | None = None
+    ) -> Messages:
+        steps = self._rewrite_steps(wires, positions=positions)
+        count = 0
+        while True:
+            try:
+                next(steps)
+            except StopIteration as finished:
+                return (
+                    self if not finished.value else await self._with_overrides_async(finished.value)
+                )
+            _raise_if_combine_expired()
+            count += 1
+            if count % 16 == 0:
+                await _yield_combine_cancellation()
+
+    def _rewrite_steps(
+        self, wires: Sequence[Mapping[str, Any]], *, positions: tuple[int, ...] | None = None
+    ) -> Generator[None, None, dict[int, MessageType]]:
+        """Validate one complete result before publishing any of its content variants."""
+
+        if type(wires) not in {list, tuple}:
+            raise ValueError("message rewrite must return a message list")
+        selected = tuple(range(len(self))) if positions is None else positions
+        if len(wires) != len(selected):
+            raise ValueError("message rewrite must return one message per input")
+        overrides: dict[int, MessageType] = {}
+        seen: dict[int, dict] = {}
+        calls = {call.id: call for call in self._root._all_calls if call._readable_for_rewrite()}
+        for position, wire in zip(selected, wires, strict=True):
+            yield
+            if type(wire) is not dict:
+                raise ValueError("rewritten messages must be JSON objects")
+            wire = cast(dict[str, Any], wire)
+            # Validate bounded JSON before equality or Pydantic sees adapter-owned objects.
+            _checked_rewrite_json(wire, self._root._max_nesting_depth)
+            original = self[position]
+            ordinal = self._ordinals[position]
+            if ordinal in seen and seen[ordinal] != wire:
+                raise ValueError("conflicting rewrites of a repeated source message")
+            original_wire = original.to_openai_dict()
+            if wire == original_wire:
+                seen[ordinal] = original_wire
+                continue
+            if wire.get("tool_calls") or (
+                isinstance(original, AssistantMessage) and original.tool_calls
+            ):
+                raise ValueError("a changed message and its source must make no tool calls")
+            role = wire.get("role")
+            probe: list[dict[str, Any]] = [wire]
+            if role == "tool":
+                # Validate the standalone message shape without requiring this view to
+                # include its call. Actual model dispatch still checks self-containment.
+                probe = [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "id": wire.get("tool_call_id"),
+                                "function": {"name": "rewrite_shape", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    wire,
+                ]
+            try:
+                parsed = Messages.from_openai(
+                    probe, max_nesting_depth=self._root._max_nesting_depth
+                )
+            except (ConversationValidationError, TypeError, ValueError) as exc:
+                raise ValueError("rewritten message is not valid OpenAI data") from exc
+            replacement = parsed[-1]
+            if isinstance(replacement, AssistantMessage) and replacement.tool_calls:
+                raise ValueError("a rewritten message must make no tool calls")
+            if replacement.content != original.content:
+                raise ValueError("a rewritten message must preserve its source text")
+            object.__setattr__(replacement, "_message_index", ordinal)
+            object.__setattr__(replacement, "_provenance", original._content_provenance())
+            object.__setattr__(replacement, "_synthetic_identity", original._synthetic_identity)
+            anchor = original._rewrite_source or self._root._items[ordinal]
+            object.__setattr__(replacement, "_rewrite_source", anchor)
+            object.__setattr__(
+                replacement,
+                "_rewrite_content_changed",
+                original._rewrite_content_changed
+                or replacement.source_content != original.source_content,
+            )
+            if isinstance(replacement, ToolMessage):
+                object.__setattr__(replacement, "_call", calls.get(replacement.tool_call_id))
+            overrides[ordinal] = replacement
+            seen[ordinal] = replacement.to_openai_dict()
+        return overrides
+
+    async def _with_overrides_async(self, overrides: Mapping[int, MessageType]) -> Messages:
+        """Apply view-local tool relinking with deadline and cancellation checkpoints."""
+
+        steps = self._override_steps(overrides)
+        count = 0
+        _raise_if_combine_expired()
+        while True:
+            try:
+                next(steps)
+            except StopIteration as finished:
+                _raise_if_combine_expired()
+                return finished.value
+            count += 1
+            if count % 256 == 0:
+                _raise_if_combine_expired()
+            if count % 2048 == 0:
+                await _yield_combine_cancellation()
+
+    def _override_steps(
+        self, overrides: Mapping[int, MessageType]
+    ) -> Generator[None, None, Messages]:
         """Return this view with content variants and a view-local linked tool graph."""
 
         if any(ordinal not in self._ordinal_set for ordinal in overrides):
@@ -1652,35 +1881,57 @@ class Messages(Sequence[MessageType]):
         call_sources: dict[str, ToolCall] = {}
         response_sources: dict[str, ToolMessage] = {}
         for message in selected.values():
+            yield
+            if not message._readable_for_rewrite():
+                continue
             if isinstance(message, AssistantMessage):
                 call_sources.update((call.id, call) for call in message.tool_calls)
             elif isinstance(message, ToolMessage):
                 response_sources[message.tool_call_id] = message
         for response in tuple(response_sources.values()):
+            yield
             if response._call is not None:
                 call_sources.setdefault(response.tool_call_id, response._call)
         for call in tuple(call_sources.values()):
-            if call._response is not None:
+            yield
+            selected_response = (
+                selected.get(call._response.message_index) if call._response is not None else None
+            )
+            if call._response is not None and (
+                selected_response is None
+                or (
+                    isinstance(selected_response, ToolMessage)
+                    and selected_response.tool_call_id == call.id
+                )
+            ):
                 response_sources.setdefault(call.id, call._response)
 
         call_clones: dict[str, ToolCall] = {}
         for call_id, call in call_sources.items():
+            yield
             clone = call.model_copy()
             object.__setattr__(clone, "_arguments_cache", None)
             object.__setattr__(clone, "_response", None)
             call_clones[call_id] = clone
         response_clones: dict[str, ToolMessage] = {}
         for call_id, response in response_sources.items():
+            yield
             clone = response.model_copy()
             object.__setattr__(clone, "_call", None)
             response_clones[call_id] = clone
         for call_id, call in call_clones.items():
+            yield
             response = response_clones.get(call_id)
             if response is not None:
                 object.__setattr__(call, "_response", response)
                 object.__setattr__(response, "_call", call)
 
         for ordinal, message in selected.items():
+            yield
+            if not message._readable_for_rewrite():
+                if ordinal in overrides:
+                    segments[ordinal] = message
+                continue
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 message = message.model_copy(
                     update={
@@ -1747,7 +1998,10 @@ class Messages(Sequence[MessageType]):
                     if (
                         mapped < 0
                         or mapped >= len(source_root._items)
-                        or type(source_root._items[mapped]) is not type(selected)
+                        or (
+                            type(source_root._items[mapped]) is not type(selected)
+                            and selected._rewrite_source is not source_root._items[mapped]
+                        )
                     ):
                         raise ValueError(
                             "source-backed message does not match its canonical source"
@@ -1787,13 +2041,18 @@ class Messages(Sequence[MessageType]):
                 if key is not None and piece is None:
                     piece = selected
                 if piece is not None:
-                    if key is not None and piece.message_index != mapped:
+                    remap_rewrite = (
+                        key is not None and piece._rewrite_source is part._root._items[ordinal]
+                    )
+                    if key is not None and (piece.message_index != mapped or remap_rewrite):
                         yield from _charge_combine_steps(
                             meter,
                             "message_clone_visits",
                         )
                         piece = piece.model_copy()
                         object.__setattr__(piece, "_message_index", mapped)
+                        if remap_rewrite:
+                            object.__setattr__(piece, "_rewrite_source", items[mapped])
                     mapped_segments[mapped] = piece
             specifications.append((part, tuple(mapped_ordinals), mapped_segments))
 
@@ -1816,16 +2075,17 @@ class Messages(Sequence[MessageType]):
         cls,
         parts: Sequence[Messages],
         metrics: _CombineMetrics,
+        *,
+        mapped: bool = False,
     ) -> Generator[None, None, Messages]:
         """Combine in bounded steps that sync and async callers checkpoint identically."""
 
         meter = _CombineMeter(metrics)
         if not isinstance(parts, Sequence) or isinstance(parts, str | bytes | bytearray):
             raise TypeError("parts must be a sequence of Messages values")
-        if len(parts) > _MAX_COMBINED_MESSAGE_PARTS:
-            raise ValueError(
-                f"cannot combine more than {_MAX_COMBINED_MESSAGE_PARTS} message selections"
-            )
+        part_limit = _MAX_COMBINED_MESSAGES if mapped else _MAX_COMBINED_MESSAGE_PARTS
+        if len(parts) > part_limit:
+            raise ValueError(f"cannot combine more than {part_limit} message selections")
         if any(not isinstance(part, Messages) for part in parts):
             raise TypeError("every combined value must be Messages")
         present = tuple(part for part in parts if part)
@@ -1956,7 +2216,7 @@ class Messages(Sequence[MessageType]):
                 for segment in message._provenance:
                     if meter.record("provenance_visits") and meter.checkpoint():
                         yield
-                    for source in segment.sources:
+                    for source in (*segment.sources, *segment.parts):
                         if meter.record("provenance_visits") and meter.checkpoint():
                             yield
                         synthetic_source = _synthetic_key(message) is not None
@@ -1974,17 +2234,21 @@ class Messages(Sequence[MessageType]):
                             )
             if isinstance(message, AssistantMessage):
                 canonical = root._items[ordinal]
-                if not isinstance(canonical, AssistantMessage):
+                rewritten = message._rewrite_source is canonical
+                if not isinstance(canonical, AssistantMessage) and not rewritten:
                     raise ValueError("combined tool-call variant does not match its source message")
+                canonical_calls = (
+                    canonical.tool_calls if isinstance(canonical, AssistantMessage) else ()
+                )
                 if message.tool_calls:
                     selected_assistants.setdefault(ordinal, message)
-                if len(message.tool_calls) != len(canonical.tool_calls):
+                if len(message.tool_calls) != len(canonical_calls):
                     raise ValueError(
                         "combined tool-call variant does not preserve its source tool identities"
                     )
                 for call, canonical_call in zip(
                     message.tool_calls,
-                    canonical.tool_calls,
+                    canonical_calls,
                     strict=True,
                 ):
                     if meter.record("selected_call_visits") and meter.checkpoint():
@@ -2026,7 +2290,10 @@ class Messages(Sequence[MessageType]):
                 if meter.record("canonical_lookups") and meter.checkpoint():
                     yield
                 unit = canonical_tools.get(call_id)
-                if unit is None or unit.response_ordinal != ordinal:
+                if unit is None or (
+                    unit.response_ordinal != ordinal
+                    and message._rewrite_source is not root._items[ordinal]
+                ):
                     raise ValueError(
                         "combined tool-result variant does not match its source tool identity"
                     )
@@ -2136,12 +2403,13 @@ class Messages(Sequence[MessageType]):
         parts: Sequence[Messages],
         *,
         _metrics: _CombineMetrics | None = None,
+        _mapped: bool = False,
     ) -> Messages:
         """Async evaluator path with the same work accounting plus cancellation yields."""
 
         _raise_if_combine_expired()
         metrics = _metrics or _CombineMetrics()
-        steps = cls._combine_steps(parts, metrics)
+        steps = cls._combine_steps(parts, metrics, mapped=_mapped)
         while True:
             try:
                 next(steps)
@@ -2185,6 +2453,16 @@ class Messages(Sequence[MessageType]):
         if not self._ordinals:
             raise ValueError("an empty message selection has no span")
         first, last = min(self._ordinals), max(self._ordinals)
+        part_contexts = {
+            ordinal: source_part_mapping_for(
+                self._message_at(ordinal)._content_provenance(),
+                0,
+                len(self._message_at(ordinal).content),
+            )[0]
+            for ordinal in dict.fromkeys(self._ordinals)
+            if self._message_at(ordinal)._provenance is not None
+            and self._message_at(ordinal).content
+        }
         first_piece = self._segments.get(first)
         last_piece = self._segments.get(last)
         first_ranges = (
@@ -2210,7 +2488,7 @@ class Messages(Sequence[MessageType]):
         )
         end = (
             len(self._message_at(last).content)
-            if _synthetic_key(self._message_at(last)) is not None
+            if _synthetic_key(self._message_at(last)) is not None or part_contexts.get(last)
             else max(source.message_end for source in last_ranges)
             if last_ranges
             else last_piece._range[1]
@@ -2218,9 +2496,11 @@ class Messages(Sequence[MessageType]):
             else len(self._root._items[last].content)
         )
         contains_constructed = any(
-            _synthetic_key(self._message_at(ordinal)) is not None for ordinal in self._ordinals
+            _synthetic_key(self._message_at(ordinal)) is not None or part_contexts.get(ordinal)
+            for ordinal in self._ordinals
         )
         mapped: list[ContentSourceRange] = []
+        mapped_seen: set[ContentSourceRange] = set()
         unmapped = False
         if contains_constructed:
             for ordinal in self._ordinals:
@@ -2235,7 +2515,10 @@ class Messages(Sequence[MessageType]):
                     check_deadline=_raise_if_combine_expired,
                 )
                 unmapped = unmapped or has_unmapped
-                mapped.extend(source for source in ranges if source not in mapped)
+                for source in ranges:
+                    if source not in mapped_seen:
+                        mapped_seen.add(source)
+                        mapped.append(source)
         return Span(
             first,
             start,
@@ -2243,6 +2526,11 @@ class Messages(Sequence[MessageType]):
             end_message_index=last,
             source_ranges=tuple(mapped),
             source_unmapped=unmapped,
+            source_parts=tuple(
+                dict.fromkeys(
+                    part for ordinal in self._ordinals for part in part_contexts.get(ordinal, ())
+                )
+            ),
         )
 
     def source_ranges(
@@ -2351,11 +2639,14 @@ class Messages(Sequence[MessageType]):
                 check_deadline=_raise_if_combine_expired,
             )
         synthetic = _synthetic_key(selected) is not None
-        if not synthetic and unmapped:
+        source_parts, context_known = source_part_mapping_for(
+            selected._content_provenance(), span.start, span.end
+        )
+        if not synthetic and unmapped and not context_known:
             raise ValueError("transformed range includes inserted text with no source position")
 
         start, end = span.start, span.end
-        if not synthetic and ranges:
+        if not synthetic and ranges and not unmapped:
             start = min(source.message_start for source in ranges)
             end = max(source.message_end for source in ranges)
         span = replace(
@@ -2366,6 +2657,7 @@ class Messages(Sequence[MessageType]):
             end=end,
             source_ranges=ranges if selected._provenance is not None or synthetic else (),
             source_unmapped=unmapped,
+            source_parts=source_parts,
             _view=selected,
             _view_start=span.start,
             _view_end=span.end,
@@ -2387,7 +2679,8 @@ class Messages(Sequence[MessageType]):
         message = self._root._items[span.message_index]
         bounds_message = (
             span._view
-            if isinstance(span._view, Message) and _synthetic_key(span._view) is not None
+            if isinstance(span._view, Message)
+            and (_synthetic_key(span._view) is not None or span.source_parts)
             else message
         )
         if require_bound and span._message is None:
@@ -2411,7 +2704,7 @@ class Messages(Sequence[MessageType]):
         """Keep messages of ``role`` in this value's current order."""
 
         return self._view_ordinals(
-            ordinal for ordinal in self._ordinals if self._root._items[ordinal].role == role
+            ordinal for ordinal in self._ordinals if self._message_at(ordinal).role == role
         )
 
     def _select_positions(self, positions: Iterable[int]) -> Messages:
@@ -2768,6 +3061,14 @@ class Messages(Sequence[MessageType]):
         """Append one validated synthetic message with private scan-local identity."""
 
         return self._add_synthetic_messages(((role, content, identity, provenance),))
+
+    def _empty_constructor_context(self) -> Messages:
+        """Keep source provenance for constructed text without copying source indices."""
+
+        root = Messages()
+        object.__setattr__(root, "_source_root", self._root._source_root)
+        object.__setattr__(root, "_max_nesting_depth", self._root._max_nesting_depth)
+        return root
 
     def _add_synthetic_messages(
         self,

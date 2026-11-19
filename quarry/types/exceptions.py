@@ -124,6 +124,13 @@ class EvaluationError(QuarryError):
     """Raised when rule evaluation fails."""
 
 
+class InvalidInputError(EvaluationError):
+    """A rule read a value whose decoded form cannot be evaluated safely."""
+
+    def __init__(self, message: str, details: dict | None = None):
+        super().__init__(message, {**(details or {}), "code": "invalid_input"})
+
+
 class IncompleteScanError(EvaluationError):
     """Raised when a public guard cannot return an authoritative scan decision.
 

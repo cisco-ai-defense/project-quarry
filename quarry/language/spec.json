@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-10",
+  "compiler_version": "compiler-11",
   "examples": [
     {
       "checks": [],
@@ -231,6 +231,24 @@
       "id": "example:message-composition",
       "requires_backend": true,
       "rule_path": "examples/message-composition.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/message-map.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/message-map.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:map-comprehension"
+      ],
+      "id": "example:message-map",
+      "requires_backend": true,
+      "rule_path": "examples/message-map.rule"
     },
     {
       "checks": [
@@ -740,7 +758,7 @@
       "allowed_uses": [],
       "compiler_tags": [],
       "deprecated": false,
-      "description": "Apply one reviewed configured transform to message text.\n\nThe result keeps message roles, tool links, and source provenance. Transforms may be\nchained, filtered, sliced, composed, or passed directly to a model operation.",
+      "description": "Apply one configured transform to message content.\n\nThe result keeps message roles, tool links, and source provenance. Transforms may be\nchained, filtered, sliced, composed, or passed directly to a model operation.\nLocal adapters run without model-call charges; model-backed adapters use their\nconfigured alias's call budget. Media-derived text keeps part-only source context.\nA local whole-message adapter may instead rewrite fields while preserving text.",
       "id": "compiler_form:messages.transform",
       "implicit_receiver_count": 1,
       "kind": "compiler_form",
@@ -766,7 +784,7 @@
       "return_type": "model_input",
       "signature": "messages.transform(name: string) -> model_input",
       "source": "quarry.engine.compiler._Compiler._bind_content_transform",
-      "summary": "Apply one reviewed configured transform to message text.",
+      "summary": "Apply one configured transform to message content.",
       "syntax": "messages.transform(\"name\")"
     },
     {
@@ -1411,7 +1429,7 @@
       "name": "filter-comprehension",
       "source": "quarry.dsl.transformer.DSLTransformer.filter_comp",
       "summary": "Keep collection items that satisfy a condition.",
-      "syntax": "filter_comp: \"[\" IDENTIFIER \"for\" IDENTIFIER \"in\" or_expr \"if\" or_expr \"]\""
+      "syntax": "filter_comp: \"[\" IDENTIFIER \"for\" IDENTIFIER \"in\" or_expr [\"if\" or_expr] \"]\""
     },
     {
       "description": "Match when the left event occurs sometime after the right event.",
@@ -1534,13 +1552,13 @@
       "syntax": "comparison: in_expr \"<=\" in_expr"
     },
     {
-      "description": "Project each selected item for use as the first argument of `join()`.\n\nThe map is supported in `message()` content of a version 2 model input.\nIts value and optional filter cannot call a model.",
+      "description": "Project selected items into messages or text values in written order.\n\nA message-valued map can be used as typed model input. A text-valued map is\nsupported as the first argument of `join()` in `message()` content.\nThe projection and optional filter cannot call a model. Message maps keep\nsource provenance, flatten each projected message sequence in order, and\napply `max_comprehension_size` to both source and output. Structural limits\nalways cap each map at 10,000 source/output items and 2,000,000 output text\ncharacters; the existing constructed-message limits also apply.",
       "handler": "map_comp",
       "id": "construct:map-comprehension",
       "kind": "construct",
       "name": "map-comprehension",
       "source": "quarry.dsl.transformer.DSLTransformer.map_comp",
-      "summary": "Project each selected item for use as the first argument of `join()`.",
+      "summary": "Project selected items into messages or text values in written order.",
       "syntax": "map_comp: \"[\" expr \"for\" IDENTIFIER \"in\" or_expr \"]\" | \"[\" expr \"for\" IDENTIFIER \"in\" or_expr \"if\" or_expr \"]\""
     },
     {
