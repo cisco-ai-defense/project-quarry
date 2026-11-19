@@ -15,8 +15,17 @@ import pytest
 from quarry import DSLScanner, compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
 from quarry.engine.atoms import ModelExpression as E
-from quarry.integrations.model_expression import _BoundMessage, _span_source_texts
+from quarry.integrations.content_transforms import apply_content_transform
+from quarry.integrations.model_expression import (
+    _BoundMessage,
+    _cover_index,
+    _is_covered,
+    _span_source_texts,
+    _view_spans,
+)
 from quarry.types.messages import Messages
+from quarry.types.results import Span
+from quarry.types.transforms import ContentTransform, TransformOperation
 
 STRATEGIES = ["direct", "compiled", "reloaded"]
 EXPLAINS = [False, True, "support"]
@@ -140,6 +149,20 @@ def test_canonical_content_sources_keep_their_existing_verdict(text, strategy, e
         explain,
     )
     assert result.is_complete and result.rule_matches == ["Read"]
+
+
+@pytest.mark.asyncio
+async def test_transformed_selection_spans_map_into_the_same_source_coordinates():
+    transcript = Messages.from_openai([{"role": "user", "content": " prefix "}])
+    transformed = await apply_content_transform(
+        transcript, ContentTransform((TransformOperation("strip"),))
+    )
+
+    outer = _view_spans(transcript, transformed).items[0].value
+    inner = transformed._bind_span(Span(0, 0, len(transformed[0].content)))
+
+    assert (outer.start, outer.end) == (1, 7)
+    assert _is_covered(_cover_index([outer]), inner)
 
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
