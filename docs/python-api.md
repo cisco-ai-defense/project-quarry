@@ -76,6 +76,10 @@ Telemetry is diagnostic and never changes a verdict or completion state.
 Window token encoding and token-count requests use `input_tokens`; a window classifier batch
 uses one `classify` attempt per adapter invocation, regardless of the number of windows.
 Model-backed transforms use `complete`; local transforms and span decoders add no attempts.
+Payload preparation consumes the logical model or rule deadline. If preparation exhausts
+that budget, the adapter is not invoked and no physical attempt is charged. Otherwise the
+adapter receives only the time still remaining after preparation.
+An expired requesting rule retains its `QuarryTimeoutError` when shared work reports a timeout.
 
 When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
 `error.result`) carries the safe partial timing and model-usage snapshot recorded before the

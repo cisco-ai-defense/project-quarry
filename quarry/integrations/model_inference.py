@@ -2677,10 +2677,15 @@ class ModelInferenceBackend:
                         timeout=provider_timeout,
                     )
             except TimeoutError as exc:
+                raise_if_evaluation_expired()
                 raise ModelUsage._timeout_error(
                     model_id, retry_history.last_failure, retry_history.failed_attempts
                 ) from exc
             except LLMError as exc:
+                if exc.details.get("code") == "timeout":
+                    # Shared requests have their own provider budget. The waiting
+                    # caller still owns any earlier rule or scan deadline.
+                    raise_if_evaluation_expired()
                 # A request another alias started fails under that alias's name; report it
                 # under this caller's.
                 other = exc.details.get("model")

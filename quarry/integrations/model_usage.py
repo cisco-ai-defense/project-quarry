@@ -284,6 +284,17 @@ class ModelUsage:
                     attempt = attempt_factory()
                 except Exception as error:
                     return ModelPreparationFailure(error)
+                # A synchronous payload factory can use the budget without yielding to
+                # the timeout task. Check again before charging or starting the adapter.
+                if deadline is not None:
+                    history = retry_history if retry_history is not None else ModelRetryHistory()
+                    remaining = self._remaining(
+                        deadline,
+                        budget_alias or model,
+                        evaluation_timeout_message,
+                        history.last_failure,
+                        history.failed_attempts,
+                    )
             if budget is not None:
                 budget.consume(budget_alias or model, operation_name)
             return await attempt(remaining)
