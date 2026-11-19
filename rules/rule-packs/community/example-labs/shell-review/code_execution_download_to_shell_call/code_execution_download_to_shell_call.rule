@@ -1,0 +1,18 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+rule "community/example-labs/shell-review/code_execution_download_to_shell_call"
+metadata:
+    title = "Download-to-shell command submitted to a shell tool"
+    description = "Synthetic community example: a known shell tool receives a curl/wget pipeline to sh/bash in its command argument. This flags a command submission, not successful execution or proof that the action was unauthorized."
+    author = "Project Quarry contributors (synthetic publisher example)"
+    version = "0.1.0"
+    status = "experimental"
+    requires_quarry = ">=0.1.0,<0.2.0"
+    threat_type = "code_execution"
+    signal_channel = "tool_calls"
+strings:
+    $download_shell = "(?i)\b(curl|wget)\b[^\r\n|]*\|[ \t]*(sh|bash)\b" regex
+condition:
+    any call in tool_calls where
+        (call.name == "execute_shell" or call.name == "run_shell" or call.name == "shell") and
+        $download_shell in call.arguments.command

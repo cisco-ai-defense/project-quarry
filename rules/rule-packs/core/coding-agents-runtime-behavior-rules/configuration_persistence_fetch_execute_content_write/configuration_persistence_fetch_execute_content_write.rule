@@ -1,0 +1,20 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+rule "core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write"
+metadata:
+    title = "Download-to-shell text written to agent configuration"
+    description = "Review lead: write_file/create_file saves AGENTS.md or .claude/settings.json containing a curl/wget-to-shell pattern. This does not establish execution, persistence success, or lack of user approval."
+    author = "Project Quarry contributors"
+    version = "0.1.0"
+    status = "experimental"
+    requires_quarry = ">=0.1.0,<0.2.0"
+    threat_type = "configuration_persistence"
+    signal_channel = "tool_calls"
+strings:
+    $config_path = "(^|[\\/])(AGENTS\.md|\.claude[\\/]settings\.json)$" regex
+    $download_shell = "(?i)\b(curl|wget)\b[^\r\n|]*\|[ \t]*(sh|bash)\b" regex
+condition:
+    any call in tool_calls where
+        (call.name == "write_file" or call.name == "create_file") and
+        $config_path in call.arguments.path and
+        $download_shell in call.arguments.content

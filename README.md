@@ -71,7 +71,7 @@ A `.rule` file contains one named rule. Quarry parses, validates, links, and com
 ```text
 rule "Suspicious request"
 metadata:
-    severity = "medium"
+    description = "Match requests to reveal a secret or override policy"
 strings:
     $blocked = ["reveal a secret", "ignore the policy"] nocase
 variables:
@@ -120,6 +120,7 @@ for match in matches:
 - [Agent plugin](docs/PLUGIN.md) for Codex, Claude Code, and MCP hosts
 - [Architecture](docs/architecture.md) and [testing](docs/testing.md)
 - [Synthetic examples](examples/README.md)
+- [Detection rule packs](rules/README.md) and [community contributions](rules/rules-contribution-guidelines.md)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to work on Quarry. Report security issues through [SECURITY.md](SECURITY.md). Keep conversation data and credentials out of public issues.
 

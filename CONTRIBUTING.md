@@ -27,6 +27,21 @@ cannot turn a correct verdict into a timeout. Deadline tests should configure a 
 explicitly, use controlled delayed work, and assert the resulting status or work stopped.
 Avoid narrow elapsed-time assertions in required CI tests; measure throughput separately.
 
+## Detection Rule Contributions
+
+See the [rule-pack workflow](rules/README.md) and
+[rule contribution guidelines](rules/rules-contribution-guidelines.md) for rule
+layout, metadata, synthetic cases, and review requirements. Check existing core
+and community rules before adding overlapping coverage. Anyone may improve an
+existing rule; preserve original attribution and add contributor credit.
+
+From the repository root, run `uv run --frozen python rules/validate.py` to validate the corpus. Include
+the validation report and distinguish evaluated cases from compile-only rules
+and unevaluated cases. Repository maintainers review all rule changes.
+The [automated rule-pack checks](rules/rules-contribution-guidelines.md#automated-checks)
+cover every core and community pack on pull requests; detection quality and
+redundancy still require maintainer review.
+
 ## Other Ways to Contribute
 
 We welcome anyone that wants to contribute to Project Quarry to triage and reply to open issues to help troubleshoot and fix existing bugs. Here is what you can do:

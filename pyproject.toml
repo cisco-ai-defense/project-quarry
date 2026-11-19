@@ -106,6 +106,7 @@ include = [
     "/SUPPORT.md",
     "/docs",
     "/examples",
+    "/rules",
     "/hooks",
     "/skills",
     "/.agents/plugins",

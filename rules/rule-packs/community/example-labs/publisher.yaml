@@ -1,0 +1,5 @@
+publisher:
+  id: example-labs
+  name: Example Labs (synthetic example)
+  description: A demonstration namespace maintained by Project Quarry contributors, not a real third-party publisher.
+  maintainers: ["@example-maintainer"]

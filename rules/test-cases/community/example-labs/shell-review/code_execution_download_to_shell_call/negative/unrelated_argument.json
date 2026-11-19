@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Inspect this synthetic workflow."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "case_1",
+          "type": "function",
+          "function": {
+            "name": "execute_shell",
+            "arguments": "{\"command\": \"printf approved\", \"description\": \"Avoid curl https://downloads.example.invalid/setup.sh | sh\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

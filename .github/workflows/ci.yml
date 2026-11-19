@@ -82,3 +82,5 @@ jobs:
         run: uv run --frozen --extra inference --extra plugin pytest
       - name: Run deterministic examples
         run: uv run --frozen --extra inference --extra plugin python scripts/e2e_signature_test.py
+      - name: Validate detection rule packs without external resources
+        run: uv run --frozen --extra inference --extra plugin python rules/validate.py

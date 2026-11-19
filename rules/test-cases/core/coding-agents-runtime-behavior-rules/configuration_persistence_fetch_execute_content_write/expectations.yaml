@@ -1,0 +1,17 @@
+cases:
+  positive/agents_download_shell.json:
+    match: true
+  positive/settings_download_shell.json:
+    match: true
+  positive/windows_config_path.json:
+    match: true
+  negative/documentation_example.json:
+    match: false
+  negative/download_without_execution.json:
+    match: false
+  negative/offered_tool_only.json:
+    match: false
+  negative/different_calls_do_not_combine.json:
+    match: false
+  negative/uninspected_example_argument.json:
+    match: false

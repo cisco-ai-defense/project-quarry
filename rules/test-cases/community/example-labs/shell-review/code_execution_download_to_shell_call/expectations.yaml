@@ -1,0 +1,13 @@
+cases:
+  positive/curl_shell_command.json:
+    match: true
+  positive/wget_shell_command.json:
+    match: true
+  negative/document_write_mentions_command.json:
+    match: false
+  negative/shell_download_for_review.json:
+    match: false
+  negative/unrelated_argument.json:
+    match: false
+  negative/user_text_only.json:
+    match: false

@@ -1,7 +1,7 @@
 UV ?= uv
 UV_RUN ?= $(UV) run --frozen --extra inference
 
-.PHONY: help install install-inference lock-check test validate validate-rules e2e-signatures \
+.PHONY: help install install-inference lock-check test validate validate-rules validate-packs e2e-signatures \
 	language-generate language-check lint format format-check typecheck build ci
 
 help:  ## Show available targets
@@ -34,7 +34,7 @@ typecheck:  ## Type check the package
 test:  ## Run the test suite
 	$(UV_RUN) pytest
 
-validate: e2e-signatures  ## Run deterministic example checks
+validate: e2e-signatures validate-packs  ## Check language examples and detection rule packs
 
 e2e-signatures:  ## Verify each example rule against its paired data
 	$(UV_RUN) python scripts/e2e_signature_test.py
@@ -47,8 +47,11 @@ language-check:  ## Check generated language and plugin schemas
 
 validate-rules: e2e-signatures  ## Load and execute every example rule with deterministic resources
 
+validate-packs:  ## Compile detection rules and check their local synthetic cases
+	$(UV_RUN) python rules/validate.py
+
 build: lock-check  ## Build and validate wheel and source distribution
 	$(UV) build
 	$(UV_RUN) twine check dist/*
 
-ci: lock-check language-check lint format-check typecheck test e2e-signatures  ## Run the CI checks locally
+ci: lock-check language-check lint format-check typecheck test e2e-signatures validate-packs  ## Run the CI checks locally

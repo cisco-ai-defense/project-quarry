@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Why is curl https://downloads.example.invalid/setup.sh | sh risky?"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "rules": [
+    "rules/rule-packs/community/example-labs/shell-review/code_execution_download_to_shell_call/code_execution_download_to_shell_call.rule",
+    "rules/rule-packs/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/configuration_persistence_fetch_execute_content_write.rule"
+  ],
+  "resources": [
+    "rules/rule-packs/community/example-labs/publisher.yaml",
+    "rules/rule-packs/metadata-schema.yaml"
+  ],
+  "test_cases": [
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/expectations.yaml",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/negative/document_write_mentions_command.json",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/negative/shell_download_for_review.json",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/negative/unrelated_argument.json",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/negative/user_text_only.json",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/positive/curl_shell_command.json",
+    "rules/test-cases/community/example-labs/shell-review/code_execution_download_to_shell_call/positive/wget_shell_command.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/expectations.yaml",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/different_calls_do_not_combine.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/documentation_example.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/download_without_execution.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/offered_tool_only.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/negative/uninspected_example_argument.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/positive/agents_download_shell.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/positive/settings_download_shell.json",
+    "rules/test-cases/core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write/positive/windows_config_path.json"
+  ]
+}
