@@ -25,10 +25,12 @@ from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import TypeAdapter
 
 from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
-from quarry.decision_report import telemetry_record
+from quarry.decision_report import decision_scores, telemetry_record
+from quarry.plugin.contracts import DecisionFlowResponse
 from quarry.plugin.server import mcp
 from quarry.plugin.service import QuarryPlugin
 from quarry.types.exceptions import LLMError
@@ -196,6 +198,17 @@ def _whole(conversation: dict, first: int, last: int) -> dict:
     }
 
 
+def test_decision_scores_preserve_repeated_step_ids() -> None:
+    path = {
+        "path": [
+            {"node": "t:score", "score": {"value": 0.2}},
+            {"node": "t:score~1", "score": {"value": 0.8}},
+        ]
+    }
+
+    assert decision_scores(path) == {"t:score": 0.2, "t:score~1": 0.8}
+
+
 @pytest.mark.asyncio
 async def test_scan_returns_each_conversations_path_through_the_compiled_tree(plugin):
     plugin, judge = plugin
@@ -220,7 +233,12 @@ async def test_scan_returns_each_conversations_path_through_the_compiled_tree(pl
     ]
     samples = [int(digest[:16], 16) / 2**64 for digest in hashes]
     rate = sorted(samples)[2]  # explores the two lowest-sampled conversations
-    result = await plugin.scan(rule_text=rule, conversations=batch, explore_rate=rate)
+    result = await plugin.scan(
+        rule_text=rule,
+        conversations=batch,
+        explore_rate=rate,
+        verbosity="full",
+    )
     fiction, benign, no_story, long_tool = result["results"]
 
     assert [item["matched"] for item in result["results"]] == [True, False, False, True]
@@ -442,7 +460,12 @@ condition:
     assert tree["nodes"][score_id]["score_form"]["threshold"] == {"parameter": "cut"}
 
     batch = [FICTION, BENIGN_STORY, NO_STORY, LONG_TOOL]
-    result = await plugin.scan(rule_text=rule, conversations=batch, parameters={"cut": 0.6})
+    result = await plugin.scan(
+        rule_text=rule,
+        conversations=batch,
+        parameters={"cut": 0.6},
+        verbosity="full",
+    )
     paths = [item["decision_path"] for item in result["results"]]
     # Every path names its tree and records the size it compared, true or false.
     assert all(path["tree_sha256"] == tree["tree_sha256"] for path in paths)
@@ -490,10 +513,14 @@ condition:
     ).structured_content
     assert counted["leaves"]["error"] == {"all": 1}
 
-    # Paths map onto one tree only; a threshold must name a score or number node.
-    other = [{**paths[0], "tree_sha256": "0" * 64}]
-    with pytest.raises(ToolError, match="walked tree"):
-        await mcp.call_tool("quarry_decision_flows", {"tree": tree, "paths": other})
+    # A path that claims this tree must still follow its edges; a threshold must name a
+    # score or number node.
+    impossible = {
+        **paths[0],
+        "path": [{**paths[0]["path"][0], "node": "t:missing"}, *paths[0]["path"][1:]],
+    }
+    with pytest.raises(ToolError, match="does not follow"):
+        await mcp.call_tool("quarry_decision_flows", {"tree": tree, "paths": [impossible]})
     with pytest.raises(ToolError, match="name no score or number node"):
         await flows(thresholds={"missing": 1})
     # A tree must be the one its hash names, and a walk cannot loop.
@@ -512,6 +539,73 @@ condition:
     looped = [{**paths[0], "tree_sha256": looping["tree_sha256"]}]
     with pytest.raises(ToolError, match="edges loop"):
         await mcp.call_tool("quarry_decision_flows", {"tree": looping, "paths": looped})
+
+
+@pytest.mark.asyncio
+async def test_flows_count_a_returned_path_from_an_earlier_rule_tree() -> None:
+    plugin = QuarryPlugin()
+    conversation = {
+        "messages": [
+            {"role": "user", "content": "first synthetic turn"},
+            {"role": "assistant", "content": "second synthetic turn"},
+        ]
+    }
+
+    async def artifacts(minimum: int) -> tuple[dict, dict]:
+        rule = f'rule "Message volume"\ncondition:\n    len(messages) > {minimum}\n'
+        (tree,) = plugin.decision_tree(rule_text=rule)["decision_tree"].values()
+        result = await plugin.scan(rule_text=rule, conversation=conversation, explain=False)
+        return tree, result["decision_path"]
+
+    current_tree, current_path = await artifacts(1)
+    _, earlier_path = await artifacts(2)
+    assert current_path["tree_sha256"] != earlier_path["tree_sha256"]
+
+    counted = (
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {
+                "tree": current_tree,
+                "paths": [earlier_path, current_path],
+                "labels": ["baseline", "current"],
+            },
+        )
+    ).structured_content
+
+    root = current_tree["root"]
+    assert counted["unmapped_paths"] == {"baseline": 1}
+    assert counted["steps"] == {
+        root: {"true": {"current": 1}, "false": {}},
+    }
+    assert counted["leaves"] == {
+        "match": {"current": 1},
+        "no_match": {},
+        "unknown": {},
+        "error": {},
+    }
+    assert TypeAdapter(DecisionFlowResponse).validate_python(counted) == counted
+
+    malformed = dict(earlier_path)
+    del malformed["conversation_sha256"]
+    with pytest.raises(ToolError, match="not a valid decision path"):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {"tree": current_tree, "paths": [malformed]},
+        )
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {"tree": current_tree, "paths": []},
+        )
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "quarry_decision_flows",
+            {
+                "tree": current_tree,
+                "paths": [current_path],
+                "labels": ["x" * 201],
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -558,7 +652,11 @@ condition:
     assert score["kind"] == "score"
     assert score["score_form"] == {"quantifier": "none", "operator": "=", "threshold": 1.0}
 
-    result = await plugin.scan(rule_text=rule, conversations=[FICTION, BENIGN_STORY])
+    result = await plugin.scan(
+        rule_text=rule,
+        conversations=[FICTION, BENIGN_STORY],
+        verbosity="full",
+    )
     recorded = [item["decision_path"]["path"][1] for item in result["results"]]
     assert [(entry["outcome"], entry["score"]["value"]) for entry in recorded] == [
         (True, 1.0),
@@ -584,7 +682,11 @@ condition:
     and {comparison}
 """
 
-    result = await plugin.scan(rule_text=rule, conversations=[FICTION])
+    result = await plugin.scan(
+        rule_text=rule,
+        conversations=[FICTION],
+        verbosity="full",
+    )
 
     (item,) = result["results"]
     score = item["decision_path"]["path"][1]["score"]
