@@ -1363,6 +1363,19 @@ class DSLScanner:
                 self.limits,
                 {section: reason for section, reason in input_faults.items() if section in read},
             )
+            max_timeline_items = self.limits.max_timeline_items
+            timeline_item_count = len(context.timeline) + sum(
+                len(items) for items in prepared.lists.values()
+            )
+            if (
+                self.limits.enforce_limits
+                and max_timeline_items > 0
+                and timeline_item_count > max_timeline_items
+            ):
+                raise ConversationValidationError(
+                    f"scan produces {timeline_item_count} timeline items; limit is "
+                    f"{max_timeline_items}"
+                )
             missing_event_surfaces = {
                 section
                 for section in self.input_registry.event_surfaces
