@@ -15,10 +15,14 @@ from quarry.config import QuarryConfig
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.read_usage import model_read_usage, read_usage_scope
 from quarry.safety.limits import SafetyLimits
+from quarry.types.adapter_transforms import TransformCacheIdentity
 from tests.unit.model_fakes import ModelAdapter, NoWaitLimiter, model_entry, passthrough_builder
+from tests.unit.test_adapter_transform_dsl import configured
 
 DATA = {"messages": [{"role": "user", "content": "alice@example.com"}]}
 OPERATIONS = [
+    ("model_score_messages", 'llm_score("reader", "policy", conversation()) > 0.5'),
+    ("model_input_tokens_messages", 'llm_input_tokens("reader", conversation()) > 0'),
     ("model_score_messages", 'model("reader").score(messages, "policy") > 0.5'),
     ("model_classify_messages", 'model("reader").classify(messages) > 0.5'),
     ("model_complete", 'model("reader").complete(messages).content == "safe"'),
@@ -144,3 +148,85 @@ async def test_transferred_handoff_stays_single_use_and_owned(tmp_path, delegati
             "Read": 1,
             "Other": 1,
         }
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "method"),
+    [
+        (kind, method)
+        for kind in ["local", "versioned", "model", "model-batch"]
+        for method in [
+            "transform_unit",
+            "transform_message_unit",
+            "transform_parts",
+            "transform_cache_identity",
+        ]
+    ]
+    + [(kind, "transform_units") for kind in ["versioned", "model-batch"]],
+)
+async def test_delegating_transform_hooks_keep_host_and_read_provenance(
+    tmp_path, restored, kind, method
+):
+    host = (threading.get_ident(), asyncio.get_running_loop())
+    seen = []
+
+    class Batched(ModelInferenceBackend):
+        def transform_cache_identity(self, name):
+            return TransformCacheIdentity("synthetic.host-handoff.batch", "1")
+
+    base = Batched if kind == "model-batch" else ModelInferenceBackend
+
+    class Delegating(base):
+        pass
+
+    async def delegate(self, *args, **kwargs):
+        seen.append((threading.get_ident(), asyncio.get_running_loop()))
+        return await getattr(super(Delegating, self), method)(*args, **kwargs)
+
+    def sync_delegate(self, *args, **kwargs):
+        seen.append((threading.get_ident(), asyncio.get_running_loop()))
+        return getattr(super(Delegating, self), method)(*args, **kwargs)
+
+    setattr(
+        Delegating,
+        method,
+        sync_delegate if method in {"transform_parts", "transform_cache_identity"} else delegate,
+    )
+    results = []
+    for wrapped in [False, True]:
+        result_cache.clear()
+        config, _, adapter = configured(tmp_path, model=kind.startswith("model"))
+        config = replace(config, safety_limits=SafetyLimits(rule_timeout=None))
+        if kind == "versioned":
+            adapter.transform_cache = TransformCacheIdentity("synthetic.host-handoff", "1")
+        service = (Delegating if wrapped else base)(
+            config, adapters={"fake": adapter}, rate_limiter=NoWaitLimiter()
+        )
+        scanner = compile_policy(
+            'rule "Read" condition: model("judge").classify(messages.transform("convert")) > 0.5',
+            runtime_config=config,
+            model_inference_backend=service,
+        )
+        if restored:
+            scanner = load_compiled_policy(
+                scanner.to_bytes(), runtime_config=config, model_inference_backend=service
+            )
+        result = await scanner.scan_async(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "same"},
+                            {"type": "text", "text": "next"},
+                        ],
+                    }
+                ]
+            },
+            logical_reads=True,
+        )
+        assert result.is_complete and result.rule_matches == ["Read"], result.evaluation_errors
+        results.append(result)
+    assert seen and all(value == host for value in seen)
+    assert results[1].logical_reads == results[0].logical_reads

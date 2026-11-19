@@ -55,6 +55,7 @@ from quarry.integrations.adapter_transforms import (
     transform_error,
     transform_unit_snapshot,
 )
+from quarry.integrations.host_dispatch import call_backend, call_backend_sync
 from quarry.integrations.message_ranges import (
     MessageRangeIndex,
     RangeBudget,
@@ -2290,7 +2291,7 @@ class ModelInferenceBackend:
                 MAX_TRANSFORM_OUTPUT_CHARACTERS,
             )
 
-            shared = self.transform_cache_identity(name) is not None
+            shared = (await call_backend_sync(self.transform_cache_identity, name)) is not None
             if type(units) not in (list, tuple) or len(units) > TRANSFORM_BATCH_SIZE:
                 raise transform_error(
                     name, "invalid_input", "transform batch exceeds its part limit"
@@ -2313,9 +2314,9 @@ class ModelInferenceBackend:
                 call = self.transform_message_unit if _message_value else self.transform_unit
                 with transform_part_read(self, name, unit, batch_index=index):
                     result = (
-                        await call(name, unit)
+                        await call_backend(call, name, unit)
                         if timeout is None
-                        else await call(name, unit, timeout=timeout)
+                        else await call_backend(call, name, unit, timeout=timeout)
                     )
                 result = read_transform(keep_transform(result, unit, name), unit)
                 output += len(result.text)
@@ -2413,8 +2414,8 @@ class ModelInferenceBackend:
             try:
                 with transform_part_read(self, name, unit):
                     if timeout is None:
-                        return await self.transform_unit(name, unit)
-                    return await self.transform_unit(name, unit, timeout=timeout)
+                        return await call_backend(self.transform_unit, name, unit)
+                    return await call_backend(self.transform_unit, name, unit, timeout=timeout)
             finally:
                 _MESSAGE_TRANSFORM_PART.reset(token)
 
@@ -2964,7 +2965,8 @@ class ModelInferenceBackend:
             conversation = _as_conversation(conversation)
             if self.config.config_version == 2:
                 with handoff_model_read():
-                    return await self.model_score_messages(
+                    return await call_backend(
+                        self.model_score_messages,
                         model_id,
                         constitution,
                         conversation.messages,
@@ -4160,7 +4162,8 @@ class ModelInferenceBackend:
         with model_read(model_id, "input_tokens", adopt=True):
             conversation = _as_conversation(conversation)
             with handoff_model_read():
-                return await self.model_input_tokens_messages(
+                return await call_backend(
+                    self.model_input_tokens_messages,
                     model_id,
                     conversation.messages,
                     conversation.tools,

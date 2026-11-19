@@ -181,7 +181,7 @@ async def apply_adapter_transform(
         batch_enabled = (
             callable(batch_transform)
             and callable(cache_identity)
-            and cache_identity(name) is not None
+            and (await call_backend_sync(cache_identity, name)) is not None
         )
         pacer = Pacer()
         positions = transform_source_positions(backend, name, messages)
@@ -226,7 +226,8 @@ async def apply_adapter_transform(
                             message=message,
                             positions=positions,
                         ):
-                            results = await batch_transform(
+                            results = await call_backend(
+                                batch_transform,
                                 name,
                                 [unit for _, unit in selected_batch],
                                 _message_value=_message_value,

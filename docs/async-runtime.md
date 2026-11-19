@@ -17,6 +17,7 @@ scan; nested engine work shares the managed worker without blocking its host loo
 Cache hits and shared waiters retain the configured request-reuse behavior. An actual
 shared request uses its initiating host. Reader validation, model budgets, result retention,
 and logical-input accounting remain attached to their existing scan owners.
+Delegating custom backends preserve logical-read attribution and transform input provenance.
 
 Each engine pacer yields every 64 steps independently. Ready host requests are handed off
 before the next queued local continuation, allowing both remote requests and local work to
