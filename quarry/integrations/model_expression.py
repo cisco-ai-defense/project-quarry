@@ -1504,7 +1504,11 @@ def _view_spans(transcript: Messages, value: Any) -> CollectionResult[Span]:
         if view is None or view is MISSING:
             continue
         if isinstance(view, Messages):
-            if view.shares_root_with(transcript):
+            if (
+                view.shares_root_with(transcript)
+                and not view._position_variants
+                and not view._segments
+            ):
                 # A run of adjacent selected messages occupies one conversation range.
                 runs: list[list[int]] = []
                 for ordinal in view._ordinals:
@@ -1525,7 +1529,7 @@ def _view_spans(transcript: Messages, value: Any) -> CollectionResult[Span]:
                         )
                     )
             else:
-                texts = _view_source_texts(transcript, view)
+                texts = _view_source_texts(transcript, view, include_calls=False)
                 places.extend(text.span(0, len(text.text)) for text in texts if text.text)
             continue
         if isinstance(view, ToolCall) and id(view) in positions:

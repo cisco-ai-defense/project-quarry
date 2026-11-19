@@ -39,10 +39,10 @@ validate: e2e-signatures  ## Run deterministic example checks
 e2e-signatures:  ## Verify each example rule against its paired data
 	$(UV_RUN) python scripts/e2e_signature_test.py
 
-language-generate:  ## Regenerate the packaged DSL catalog and examples
+language-generate:  ## Regenerate packaged language and plugin schemas
 	$(UV_RUN) python -m scripts.generate_language_spec
 
-language-check:  ## Check generated DSL catalog and examples
+language-check:  ## Check generated language and plugin schemas
 	$(UV_RUN) python -m scripts.generate_language_spec --check
 
 validate-rules: e2e-signatures  ## Load and execute every example rule with deterministic resources

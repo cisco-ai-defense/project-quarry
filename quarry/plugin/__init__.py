@@ -16,6 +16,23 @@
 
 """Agent-facing Quarry reference, compilation, and scanning services."""
 
+from quarry.plugin.contracts import (
+    CompileResponse,
+    DecisionFlowResponse,
+    DecisionTreeResponse,
+    ReferenceResponse,
+    ScanEntry,
+    ScanResponse,
+)
 from quarry.plugin.service import QuarryPlugin, load_runtime_config
 
-__all__ = ["QuarryPlugin", "load_runtime_config"]
+__all__ = [
+    "CompileResponse",
+    "DecisionFlowResponse",
+    "DecisionTreeResponse",
+    "QuarryPlugin",
+    "ReferenceResponse",
+    "ScanEntry",
+    "ScanResponse",
+    "load_runtime_config",
+]
