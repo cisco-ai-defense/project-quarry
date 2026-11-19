@@ -44,9 +44,10 @@ from collections.abc import Callable, Iterator, Mapping, Set
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from quarry.language.runtime import surface_names
+from quarry.types.exceptions import InvalidInputError
 from quarry.types.messages import Message, ToolCall, ToolMessage
 
 if TYPE_CHECKING:  # avoid a hard import cycle; only needed for typing
@@ -118,7 +119,10 @@ class ConversationEvent:
         A tool result is the canonical ``ToolMessage`` (whose ``.name`` is the answered
         function's name), so a ``tool_responses`` event exposes the tool name here too."""
         if isinstance(self.source, (ToolCall, ToolMessage)):
-            return self.source.name
+            try:
+                return self.source.name
+            except InvalidInputError:
+                return None
         return None
 
 
@@ -188,12 +192,12 @@ class StaticEnvironment:
     surface_sizes: Mapping[str, int] = field(default_factory=dict)
     # Per-name tool-call counts (``count_tool_calls("x")`` / ``len(get_tool_calls("x"))``):
     # a name-filtered collection-size aggregate, same zero-width treatment.
-    tool_call_name_counts: dict[str, int] = field(default_factory=dict)
+    tool_call_name_counts: Mapping[str, int] = field(default_factory=dict)
     # Per-name tool-RESPONSE counts (``len(get_tool_responses("x"))``): the response-side
     # twin of ``tool_call_name_counts``. A name-filtered ``get_tool_responses`` count must
     # read responses, not calls — an agent can call a tool without a paired
     # response (or vice-versa), so the two aggregates genuinely differ.
-    tool_response_name_counts: dict[str, int] = field(default_factory=dict)
+    tool_response_name_counts: Mapping[str, int] = field(default_factory=dict)
     # Diagnostic metadata, never used to answer a rule's size comparison. Explanations
     # can describe skipped tool atoms without semantically reading faulty definitions.
     tool_count: int | None = None
@@ -357,9 +361,6 @@ def build_events(context: ScanContext) -> tuple[ConversationEvent, ...]:
 def build_static_environment(context: ScanContext) -> StaticEnvironment:
     """Build the static environment from ``context`` (tool defs, system prompt, limits)."""
     conv = context.conversation
-    # The canonical tool-result view (ToolMessage objects); its ``.name`` is the answered
-    # function name, so response-side name counts read the same objects as the messages surface.
-    tool_responses = conv.tool_responses
     # Per-surface sizes, taken from the Conversation collections so they match exactly
     # what a rule's ``len(messages)`` / ``count(user_messages)`` sees.
     size_readers: dict[str, Callable[[], int]] = {
@@ -371,13 +372,8 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
         tools=lambda: len(conv.tools), system_prompt=lambda: len(conv.system_prompt or "")
     )
     surface_sizes = _SurfaceSizes(size_readers)
-    tool_call_name_counts: dict[str, int] = {}
-    for tc in conv.tool_calls:
-        tool_call_name_counts[tc.name] = tool_call_name_counts.get(tc.name, 0) + 1
-    tool_response_name_counts: dict[str, int] = {}
-    for tr in tool_responses:
-        name = cast(ToolMessage, tr).name
-        tool_response_name_counts[name] = tool_response_name_counts.get(name, 0) + 1
+    tool_call_name_counts = _DeferredMapping(conv.messages._name_counts)
+    tool_response_name_counts = _DeferredMapping(lambda: conv.messages._name_counts(responses=True))
     return StaticEnvironment(
         tools=_DeferredMapping(conv._tool_index),
         system_prompt=conv.system_prompt,

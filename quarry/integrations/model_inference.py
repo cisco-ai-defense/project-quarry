@@ -58,6 +58,7 @@ from quarry.integrations.message_ranges import (
     RangeMetrics,
     gather_split_tasks,
 )
+from quarry.integrations.message_readability import require_model_messages
 from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelRetryHistory, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.shared_transforms import (
@@ -280,6 +281,7 @@ def _message_dicts(messages: Messages) -> list[dict[str, Any]]:
     except ValueError as exc:
         raise ModelError(str(exc)) from exc
     for message in messages:
+        message._require_model_readable()
         require_message_media(message)
     return messages.to_openai_messages()
 
@@ -2796,7 +2798,7 @@ class ModelInferenceBackend:
     ) -> JudgeResult | _Refused:
         """Send one score request, or reuse the response to the same request."""
 
-        await require_readable_media(messages)
+        await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
         if self.config.config_version == 2:
             # A version 2 builder reads only its arguments, so the request is named by them,
@@ -2932,7 +2934,7 @@ class ModelInferenceBackend:
     ) -> Any:
         """Return ``read`` of one opaque message-classification response."""
 
-        await require_readable_media(messages)
+        await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
 
         def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -3137,7 +3139,7 @@ class ModelInferenceBackend:
                 )
             return message, value
 
-        await require_readable_media(messages)
+        await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
         outcome = await self._complete_message_wire(
             model_id,
@@ -3290,7 +3292,7 @@ class ModelInferenceBackend:
     ) -> int:
         """Count completion-shaped input tokens for canonical messages and tools."""
 
-        await require_readable_media(messages)
+        await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
         return await self._count_messages(
             model_id,
@@ -3425,9 +3427,9 @@ class ModelInferenceBackend:
     ) -> tuple[Messages, ...]:
         """Build the chunks after public argument validation."""
 
-        await require_readable_media(messages)
+        await require_model_messages(messages)
         if context is not None:
-            await require_readable_media(context)
+            await require_model_messages(context)
         range_budget = RangeBudget(_range_metrics)
         range_indexes: dict[int, MessageRangeIndex] = {}
         range_lock = asyncio.Lock()

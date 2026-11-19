@@ -45,6 +45,19 @@ Python containers. Text, image URL, and input-audio parts retain their OpenAI wi
 Rules can inspect documented message and tool fields. A model call receives the selected messages
 and the tool definitions passed by the rule.
 
+A structurally valid tool call with an unknown string type or an empty string function name is
+preserved as an unreadable call. It retains its wire data, transcript position and linked result.
+Rules can count calls or read unrelated message/result text. Reading an unreadable call's fields
+or sending its containing message to a model fails with `invalid_input`. Exact named counts
+also require readable call names.
+A known readable name remains a positive `called_tool()` match in selected message views,
+regardless of whether an unreadable call appears first. Exact counts and collections still
+require readable names; a readable match outside the selection does not satisfy the lookup.
+Raw host serialization remains available; rule field guards also protect ID and type reads.
+Whole-message rewrites skip a message containing an unreadable call, while text-part transforms
+can process its message text and retain its links. Omitted/wrong-type names remain structural
+errors. Missing or ambiguous call/result identifiers still require the existing strict input form.
+
 Offered tools must have a string `type` and a `function` object with a string `name`.
 Unknown string types, empty names and duplicate names are preserved in raw serialization.
 A rule that reads such a collection through `tools`, `has_tool()`, `has_tools()` or a model's
@@ -99,7 +112,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 15 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 16 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
