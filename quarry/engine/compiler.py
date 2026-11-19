@@ -60,6 +60,7 @@ from quarry.engine.diagnostics import (
     SourceRef,
     UnsupportedConstruct,
 )
+from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
 from quarry.language.metadata import TYPE_CONVERSIONS, DSLParameter, Use, dsl_compiler_form
 from quarry.language.runtime import (
     LanguageSpecError,
@@ -188,12 +189,12 @@ def _chunk_scalar_shapes() -> dict[str, dict[str, int | bool]]:
     return shapes
 
 
-_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event"))
-_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static"))
+_EVENT_SURFACES = _LazySet(lambda: surface_names(domain="event") | EVENT_SURFACES.get())
+_STATIC_SURFACES = _LazySet(lambda: surface_names(domain="static") | STATIC_SURFACES.get())
 # Surfaces valid as a Messages-typed model-input selection (no tools). ``tool_calls`` is
 # excluded — it is a collection of ToolCall objects, not a message transcript.
 _MODEL_INPUT_SURFACES = _LazySet(lambda: surface_names(model_input=True))
-_SURFACES = _LazySet(surface_names)
+_SURFACES = _LazySet(lambda: surface_names() | EVENT_SURFACES.get() | STATIC_SURFACES.get())
 
 # Role-view accessors valid as a model-input selection filter step (everything in
 # _MODEL_INPUT_SURFACES except the whole-transcript ``messages`` root).
@@ -647,6 +648,11 @@ class _Compiler:
         scope = Scope()
         if not self._contains_model_call(node):
             self._reject_model_text_forms(node)
+        if isinstance(node, BinaryOp) and node.operator in _COMPARISONS | _CONTENT_OPS:
+            for operand in (node.left, node.right):
+                if surface := self._input_state_field_surface(operand):
+                    self.has_static = True
+                    return self.compile_step(node, surface, scope)
         # Chunked scoring, both forms. The collection is a function result rather than a
         # timeline surface. Each desugars to ONE folded atom.
         #   quantifier:  any/all <c> in llm_split_conversation(...) where <scalar>(…, <c>) <op> n
@@ -1154,6 +1160,129 @@ class _Compiler:
                     if resolved is not None and resolved[0] in _EVENT_SURFACES:
                         return resolved[0]
         return None
+
+    @staticmethod
+    def _input_state_field_surface(node) -> str | None:
+        """Find a registered state root through fields and literal subscripts."""
+        base = node
+        while True:
+            if isinstance(base, Identifier):
+                return base.name if base.name in STATIC_SURFACES.get() else None
+            if isinstance(base, FieldAccess):
+                base = base.base
+            elif isinstance(base, FunctionCall) and base.name in {"_index", "_slice"}:
+                base = base.args[0]
+            else:
+                return None
+
+    def reject_unsupported_input_state_functions(self, node) -> None:
+        """Reject function reads whose existing lowering would bind state to an event.
+
+        ``len`` and ``count`` currently measure text, so applying them to arbitrary
+        JSON state (including arrays) would also give misleading results. Follow
+        ``as`` aliases through conjunctions, while allowing direct scalar state
+        comparisons and content predicates.
+        """
+        state_surfaces = STATIC_SURFACES.get()
+        if not state_surfaces or node is None:
+            return
+
+        def conjunction_scope(
+            left: ConditionNode, scope: Mapping[str, str | None]
+        ) -> Mapping[str, str | None]:
+            """Carry every left-hand `as` binding into the following `and` clause."""
+            pending = [left]
+            while pending:
+                current = pending.pop()
+                if (
+                    isinstance(current, BinaryOp)
+                    and not isinstance(current, FlowOp)
+                    and current.operator == "and"
+                ):
+                    pending.extend((current.right, current.left))
+                elif isinstance(current, Assignment):
+                    source = (
+                        state_root(current.expression, scope)
+                        if self._scalar_alias(current) is not None
+                        else None
+                    )
+                    scope = {**scope, current.variable: source}
+            return scope
+
+        def scoped_children(
+            current: ConditionNode, scope: Mapping[str, str | None]
+        ) -> list[tuple[ConditionNode, Mapping[str, str | None]]]:
+            children = []
+            for field_name in condition_child_fields(current):
+                child_scope = scope
+                if (
+                    isinstance(
+                        current,
+                        (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension),
+                    )
+                    and field_name != "collection"
+                ):
+                    # The bound element shadows an outer `as` alias in its body.
+                    child_scope = {**scope, current.variable: None}
+                elif (
+                    isinstance(current, BinaryOp)
+                    and not isinstance(current, FlowOp)
+                    and current.operator == "and"
+                    and field_name == "right"
+                ):
+                    child_scope = conjunction_scope(current.left, scope)
+                value = getattr(current, field_name)
+                values = value if isinstance(value, list | tuple) else (value,)
+                children.extend(
+                    (child, child_scope) for child in values if isinstance(child, ConditionNode)
+                )
+            return children
+
+        def state_root(expression, scope: Mapping[str, str | None]) -> str | None:
+            # Follow the value's source, not predicates inside a derived value.
+            pending = [expression]
+            while pending:
+                current = pending.pop()
+                if isinstance(current, Identifier):
+                    if current.name in scope:
+                        if surface := scope[current.name]:
+                            return surface
+                    elif current.name in state_surfaces:
+                        return current.name
+                elif isinstance(current, FieldAccess) and current.base is not None:
+                    pending.append(current.base)
+                elif isinstance(current, FunctionCall) and current.name in {"_index", "_slice"}:
+                    pending.extend(current.args[:1])
+            return None
+
+        external_names = set(_EXTERNAL_FUNCS)
+        # Preserve the AST walk's cycle rejection for programmatically built rules.
+        for _ in walk_condition_nodes(node):
+            pass
+        pending: list[tuple[ConditionNode, Mapping[str, str | None]]] = [(node, {})]
+        while pending:
+            expression, scope = pending.pop()
+            if isinstance(expression, FunctionCall) and expression.name in {"len", "count"}:
+                if expression.args and (surface := state_root(expression.args[0], scope)):
+                    raise UnsupportedConstruct(
+                        f"{expression.name}() cannot read registered extension state "
+                        f"{surface}; compare a scalar state field directly"
+                    )
+            elif isinstance(expression, FunctionCall) and expression.name in external_names:
+                for argument in expression.args:
+                    if surface := state_root(argument, scope):
+                        raise UnsupportedConstruct(
+                            f"{expression.name}() cannot read registered extension state "
+                            f"{surface}; compare a scalar state field directly"
+                        )
+            elif isinstance(expression, ModelCall):
+                for argument in expression.args:
+                    if surface := state_root(argument, scope):
+                        raise UnsupportedConstruct(
+                            f"model().{expression.operation}() cannot read registered "
+                            f"extension state {surface}; compare a scalar state field directly"
+                        )
+            pending.extend(reversed(scoped_children(expression, scope)))
 
     @staticmethod
     def _static_field_surface(node) -> str | None:
@@ -1763,6 +1892,8 @@ class _Compiler:
                 return ModelExpression("message_view", node.name), "Messages"
             if node.name == "tools":
                 return ModelExpression("tools"), "Tools"
+            if node.name in STATIC_SURFACES.get() and scope.resolve_element(node.name) is None:
+                return ModelExpression("input_state", node.name), "object"
             bound_surface = scope.resolve_element(node.name)
             if bound_surface is not None:
                 result_type = scope.resolve_element_type(node.name) or _SURFACE_ELEMENT_TYPES.get(
@@ -1779,6 +1910,28 @@ class _Compiler:
             return ModelExpression("field", ".".join(fields), (base,)), result_type
 
         if isinstance(node, FunctionCall):
+            if node.name == "_input_message":
+                surface_node, role_node, *field_nodes = node.args
+                parts = []
+                for field_node in field_nodes:
+                    part, part_type = self._lower_model_content(field_node, scope)
+                    if part_type != "string" or part.kind != "field":
+                        raise UnsupportedConstruct("an input's content fields are text")
+                    parts.append(part)
+                surface = self._lit(surface_node)
+                order = "\x1f".join(INPUT_TEXTS.get().get(surface, ()))
+                return (
+                    ModelExpression(
+                        "input_message",
+                        surface,
+                        (
+                            ModelExpression("literal", self._lit(role_node)),
+                            ModelExpression("literal", order),
+                            *parts,
+                        ),
+                    ),
+                    "Messages",
+                )
             if node.name == "extract" and 2 <= len(node.args) <= 4:
                 messages, messages_type = self._lower_model_expression(node.args[0], scope)
                 span, span_type = self._lower_model_expression(node.args[1], scope)
@@ -2660,12 +2813,20 @@ class _Compiler:
         and ``len(field) <op> n`` as per-step scalar-gate atoms; a bare collection count
         macro is a top-level concern (see _count_macro)."""
         left, right, op = node.left, node.right, node.operator
+
         # Field vs literal (=/!=). `field = null` is a NULL-CHECK (present-vs-absent),
         # NOT a string compare to "None" — quarry's FieldAccess returns None for a null
         # value or a missing key, and `= null` is true in both cases. `field = "lit"` is
         # an exact-match atom. Both operand orders.
+        def indexed_field(value) -> bool:
+            while (
+                isinstance(value, FunctionCall) and value.name == "_index" and len(value.args) == 2
+            ):
+                value = value.args[0]
+            return isinstance(value, FieldAccess)
+
         for fnode, vnode in ((left, right), (right, left)):
-            if isinstance(fnode, FieldAccess) and isinstance(vnode, Literal) and op in ("=", "!="):
+            if indexed_field(fnode) and isinstance(vnode, Literal) and op in ("=", "!="):
                 if vnode.value is None:
                     atom = self._mint_scalar(surface, self._field_path(fnode), "is_null", "=", None)
                     return atom if op == "=" else T.Not(atom)

@@ -61,6 +61,10 @@ class DetectorUnavailable(Exception):
     was provided. Surfaced (not silenced) per the failure-policy contract."""
 
 
+class ExtensionStateUnavailable(Exception):
+    """A rule reads registered state that this scan did not supply."""
+
+
 class ExternalInputRejected(Exception):
     """Raised when an external atom's resolved input is invalid — e.g. a dynamic ``message()``
     content field that resolves to a non-string. Surfaced (not silenced) so the scan fails
@@ -277,6 +281,12 @@ class Oracle:
             return self._ground_static(spec, where, binding)
         if self._static is None:
             return Grounded(False)
+        if spec.selector in self._static.extension_state:
+            if spec.selector in self._static.missing_extension_states:
+                raise ExtensionStateUnavailable(f"Missing extension state for {spec.selector}")
+            return await self._apply_predicate_async(
+                spec, self._static.extension_state[spec.selector], binding, None
+            )
         if spec.selector == "system_prompt":
             return await self._apply_text_predicate_async(
                 spec, self._static.system_prompt or "", binding, None
@@ -396,6 +406,12 @@ class Oracle:
             # Zero-width collection-size comparison: len(S)/count(S) <op> n against the
             # per-surface event count captured in the static environment.
             return Grounded(_M.compare(self.surface_size(spec), spec.op, spec.number))
+        if spec.selector in self._static.extension_state:
+            if spec.selector in self._static.missing_extension_states:
+                raise ExtensionStateUnavailable(f"Missing extension state for {spec.selector}")
+            return self._apply_predicate(
+                spec, self._static.extension_state[spec.selector], binding, None
+            )
         if spec.selector == "system_prompt":
             text = self._static.system_prompt or ""
             if spec.predicate == "equals":
