@@ -830,3 +830,9 @@ are enforced by Quarry's configured safety limits before evaluation.
 - Match metadata is copied from the rule. Quarry does not infer or replace the caller's taxonomy.
 - Invalid, timed-out, skipped, truncated, or failed evaluation returns a structured non-complete
   result and cannot appear as a clean non-match.
+
+## Logical input-read reports
+
+`quarry_scan` accepts `logical_reads: true` to include bounded input-read snapshots in
+each scan result. See [logical reads](logical-reads.md) for coverage, failure states,
+reference-token availability and the report schema. The default response stays unchanged.

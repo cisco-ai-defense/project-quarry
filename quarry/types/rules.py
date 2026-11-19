@@ -118,6 +118,8 @@ class ScanResult:
     evaluation_error_categories: dict[str, ScanFailureCategory | str] | None = field(
         default=None, kw_only=True
     )
+    # Optional scalar snapshot. Its collection/measurement state does not alter verdicts.
+    logical_reads: dict[str, Any] | None = field(default=None, kw_only=True)
 
     @property
     def failures(self) -> tuple[ScanFailure, ...]:

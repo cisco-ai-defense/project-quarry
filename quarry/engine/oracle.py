@@ -41,7 +41,7 @@ from __future__ import annotations
 import inspect
 import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from quarry.engine import matchers as _M
 from quarry.engine.atoms import CAPTURE_VALUE, AtomDomain, AtomSpec
@@ -49,6 +49,11 @@ from quarry.engine.atoms import POSITION_FIELD_SEP as _POSITION_FIELD_SEP
 from quarry.engine.atoms import POSITION_GROUP_SEP as _POSITION_GROUP_SEP
 from quarry.engine.captures import ElementBinding, matches_for
 from quarry.engine.events import in_window
+from quarry.engine.observations import (
+    GroundingReadCapture,
+    GroundingReadObserver,
+    GroundingReadReplay,
+)
 
 # Predicates whose grounding requires an external detector backend (MODEL/LLM/YARA). The
 # compiler emits all of them with predicate "external"; the older names are accepted too.
@@ -116,6 +121,18 @@ class Grounded:
     evidence: object | None = None  # Field span or object reference.
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ObservedGrounded(Grounded):
+    """An internal cache carrier; readers receive its unchanged original result.
+
+    Inheriting the two data fields lets evidence lookups use their original cache path.
+    Without an observer the cache stores ordinary Grounded objects without a carrier.
+    """
+
+    result: Grounded = field(repr=False, compare=False)
+    reads: GroundingReadReplay | None = field(repr=False, compare=False)
+
+
 # An async detector takes ``(spec, text)`` or ``(spec, text, event)``; ``Oracle`` checks
 # which at construction (``_detector_accepts_event``) and calls it accordingly.
 AsyncDetector = (
@@ -137,6 +154,8 @@ class Oracle:
         static_env=None,
         async_detector: AsyncDetector | None = None,
         regex_backend: _M.RegexBackend | None = None,
+        *,
+        read_observer: GroundingReadObserver | None = None,
     ):
         self._static = static_env
         # Regex backend for local text matchers. Defaults to the pure stdlib backend; the
@@ -150,7 +169,31 @@ class Oracle:
         )
         self._async_detector_accepts_event = _detector_accepts_event(self._async_detector)
         self._cache: dict[tuple, Grounded] = {}
+        self._read_observer = read_observer
         self.external_calls = 0
+
+    def _replay_cached(self, cached: Grounded) -> Grounded:
+        observer = self._read_observer
+        if isinstance(cached, _ObservedGrounded):
+            if observer is not None:
+                observer.replay(cached.reads)
+            return cached.result
+        if observer is not None:
+            observer.replay(None)
+        return cached
+
+    def _remember(
+        self, key: tuple, result: Grounded, capture: GroundingReadCapture | None = None
+    ) -> None:
+        # The adapter bounds admitted captures, including empty ones. If accounting is
+        # absent/exhausted, retain only the original decision value under its original key.
+        self._cache[key] = (
+            result
+            if capture is None
+            else _ObservedGrounded(
+                result.value, result.evidence, result=result, reads=capture.result()
+            )
+        )
 
     @staticmethod
     def _is_external(spec: AtomSpec) -> bool:
@@ -173,9 +216,17 @@ class Oracle:
         key = self._key(spec, where, binding)
         hit = self._cache.get(key)
         if hit is not None:
+            if self._read_observer is not None and self._is_external(spec):
+                return self._replay_cached(hit)
             return hit
-        result = self._ground_uncached(spec, where, binding)
-        self._cache[key] = result
+        observed = self._read_observer if self._is_external(spec) else None
+        if observed is None:
+            result = self._ground_uncached(spec, where, binding)
+            self._cache[key] = result
+        else:
+            with observed.capture() as capture:
+                result = self._ground_uncached(spec, where, binding)
+            self._remember(key, result, capture)
         return result
 
     def value(self, spec: AtomSpec, where, binding: str | None = None) -> bool:
@@ -219,8 +270,16 @@ class Oracle:
         key = self._tool_key(spec, tool, binding)
         hit = self._cache.get(key)
         if hit is None:
-            hit = self._apply_predicate(spec, tool, binding, None)
-            self._cache[key] = hit
+            observed = self._read_observer if self._is_external(spec) else None
+            if observed is None:
+                hit = self._apply_predicate(spec, tool, binding, None)
+                self._cache[key] = hit
+            else:
+                with observed.capture() as capture:
+                    hit = self._apply_predicate(spec, tool, binding, None)
+                self._remember(key, hit, capture)
+        elif self._read_observer is not None and self._is_external(spec):
+            return self._replay_cached(hit)
         return hit
 
     async def ground_tool_async(self, spec: AtomSpec, tool, binding: str | None = None) -> Grounded:
@@ -231,8 +290,15 @@ class Oracle:
         key = self._tool_key(spec, tool, binding)
         hit = self._cache.get(key)
         if hit is None:
-            hit = await self._apply_predicate_async(spec, tool, binding, None)
-            self._cache[key] = hit
+            if self._read_observer is None:
+                hit = await self._apply_predicate_async(spec, tool, binding, None)
+                self._cache[key] = hit
+            else:
+                with self._read_observer.capture() as capture:
+                    hit = await self._apply_predicate_async(spec, tool, binding, None)
+                self._remember(key, hit, capture)
+        elif self._read_observer is not None:
+            return self._replay_cached(hit)
         return hit
 
     def evidence_for_tool(self, spec: AtomSpec, tool, binding: str | None = None) -> object | None:
@@ -252,9 +318,16 @@ class Oracle:
         key = self._key(spec, where, binding)
         hit = self._cache.get(key)
         if hit is not None:
+            if self._read_observer is not None:
+                return self._replay_cached(hit)
             return hit
-        result = await self._ground_uncached_async(spec, where, binding)
-        self._cache[key] = result
+        if self._read_observer is None:
+            result = await self._ground_uncached_async(spec, where, binding)
+            self._cache[key] = result
+        else:
+            with self._read_observer.capture() as capture:
+                result = await self._ground_uncached_async(spec, where, binding)
+            self._remember(key, result, capture)
         return result
 
     async def value_async(self, spec: AtomSpec, where, binding: str | None = None) -> bool:

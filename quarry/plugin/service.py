@@ -632,6 +632,7 @@ class QuarryPlugin:
         visualize: bool = False,
         config_version: int | None = None,
         explore_rate: float = 0.0,
+        logical_reads: bool = False,
         verbosity: ScanVerbosity | None = None,
     ) -> dict[str, Any]:
         """Compile one rule once and scan one conversation or an ordered batch.
@@ -648,6 +649,9 @@ class QuarryPlugin:
         diagnostics, matches, and decision scores while omitting its decision path, and
         explanations are computed only when explicitly requested. ``verbosity="full"``
         restores the detailed batch shape.
+
+        ``logical_reads`` adds each conversation's bounded input-read snapshot without
+        extra model/tokenizer work. Accounting completeness does not alter verdict status.
         """
 
         if verbosity is not None and (
@@ -656,6 +660,8 @@ class QuarryPlugin:
             raise PluginInputError("verbosity must be 'compact' or 'full'")
         if (conversation is None) == (conversations is None):
             raise PluginInputError("provide exactly one of conversation or conversations")
+        if type(logical_reads) is not bool:
+            raise PluginInputError("logical_reads must be a boolean")
         verbosity = verbosity or ("full" if conversation is not None else "compact")
         if explain is None:
             explain = verbosity == "full"
@@ -732,6 +738,7 @@ class QuarryPlugin:
                 record_traces=visualize,
                 decision_paths=True,
                 explore_rate=float(explore_rate),
+                **({"logical_reads": True} if logical_reads else {}),
             )
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
@@ -833,6 +840,8 @@ class QuarryPlugin:
             },
             "diagnostics": self._scan_diagnostics(result),
         }
+        if result.logical_reads is not None:
+            payload["logical_reads"] = result.logical_reads
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,

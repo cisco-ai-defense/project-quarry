@@ -61,6 +61,7 @@ from quarry.engine.contracts import (
 )
 from quarry.engine.decision import artifact_parts
 from quarry.engine.exceptions import UnsupportedExecution
+from quarry.engine.observations import GroundingReadObserver
 from quarry.engine.oracle import BOOT, Oracle
 from quarry.engine.pacing import Pacer
 from quarry.engine.symbolic_dfa import GuardNode
@@ -534,6 +535,7 @@ async def evaluate_async(
     time_left: Callable[[], float | None] | None = None,
     defer_minimization: bool = False,
     record: ScanRecord | None = None,
+    read_observer: GroundingReadObserver | None = None,
 ) -> ExecutionResult:
     """Evaluate a compiled rule over ``evaluation_input`` (from
     ``events.build_evaluation_input``): the scanner's execution path. The result's ``matched``
@@ -576,6 +578,7 @@ async def evaluate_async(
         static_env=evaluation_input.static,
         async_detector=async_detector,
         regex_backend=regex_backend,
+        read_observer=read_observer,
     )
     events = evaluation_input.events
     trace_builder = _TraceBuilder()

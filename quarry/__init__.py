@@ -20,6 +20,8 @@ from quarry._version import __version__
 from quarry.core.conversation import Conversation
 from quarry.inputs import InputAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
+from quarry.integrations.read_tokens import TextTokenBasis
+from quarry.integrations.read_usage import ReadUsageLimits, ReadUsageSession, model_read_usage
 from quarry.policy import CompiledPolicy, compile_policy
 from quarry.policy_serialization import load_compiled_policy
 from quarry.prepared import PreparedRuleCache
@@ -57,6 +59,7 @@ from quarry.types.messages import (
     ToolMessage,
     UserMessage,
 )
+from quarry.types.read_reports import logical_read_report_schema
 from quarry.types.results import CollectionResult, JudgeResult, ProducerRef, ResultItem, Score, Span
 from quarry.types.rules import ScanResult
 
@@ -94,6 +97,8 @@ __all__ = [
     "ModelInferenceBackend",
     "ProducerRef",
     "PreparedRuleCache",
+    "ReadUsageLimits",
+    "ReadUsageSession",
     "RuleCompatibilityError",
     "RuleLoadError",
     "RuleParseError",
@@ -105,6 +110,9 @@ __all__ = [
     "ScanFailureCategory",
     "ScanResult",
     "Span",
+    "TextTokenBasis",
     "compile_policy",
     "load_compiled_policy",
+    "model_read_usage",
+    "logical_read_report_schema",
 ]
