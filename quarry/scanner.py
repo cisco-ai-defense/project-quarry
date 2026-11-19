@@ -28,7 +28,13 @@ from typing import Any, NamedTuple, NoReturn
 
 import orjson
 
-from quarry.cache.async_cache import current_scan, result_cache, retain_scan, scan_scope
+from quarry.cache.async_cache import (
+    cache_retention,
+    current_scan,
+    result_cache,
+    retain_scan,
+    scan_scope,
+)
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.regex_cache import regex_cache
 from quarry.config import QuarryConfig
@@ -857,7 +863,13 @@ class DSLScanner:
                 )
             ]
             key = input_key("prober", probers, func.__name__, args, intent_baseline(rule_ctx))
-            return await result_cache.call(key, func, rule_ctx, *args)
+            return await result_cache.call(
+                key,
+                func,
+                rule_ctx,
+                *args,
+                retention=cache_retention("probes", self.config.model_cache),
+            )
 
         def _model_input_selector(spec, text: str | tuple[str, ...] | None = None) -> dict:
             """The atom's folded typed model-input selection, for _select_model_input.
@@ -1561,7 +1573,7 @@ class DSLScanner:
         is ``min(per_rule_timeout, remaining_deadline)``; once the deadline is exhausted the
         remaining rules time out immediately rather than starting doomed work.
         """
-        with scan_deadline(deadline_seconds), scan_scope():
+        with scan_deadline(deadline_seconds), scan_scope(cache_policy=self.config.model_cache):
             return await self._scan_data_async(
                 data,
                 file_path=file_path,
@@ -1586,7 +1598,7 @@ class DSLScanner:
     ) -> ScanResult:
         """Execute parameters already validated by ``CompiledPolicy``."""
 
-        with scan_scope():
+        with scan_scope(cache_policy=self.config.model_cache):
             return await self._scan_data_async(
                 data,
                 file_path=None,

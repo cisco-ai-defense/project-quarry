@@ -244,6 +244,8 @@ model_cache:
   ttl_seconds: 43200
   max_entries: 100000
   max_bytes: 268435456
+  retention: process
+  reusable_categories: []
 ```
 
 The defaults shown above retain a result for 12 hours after its last use, up to 100,000 completed
@@ -264,6 +266,42 @@ cached. This does not detect every concurrent mutation: a change that does not m
 fail can go unnoticed. Cached results should not be mutated; growth after insertion is not
 remeasured.
 
+`retention: process` is the default. Set `retention: scan` to release completed model,
+token-count, local-transform and prober entries when the last scan using them finishes,
+including explicitly owned deferred evidence. Overlapping scans may share running work and
+completed entries; each becomes an owner, and the last owner releases the entry. A late
+completion with no active owner is returned to its waiters without being retained. A direct
+backend call outside a scan does not retain scan-mode results after that call.
+
+Use `reusable_categories` to keep selected categories in the normal process cache while
+using scan retention for the rest:
+
+```yaml
+model_cache:
+  retention: scan
+  reusable_categories: [token_counts, local_transforms]
+```
+
+The closed category names are `model_responses`, `token_counts`, `local_transforms` and
+`probes`; duplicates and unknown names are configuration errors. The list defaults to empty.
+This option changes reuse lifetime, not what an adapter receives or what it may log or store.
+Regex compilation caches have their own lifecycle and are unaffected.
+
+Each scan uses its scanner's immutable cache policy, including when the scanner receives a
+separately constructed backend with different settings. Direct backend calls use the backend's
+policy. Process-mode and scan-mode entries and running calls have separate namespaces, so a
+scan-mode request does not borrow a process-retained response. Both namespaces share the
+same aggregate TTL, entry and byte bounds; scan ownership can end earlier. Heterogeneous
+scanners retain the existing process-wide bounds configuration behavior.
+
+Hosts using `AsyncFunctionCache.call()` directly can choose `retention="scan"` inside
+`scan_scope()`; the default remains `"process"`. `retain_scan()` returns an explicitly closed
+lease for work that outlives the root scope. Clear and reconfiguration preserve shared running
+calls, while eviction and expiry also remove completed-entry ownership bookkeeping. On a process
+fork, Quarry resets inherited cache locks, running work, results and scan scopes in the child.
+Built-in bounded stores retain their limits; an inherited custom mapping is replaced by the
+default bounded store. The parent is unaffected. Start fresh scan work in the child.
+
 ## Accepted model replies during a scan
 
 A scan keeps the first accepted raw reply for each identical model request until its work,
@@ -277,7 +315,8 @@ Scan-held references are separate from the process table. They can retain replie
 `max_bytes`, and are outside that byte total. The limit controls process-cache entries, not total
 memory retained by active scans or their deferred work. Those references are released when their
 scan work finishes, fails, is cancelled, or its deferred owner is closed. Other scans continue to
-use the process cache and shared running requests normally.
+use shared running requests and their configured retention policy normally. Selecting scan
+retention does not bound these separately held accepted replies or change their validation.
 
 ## Model templates and inheritance
 

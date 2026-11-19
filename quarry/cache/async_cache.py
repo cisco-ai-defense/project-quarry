@@ -25,20 +25,26 @@ import os
 import sys
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Iterator, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import GetSetDescriptorType, MemberDescriptorType, SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from quarry.cache.constants import (
     RESULT_CACHE_MAX_BYTES,
     RESULT_CACHE_MAX_ENTRIES,
     RESULT_CACHE_TTL_SECONDS,
 )
-from quarry.cache.scan_responses import ResponseReader, ScanLease, ScanResponses
+from quarry.cache.scan_responses import (
+    ResponseReader,
+    ScanLease,
+    ScanResponses,
+    _reset_scopes_after_fork,
+)
 from quarry.safety.timer import (
     QuarryTimeoutError,
     current_evaluation_deadline,
@@ -47,7 +53,11 @@ from quarry.safety.timer import (
     without_rule_deadline,
 )
 
+if TYPE_CHECKING:
+    from quarry.config import ModelCacheConfig
+
 _MISSING = object()
+_CACHES: weakref.WeakValueDictionary[int, "AsyncFunctionCache"] = weakref.WeakValueDictionary()
 
 # Stop inspecting a hostile result graph after this many references. Reaching the bound makes
 # the value too large to cache instead of leaving the event-loop callback to walk indefinitely.
@@ -58,13 +68,15 @@ _scan = ContextVar[object]("quarry_scan", default=None)
 
 
 @contextmanager
-def scan_scope(scan: object = None) -> Generator[object, None, None]:
+def scan_scope(
+    scan: object = None, *, cache_policy: "ModelCacheConfig | None" = None
+) -> Generator[object, None, None]:
     """Run one scan, or resume ``scan`` (as its deferred evidence does): the calls it starts
     are its own."""
 
-    scan = ScanResponses() if scan is None else scan
+    scan = ScanResponses(cache_policy) if scan is None else scan
     if type(scan) is ScanResponses and scan.pid != os.getpid():
-        scan = ScanResponses()
+        scan = ScanResponses(cache_policy if cache_policy is not None else scan.cache_policy)
     lease = ScanLease(scan if type(scan) is ScanResponses else None)
     token = _scan.set(scan)
     try:
@@ -86,6 +98,13 @@ def retain_scan() -> ScanLease:
     """Keep the current scan's replies until explicitly owned deferred work closes."""
     scan = _scan.get()
     return ScanLease(scan if type(scan) is ScanResponses else None)
+
+
+def cache_retention(category: str, fallback: "ModelCacheConfig") -> str:
+    """Use the active scan's frozen policy, or a direct backend caller's configuration."""
+    scan = _scan.get()
+    policy = scan.cache_policy if type(scan) is ScanResponses else None
+    return (fallback if policy is None else policy).retention_for(category)
 
 
 class SlidingTTLCache(MutableMapping):
@@ -122,6 +141,7 @@ class SlidingTTLCache(MutableMapping):
         # Every completed result's retained bytes, in the same LRU order, and their total.
         self._sizes: OrderedDict[Any, int] = OrderedDict()
         self._byte_total = 0
+        self._on_remove: Callable[[Any], None] | None = None
 
     def _expiry(self, value: Any, now: float) -> float:
         if isinstance(value, _Pending):
@@ -188,6 +208,8 @@ class SlidingTTLCache(MutableMapping):
             self._running -= 1
         else:
             self._byte_total -= self._sizes.pop(key)
+        if self._on_remove is not None:
+            self._on_remove(key)
 
     def __iter__(self) -> Iterator[Any]:
         return iter(self._entries)
@@ -196,6 +218,9 @@ class SlidingTTLCache(MutableMapping):
         return len(self._entries)
 
     def clear(self) -> None:
+        if self._on_remove is not None:
+            for key in tuple(self._entries):
+                self._on_remove(key)
         self._entries.clear()
         self._running = 0
         self._sizes.clear()
@@ -369,6 +394,17 @@ def _result_bytes_bounded(value: Any, limit: int, overflow: int) -> int:
     return total
 
 
+@dataclass(frozen=True)
+class _ScanKey:
+    key: bytes
+
+
+@dataclass(eq=False)
+class _ScanEntry:
+    key: _ScanKey
+    owners: set[object] = field(default_factory=set)
+
+
 @dataclass
 class _Pending:
     """A call still running, kept under its key until its result replaces it. Its future is
@@ -381,6 +417,7 @@ class _Pending:
     # own deadline and budget.
     owner: object
     waiters: int = 0
+    scan_entry: _ScanEntry | None = None
 
 
 class _Abandoned(Exception):
@@ -401,16 +438,105 @@ class AsyncFunctionCache:
     the synchronous APIs do with ``asyncio.run``.
     """
 
-    def __init__(self, *, store: MutableMapping[bytes, Any] | None = None):
+    def __init__(self, *, store: MutableMapping[Any, Any] | None = None):
         """
         Initialize the cache.
 
         Args:
             store: Where results are kept; None keeps them in a dict for the cache's life
         """
-        self._store: MutableMapping[bytes, Any] = store if store is not None else {}
+        self._store: MutableMapping[Any, Any] = store if store is not None else {}
         # cachetools stores are not thread-safe, and a store may serve several threads.
         self._lock = threading.Lock()
+        self._scan_entries: dict[_ScanKey, _ScanEntry] = {}
+        self._scan_owners: dict[object, set[_ScanEntry]] = {}
+        self._scan_callback_key = object()
+        self._watch_store()
+        _CACHES[id(self)] = self
+
+    def _watch_store(self) -> None:
+        if isinstance(self._store, SlidingTTLCache):
+            reference = weakref.ref(self)
+            observed = weakref.ref(self._store)
+
+            def removed(key):
+                cache = reference()
+                # A host can retain an old store across configure(). Its later removals
+                # cannot retire ownership belonging to the replacement table.
+                if cache is not None and cache._store is observed():
+                    cache._retire_scan_key(key)
+
+            self._store._on_remove = removed
+
+    def _retire_scan_entry(self, entry: _ScanEntry) -> None:
+        for owner in entry.owners:
+            owned = self._scan_owners.get(owner)
+            if owned is not None:
+                owned.discard(entry)
+                if not owned:
+                    del self._scan_owners[owner]
+        entry.owners.clear()
+
+    def _retire_scan_key(self, key) -> None:
+        entry = self._scan_entries.pop(key, None)
+        if entry is not None:
+            self._retire_scan_entry(entry)
+
+    def _own_scan_entry(self, entry, scope, generation) -> None:
+        if scope is None:
+            return
+        owner = scope.on_release(generation, self._scan_callback_key, self._release_scan_owner)
+        if owner is not None:
+            entry.owners.add(owner)
+            self._scan_owners.setdefault(owner, set()).add(entry)
+
+    def _release_scan_owner(self, owner: object) -> None:
+        removed = []
+        try:
+            with self._lock:
+                for entry in tuple(self._scan_owners.pop(owner, ())):
+                    entry.owners.discard(owner)
+                    if not entry.owners and self._scan_entries.get(entry.key) is entry:
+                        value = (
+                            self._store._peek(entry.key, _MISSING)
+                            if isinstance(self._store, SlidingTTLCache)
+                            else self._store.get(entry.key, _MISSING)
+                        )
+                        removed.append(value)
+                        self._store.pop(entry.key, None)
+                        self._retire_scan_key(entry.key)
+        except Exception:
+            # A custom mapping cannot turn cleanup into a different scan verdict.
+            pass
+        finally:
+            # Destructors run after the cache lock is released.
+            removed.clear()
+
+    def _prune_scan_entries(self) -> None:
+        if isinstance(self._store, SlidingTTLCache):
+            return  # The store reports eviction/expiry synchronously under our lock.
+        for key in tuple(self._scan_entries):
+            if self._store.get(key, _MISSING) is _MISSING:
+                self._retire_scan_key(key)
+
+    def _reset_after_fork(self) -> None:
+        store = self._store
+        self._lock = threading.Lock()
+        self._scan_entries = {}
+        self._scan_owners = {}
+        self._scan_callback_key = object()
+        if type(store) is SlidingTTLCache:
+            replacement = SlidingTTLCache(store.maxsize, store.ttl, max_bytes=store.max_bytes)
+        elif type(store) is dict:
+            replacement = {}
+        else:
+            replacement = SlidingTTLCache(
+                RESULT_CACHE_MAX_ENTRIES,
+                RESULT_CACHE_TTL_SECONDS,
+                max_bytes=RESULT_CACHE_MAX_BYTES,
+            )
+        self._store = replacement
+        self._watch_store()
 
     @classmethod
     def expiring(
@@ -430,7 +556,7 @@ class AsyncFunctionCache:
         return cls(store=store)
 
     @property
-    def store(self) -> MutableMapping[bytes, Any]:
+    def store(self) -> MutableMapping[Any, Any]:
         """The results, by the digest of their inputs."""
 
         return self._store
@@ -475,13 +601,18 @@ class AsyncFunctionCache:
             )
             for key, value in pending:
                 replacement[key] = value
+            for key in tuple(self._scan_entries):
+                self._retire_scan_key(key)
             self._store = replacement
+            self._watch_store()
 
     def clear(self) -> None:
         """Drop every completed result while calls already running remain shared."""
 
         with self._lock:
             store = self._store
+            for key in tuple(self._scan_entries):
+                self._retire_scan_key(key)
             if isinstance(store, SlidingTTLCache):
                 store.clear_results()
                 return
@@ -502,6 +633,7 @@ class AsyncFunctionCache:
         budget: object = None,
         alone: bool = False,
         retry_on: Callable[[BaseException], bool] | None = None,
+        retention: str = "process",
         **kwargs,
     ) -> Any:
         """Return ``func(*args, **kwargs)``, kept under ``key``, the digest of every
@@ -525,18 +657,37 @@ class AsyncFunctionCache:
         # A call outside any scan, as a host calling the backend directly makes, is its own
         # owner, so it retries what another caller's limits ended. Each rule of a scan has its
         # own deadline, so a call another rule's deadline ended is retried under this one's.
+        if type(retention) is not str or retention not in {"process", "scan"}:
+            raise ValueError("cache retention must be 'process' or 'scan'")
         scan = _scan.get()
-        owner = (object() if scan is None else scan, budget, current_evaluation_deadline())
+        scope = scan if retention == "scan" and type(scan) is ScanResponses else None
+        generation = scope.generation() if scope is not None else None
+        scope_owner = scope.retention_owner(generation) if scope is not None else None
+        identity = (
+            (scope_owner if scope_owner is not None else object())
+            if retention == "scan"
+            else (object() if scan is None else scan)
+        )
+        owner = (identity, budget, current_evaluation_deadline())
+        cache_key: Any = _ScanKey(key) if retention == "scan" else key
         # A request-backed call is shared only within its scan, by every alias that sends it.
-        pending_key: Any = (owner[0], key) if alone else key
+        pending_key: Any = (owner[0], cache_key) if alone else cache_key
         while True:
             with self._lock:
-                value = self._store.get(key, _MISSING)
+                value = self._store.get(cache_key, _MISSING)
                 if value is not _MISSING and not isinstance(value, _Pending):
+                    if type(cache_key) is _ScanKey:
+                        entry = self._scan_entries.setdefault(cache_key, _ScanEntry(cache_key))
+                        self._own_scan_entry(entry, scope, generation)
+                        if not entry.owners:
+                            self._store.pop(cache_key, None)
+                            self._retire_scan_key(cache_key)
                     return value
                 pending = self._store.get(pending_key)
                 if pending is None:
-                    pending = self._start(key, pending_key, owner, func, args, kwargs)
+                    pending = self._start(cache_key, pending_key, owner, func, args, kwargs)
+                if pending.scan_entry is not None:
+                    self._own_scan_entry(pending.scan_entry, scope, generation)
                 pending.waiters += 1
             try:
                 return await self._wait(pending)
@@ -568,19 +719,23 @@ class AsyncFunctionCache:
         running under it is kept. With ``expected``, invalidate only that physical reply,
         without touching a replacement reply's expiry or recency."""
 
+        removed = []
         with self._lock:
             store = self._store
-            value = (
-                store._peek(key, _MISSING)
-                if expected is not _MISSING and isinstance(store, SlidingTTLCache)
-                else store.get(key, _MISSING)
-            )
-            if not isinstance(value, _Pending) and (expected is _MISSING or value is expected):
-                self._store.pop(key, None)
+            for candidate in (key, _ScanKey(key)):
+                value = (
+                    store._peek(candidate, _MISSING)
+                    if expected is not _MISSING and isinstance(store, SlidingTTLCache)
+                    else store.get(candidate, _MISSING)
+                )
+                if not isinstance(value, _Pending) and (expected is _MISSING or value is expected):
+                    removed.append(self._store.pop(candidate, None))
+                    self._retire_scan_key(candidate)
+        removed.clear()
 
     def _start(
         self,
-        key: bytes,
+        key: Any,
         pending_key: Any,
         owner: object,
         func: Callable,
@@ -594,7 +749,13 @@ class AsyncFunctionCache:
             task = asyncio.get_running_loop().create_task(call_async_or_sync(func, *args, **kwargs))
         # asyncio keeps only a weak reference to a task; the pending entry and its waiters
         # hold this one.
-        pending = _Pending(pending_key, task, concurrent.futures.Future(), owner)
+        pending = _Pending(
+            pending_key,
+            task,
+            concurrent.futures.Future(),
+            owner,
+            scan_entry=_ScanEntry(key) if type(key) is _ScanKey else None,
+        )
         # Running, the future cannot be cancelled by a caller that stops waiting.
         pending.future.set_running_or_notify_cancel()
         self._store[pending_key] = pending
@@ -618,12 +779,30 @@ class AsyncFunctionCache:
                 with self._lock:
                     if self._store.get(pending_key) is pending:
                         del self._store[pending_key]
-                    if failure is None:
+                    entry = pending.scan_entry
+                    if failure is None and (entry is None or entry.owners):
                         self._store[key] = result
+                        if entry is not None:
+                            kept = (
+                                self._store._peek(key, _MISSING)
+                                if isinstance(self._store, SlidingTTLCache)
+                                else self._store.get(key, _MISSING)
+                            )
+                            if kept is result:
+                                self._scan_entries[key] = entry
+                                self._prune_scan_entries()
+                            else:
+                                self._retire_scan_entry(entry)
+                    elif entry is not None:
+                        self._retire_scan_entry(entry)
             except Exception:
                 # A cache admission or custom-store failure must not change the successful
                 # function result observed by callers or strand callers sharing this future.
                 pass
+            if pending.scan_entry is not None:
+                with self._lock:
+                    if self._scan_entries.get(key) is not pending.scan_entry:
+                        self._retire_scan_entry(pending.scan_entry)
             if failure is None:
                 pending.future.set_result(result)
             else:
@@ -673,6 +852,24 @@ async def call_async_or_sync(func: Callable, *args, **kwargs) -> Any:
     if inspect.iscoroutinefunction(func):
         return await func(*args, **kwargs)
     return func(*args, **kwargs)
+
+
+def _reset_caches_after_fork() -> None:
+    caches = tuple(_CACHES.values())
+    # Releasing an inherited reply may run user code that enters a different cache or
+    # scan. Keep every old table alive until all locks and ownership are fresh.
+    removed = [(cache._store, cache._scan_entries, cache._scan_owners) for cache in caches]
+    _scan.set(None)
+    for cache in caches:
+        cache._lock = threading.Lock()
+    for cache in caches:
+        AsyncFunctionCache._reset_after_fork(cache)
+    _reset_scopes_after_fork()
+    removed.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_caches_after_fork)
 
 
 result_cache = AsyncFunctionCache.expiring(
