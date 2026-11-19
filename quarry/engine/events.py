@@ -201,6 +201,8 @@ class StaticEnvironment:
     # Diagnostic metadata, never used to answer a rule's size comparison. Explanations
     # can describe skipped tool atoms without semantically reading faulty definitions.
     tool_count: int | None = None
+    extension_state: dict[str, Any] = field(default_factory=dict)
+    missing_extension_states: frozenset[str] = frozenset()
     _system_prompt_reader: Callable[[], str | None] | None = field(
         default=None, repr=False, compare=False
     )
@@ -394,6 +396,8 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     tool_call_name_counts = _DeferredMapping(conv.messages._name_counts)
     tool_response_name_counts = _DeferredMapping(lambda: conv.messages._name_counts(responses=True))
     return StaticEnvironment(
+        extension_state=context.extension_state_values,
+        missing_extension_states=context.missing_extension_states,
         tools=_DeferredMapping(conv._tool_index),
         system_prompt=None,
         _system_prompt_reader=lambda: conv.system_prompt,
@@ -403,8 +407,6 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
         tool_call_name_counts=tool_call_name_counts,
         tool_response_name_counts=tool_response_name_counts,
         tool_count=len(conv._tools),
-        extension_state=context.extension_state_values,
-        missing_extension_states=context.missing_extension_states,
     )
 
 

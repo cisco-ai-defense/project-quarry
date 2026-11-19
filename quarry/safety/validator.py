@@ -332,7 +332,13 @@ def _is_model_input_selector_field(argument: ConditionNode, node: FieldAccess) -
 def _unexpected_keys(value: dict, allowed: set[str] | frozenset[str]) -> list[str]:
     """Return keys outside the accepted OpenAI conversation shape."""
 
+    _require_string_keys(value)
     return sorted(set(value) - set(allowed))
+
+
+def _require_string_keys(value: dict) -> None:
+    if any(type(key) is not str for key in dict.__iter__(value)):
+        raise ConversationValidationError("Conversation object keys must be exact strings")
 
 
 def _validate_json_arguments(
@@ -523,6 +529,7 @@ def _validate_content_part(part: object, message_index: int, part_index: int) ->
             f"Message at index {message_index} content[{part_index}] must be an object"
         )
     part = cast(dict[str, Any], part)
+    _require_string_keys(part)
 
     part_type = part.get("type")
     if type(part_type) is not str:
@@ -743,6 +750,7 @@ def validate_conversation(
                 f"Message at index {i} is not a dict (got {type(msg).__name__}). "
                 "Each message must be an object with 'role' and 'content' keys."
             )
+        _require_string_keys(msg)
 
         if "role" not in msg:
             raise ConversationValidationError(
