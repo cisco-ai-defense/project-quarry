@@ -144,3 +144,109 @@ def test_flow_preflight_does_not_lower_a_join_without_its_enclosing_binding():
     result = policy.scan({"messages": [{"role": "user", "content": "a"}]})
     assert result.is_complete
     assert result.rule_matches == []
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("explain", [False, True])
+def test_flow_preflight_keeps_locally_bound_join_with_an_unused_value_capture(restored, explain):
+    source = (
+        'rule "R" strings: $a_fullword = "a" fullword condition: '
+        "((any k in assistant_messages where $a_fullword in k.content as v) and "
+        '(called_tool("x") until (any o0 in assistant_messages[:] where '
+        "((any v1 in assistant_messages where o0.content contains v1.content) and "
+        'called_tool("x")))))'
+    )
+    policy = compile_policy(source)
+    if restored:
+        wire = policy.to_bytes()
+        policy = load_compiled_policy(wire)
+        assert policy.to_bytes() == wire
+    result = policy.scan({"messages": [{"role": "user", "content": "a"}]}, explain=explain)
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == []
+
+
+@pytest.mark.parametrize("outer", ["assistant_messages", "assistant_messages[:]"])
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("explain", [False, True])
+@pytest.mark.parametrize("case", ["matching", "not-matching", "good-prefix", "bad-prefix"])
+def test_nested_join_flow_keeps_join_and_until_meaning(outer, restored, explain, case):
+    source = (
+        'rule "R" condition: called_tool("x") until '
+        f"(any outer in {outer} where "
+        "(any inner in user_messages where outer.content contains inner.content))"
+    )
+    messages = [{"role": "user", "content": "needle"}]
+    if case in {"good-prefix", "bad-prefix"}:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "synthetic-call",
+                        "type": "function",
+                        "function": {
+                            "name": "x" if case == "good-prefix" else "y",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        )
+    messages.append(
+        {"role": "assistant", "content": "other" if case == "not-matching" else "needle hay"}
+    )
+    policy = compile_policy(source)
+    if restored:
+        wire = policy.to_bytes()
+        policy = load_compiled_policy(wire)
+        assert policy.to_bytes() == wire
+    result = policy.scan({"messages": messages}, explain=explain)
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == (["R"] if case in {"matching", "good-prefix"} else [])
+
+
+@pytest.mark.parametrize("problem", ["valid", "unknown", "duplicate", "missing", "absent"])
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("explain", [False, True])
+def test_locally_bound_join_flow_still_requires_its_cross_source_clock(problem, restored, explain):
+    source = (
+        'rule "R" condition: (any w in memory.writes where w.content == "hold") until '
+        "(any outer in assistant_messages[:] where "
+        "(any inner in user_messages where outer.content contains inner.content))"
+    )
+    config = QuarryConfig(config_version=2, inputs=INPUTS)
+    data = {
+        "messages": [
+            {"role": "user", "content": "needle"},
+            {"role": "assistant", "content": "needle hay"},
+        ],
+        "memory": {"writes": [{"id": "w1", "content": "hold"}]},
+        "timeline": [
+            {"input": "memory.writes", "id": "w1"},
+            {"message_index": 0},
+            {"message_index": 1},
+        ],
+    }
+    if problem == "unknown":
+        data["timeline"][0]["id"] = "unknown"
+    elif problem == "duplicate":
+        data["timeline"].append(dict(data["timeline"][0]))
+    elif problem == "missing":
+        data["timeline"].pop(0)
+    elif problem == "absent":
+        data.pop("timeline")
+    policy = compile_policy(source, runtime_config=config)
+    if restored:
+        wire = policy.to_bytes()
+        policy = load_compiled_policy(wire, runtime_config=config)
+        assert policy.to_bytes() == wire
+    result = policy.scan(data, explain=explain)
+    if problem == "valid":
+        assert result.is_complete, result.evaluation_errors
+        assert result.rule_matches == ["R"]
+    else:
+        assert result.completion_state == "incomplete"
+        assert result.rule_matches == []
+        assert set(result.evaluation_errors) == {"R"}
