@@ -1,0 +1,37 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+rule "community/example-labs/shell-review/code_execution_download_to_shell_call"
+metadata:
+    title = "Download-to-shell command submitted to a shell tool"
+    description = "Detect a direct pipeline from a recognized downloader to a shell interpreter or from a PowerShell web command to an expression evaluator in a supported shell tool call."
+    author = "Cisco AI Defense"
+    severity = "MEDIUM"
+    revision = "0"
+    updated = "2026-10-14"
+    requires_quarry = ">=0.1.0,<0.2.0"
+    taxonomy_objective = "Action-Space and Integration Abuse"
+    taxonomy_technique = "Tool Exploitation"
+    taxonomy_subtechnique = "Unsafe System / Browser / File Execution"
+    signal_channel = "tool_calls"
+strings:
+    $posix_pipeline = "(?:^|[;&\r\n])[ \t]*(?:/bin/|/usr/bin/)?(?:curl|wget|fetch)[ \t]+[^ \t\r\n|;&][^\r\n|;&]{0,511}\|[ \t]*(?:/bin/|/usr/bin/)?(?:sh|bash|dash|ksh|zsh)(?:[ \t\r\n|;&<>]|$)" regex nocase
+    $powershell_pipeline = "(?:^|[;&\r\n])[ \t]*(?:\([ \t]*)?(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)[ \t]+[^ \t\r\n|;&][^\r\n|;&]{0,511}\|[ \t]*(?:Invoke-Expression|iex)(?:[ \t\r\n|;&<>]|$)" regex nocase
+condition:
+    any call in tool_calls where
+        (call.name == "execute_shell" or call.name == "run_shell" or call.name == "shell" or
+         call.name == "Bash" or call.name == "exec_command" or call.name == "run_terminal_cmd") and
+        ($posix_pipeline in call.arguments.command or $powershell_pipeline in call.arguments.command)
