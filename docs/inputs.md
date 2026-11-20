@@ -40,6 +40,8 @@ condition:
 
 `memory.writes` can be ranged over or sliced; `w.id` and declared fields are available. A misspelled section or field fails when the rule loads. A namespace with no section value leaves that section unobserved, so a rule that needs it is skipped and the scan is incomplete. An explicit `[]` means an observed empty list. An absent `messages` section similarly leaves chat rules unobserved; absent `tools` means no tools.
 
+A public-rule import checks its argument as that rule's messages. Local `as` aliases in a called rule belong to that check and may reuse a caller's alias name. Defining the same alias twice in one `and` chain is rejected.
+
 Only sections read by selected rules are validated. A bad section fails rules that read it while other rules retain their verdicts. An unknown top-level key makes the scan invalid. Each read section and the chat have their own size and nesting limits.
 
 ## Text spans
@@ -65,7 +67,14 @@ Span searches follow each selected occurrence, including different transformed c
 one source message. Indexed `.content` and `.result` sources retain their owning selection;
 reading message content alone does not decode its tool arguments.
 
-Compiler identity is 22 with compiled-policy format 9 unchanged. Recompile older artifacts
+Span collections support `union(first, second)` and `outermost(spans)`. Union removes
+duplicate spans; outermost removes spans contained by another span. With limits enabled,
+each union input and its deduplicated result must fit `max_comprehension_size`. Span
+filters, quantifiers and outermost inputs use the same bound. Exceeding it fails the
+evaluation without truncating results. These operations also honor the scan deadline;
+disabling size limits does not disable that deadline.
+
+Compiler identity is 25 with compiled-policy format 10. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 
 For declared-input scans, plugin decision paths hash only the rule's selected, validated data. Unread sections do not change `conversation_sha256`; it is null when the selected data cannot be safely hashed.

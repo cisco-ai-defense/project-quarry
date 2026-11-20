@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 FORMAT_KIND = "quarry.compiled-policy"
-FORMAT_VERSION = 9
+FORMAT_VERSION = 10
 _WIRE_SCHEMAS: list[tuple[type[DataclassInstance], set[str]]] = []
 _RESOURCE_REQUIREMENT_KEYS = frozenset(
     {
@@ -136,7 +136,7 @@ _ARTIFACT_KEYS = _wire_fields(
     CompiledRuleArtifact,
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
     "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions "
-    "full_trace_proof decision_tree split_checks flow_requirements",
+    "full_trace_proof decision_tree split_checks flow_requirements declared_resources",
     unserialized="node_atom_ids",
 )
 _FLOW_REQUIREMENT_FIELDS = _wire_fields(
@@ -342,6 +342,7 @@ def _artifact_to_wire(
             for atom_id, plan in sorted(artifact.closed_conditions.items())
         ],
         "full_trace_proof": artifact.full_trace_proof,
+        "declared_resources": _json_value(artifact.declared_resources),
         "decision_tree": _decision_tree_to_wire(artifact.decision_tree),
         "dfa": _dfa_to_wire(artifact.dfa),
         "split_checks": [
@@ -1037,6 +1038,43 @@ def _check_split_checks(artifact: CompiledRuleArtifact) -> None:
             raise _fail("a split atom must name the check it carries")
 
 
+def _declared_resources_from_wire(raw: object) -> dict[str, frozenset]:
+    """Declared preparation requirements are metadata, never dispatch instructions."""
+    value = _mapping(raw, "declared_resources")
+    if set(value) - (_RESOURCE_REQUIREMENT_KEYS | {"functions"}):
+        raise _fail("declared_resources contains an unknown resource kind")
+    result = {}
+    for name, members in value.items():
+        checked = []
+        for member in _list(members, f"declared_resources.{name}"):
+            if name in {"model_operations", "transforms"}:
+                row = _list(member, f"declared_resources.{name}[]")
+                if len(row) != 2:
+                    raise _fail("a declared operation or transform requires two values")
+                if name == "transforms":
+                    kind = _boolean(row[0], "declared transform kind")
+                    reference = _string(row[1], "declared transform reference")
+                    adapter_transform_reference_parts(reference, kind)
+                    checked.append((kind, reference))
+                else:
+                    alias = _string(row[0], "declared model alias")
+                    operation = _string(row[1], "declared model operation")
+                    if operation not in {
+                        "score",
+                        "complete",
+                        "input_tokens",
+                        "split",
+                        "classify",
+                        "spans",
+                    }:
+                        raise _fail("declared model operation is unsupported")
+                    checked.append((alias, operation))
+            else:
+                checked.append(_string(member, f"declared_resources.{name}[]"))
+        result[name] = frozenset(checked)
+    return result
+
+
 def _artifact_from_wire(
     raw: object,
     inputs: frozenset[str] = frozenset(),
@@ -1073,6 +1111,7 @@ def _artifact_from_wire(
         tool_quantifiers=_tool_quantifiers_from_wire(value["tool_quantifiers"]),
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
         split_checks=_split_checks_from_wire(value["split_checks"], inputs, path, count),
+        declared_resources=_declared_resources_from_wire(value["declared_resources"]),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
         flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),

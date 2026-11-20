@@ -1544,11 +1544,6 @@ _SPAN_FILTER = (
             id="unknown-completion-field",
         ),
         pytest.param(
-            "condition: " + 'any c in model("email").spans(messages, 0.5) where true',
-            "only model().split() can be a comprehension collection",
-            id="spans-as-a-comprehension-collection",
-        ),
-        pytest.param(
             "condition: " + _SPLIT + "true",
             "model().split() must be consumed by a score predicate",
             id="split-without-a-score",
@@ -1686,6 +1681,37 @@ def test_an_unsupported_model_expression_is_rejected_at_load(
         compile_policy(f'rule "R"\n{body}\n', **v2_policy_options)
 
     assert reason in str(error.value)
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_spans_as_a_comprehension_collection_is_admitted_with_source_coordinates(
+    tmp_path, restored
+):
+    # The former spans-as-a-comprehension-collection rejection is now an admitted form.
+    from quarry import load_compiled_policy
+
+    config = QuarryConfig.from_mapping(
+        {"config_version": 2, "models": {"email": model_entry(category="EMAIL", spans=0)}},
+        tmp_path,
+        require_rules=False,
+    )
+    adapter = ModelAdapter()
+    backend = ModelInferenceBackend(
+        config, adapters={"fake": adapter}, message_builders={"test": passthrough_builder}
+    )
+    source = 'rule "R" condition: any c in model("email").spans(messages, 0.5) where true\ncollect: [s for s in model("email").spans(messages, 0.5) if true]'
+    policy = compile_policy(source, runtime_config=config, model_inference_backend=backend)
+    if restored:
+        raw = policy.to_bytes()
+        policy = load_compiled_policy(raw, runtime_config=config, model_inference_backend=backend)
+        assert policy.to_bytes() == raw
+    data = {"messages": [{"role": "user", "content": "send to alice@example.com"}]}
+    result = policy.scan(data, explain=True)
+    assert result.is_complete and result.rule_matches == ["R"]
+    spans = [item.value for item in result.outputs["R"].items]
+    assert len(spans) == 1
+    assert (spans[0].message_index, spans[0].start, spans[0].end) == (0, 8, 25)
+    assert adapter.classifications == 1 and adapter.classification_messages == [data["messages"]]
 
 
 # A judge of fixed positions, as each input reads the newest turns of _FIXED_CONVERSATION: the

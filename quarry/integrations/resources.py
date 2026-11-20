@@ -85,6 +85,10 @@ def requirements_from_artifact(artifact) -> dict[str, set[Any]]:
     """Derive runtime resources directly from one compiler-owned artifact."""
 
     requirements = requirements_from_specs(artifact.atom_specs.values())
+    for name, values in artifact.declared_resources.items():
+        if name not in requirements:
+            raise ValueError(f"compiled artifact contains an unknown resource kind {name!r}")
+        requirements[name].update(values)
     if artifact.collect_plan is not None:
         collect = _expression_collector(requirements)
         collect(artifact.collect_plan.source)

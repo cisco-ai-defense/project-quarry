@@ -338,8 +338,10 @@ async def evaluate_model_expression(
         )
         if not isinstance(spans, CollectionResult):
             raise TypeError("a span filter requires a span collection")
+        _check_span_limit(context, len(spans.items), "span filter input")
         survivors = []
         for item in spans.items:
+            raise_if_evaluation_expired()
             scope = {**environment, str(expression.value): item.value}
             if not truth(
                 await evaluate_model_expression(
@@ -377,8 +379,10 @@ async def evaluate_model_expression(
         )
         if not isinstance(spans, CollectionResult):
             raise TypeError("a span quantifier requires a span collection")
+        _check_span_limit(context, len(spans.items), "span quantifier input")
         wanted = kind == "span_any"
         for item in spans.items:
+            raise_if_evaluation_expired()
             held = truth(
                 await evaluate_model_expression(
                     predicate,
@@ -403,6 +407,7 @@ async def evaluate_model_expression(
         )
         if not isinstance(spans, CollectionResult):
             raise TypeError("outermost() requires a span collection")
+        _check_span_limit(context, len(spans.items), "outermost() input")
         return replace(spans, items=tuple(_outermost_spans(spans.items)))
     if kind == "union":
         lists = [
@@ -418,7 +423,11 @@ async def evaluate_model_expression(
         ]
         if not all(isinstance(spans, CollectionResult) for spans in lists):
             raise TypeError("union requires span collections")
-        return _union_spans(lists)
+        for spans in lists:
+            _check_span_limit(context, len(spans.items), "union() input")
+        combined = _union_spans(lists)
+        _check_span_limit(context, len(combined.items), "union() result")
+        return combined
     if kind == "extract_windows":
         return await _evaluate_extract_windows(
             expression, context, event, environment, trace, regex_backend
@@ -1424,8 +1433,10 @@ def _score(span: Span) -> float:
 
 
 def _union_spans(lists: list[CollectionResult[Span]]) -> CollectionResult[Span]:
+    raise_if_evaluation_expired()
     kept: dict[tuple[Span, int | None], tuple[int, ResultItem[Span]]] = {}
     for order, item in enumerate(item for spans in lists for item in spans.items):
+        raise_if_evaluation_expired()
         unscored = replace(item.value, score=None)
         key = (unscored, id(unscored._source) if unscored.source is not None else None)
         earlier = kept.get(key)
@@ -1433,6 +1444,7 @@ def _union_spans(lists: list[CollectionResult[Span]]) -> CollectionResult[Span]:
             kept[key] = (order if earlier is None else earlier[0], item)
     items = [item for _, item in sorted(kept.values(), key=lambda pair: pair[0])]
     items.sort(key=lambda item: _span_ends(item.value))
+    raise_if_evaluation_expired()
     categories = {spans.category for spans in lists}
     return CollectionResult(
         output_type="span_collection",
@@ -1443,8 +1455,10 @@ def _union_spans(lists: list[CollectionResult[Span]]) -> CollectionResult[Span]:
 
 
 def _outermost_spans(items: tuple[ResultItem[Span], ...]) -> list[ResultItem[Span]]:
+    raise_if_evaluation_expired()
     longest: dict[_SpanPoint, tuple[_SpanPoint, int]] = {}
     for index, item in enumerate(items):
+        raise_if_evaluation_expired()
         start, end = _span_ends(item.value)
         best = longest.get(start)
         if (
@@ -1456,6 +1470,7 @@ def _outermost_spans(items: tuple[ResultItem[Span], ...]) -> list[ResultItem[Spa
     kept = []
     furthest: _SpanPoint | None = None
     for start in sorted(longest):
+        raise_if_evaluation_expired()
         end, index = longest[start]
         if furthest is None or end > furthest:
             kept.append(items[index])
