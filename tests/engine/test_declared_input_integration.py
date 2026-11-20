@@ -238,6 +238,23 @@ def test_prepared_input_policy_keeps_descriptions_out_of_its_identity(tmp_path):
     assert restored.scan(DATA).rule_matches == ["Read"]
 
 
+def test_chat_size_limit_only_blocks_rules_that_read_chat():
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(RULE, 'rule "Chat" condition: user_said("hello")'),
+            inputs=INPUTS,
+        ),
+        limits=SafetyLimits(max_total_size=2_000),
+    )
+    data = {**DATA, "messages": [{"role": "user", "content": "hello" * 2_000}]}
+    assert scanner.scan_data(data, rules_subset={"Read"}).rule_matches == ["Read"]
+    result = scanner.scan_data(data)
+    assert result.rule_matches == ["Read"]
+    assert result.completion_state == "incomplete"
+    assert "max_total_size" in result.evaluation_errors["Chat"]
+
+
 @pytest.mark.parametrize("declared", [False, True])
 def test_conversation_preparation_keeps_typed_failure_classification(monkeypatch, declared):
     config = QuarryConfig(

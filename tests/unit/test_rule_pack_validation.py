@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from shutil import copyfile
 
@@ -26,7 +27,7 @@ import pytest
 
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.scanner import DSLScanner
-from rules.validate import validate_repository
+from rules.validate import validate_proposed_packs, validate_repository
 
 _REQUIRED_METADATA = {
     "description": "Detect an example marker.",
@@ -69,6 +70,66 @@ def _add_rule(
         "# Example marker\n\nCovers messages containing an example marker.\n", encoding="utf-8"
     )
     return path
+
+
+def _commit_packs(repository: Path) -> str:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repository, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    git("add", "--", "rules")
+    git(
+        "-c",
+        "user.name=Quarry tests",
+        "-c",
+        "user.email=tests@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=" + str(repository / "empty-hooks"),
+        "commit",
+        "--quiet",
+        "-m",
+        "Proposed rule pack data",
+    )
+    return git("rev-parse", "HEAD")
+
+
+def test_proposed_rule_pack_is_read_without_checking_it_out(repository: Path) -> None:
+    proposal = _add_rule(repository, pack="community/example-author/example-pack")
+    commit = _commit_packs(repository)
+    proposal.unlink()
+
+    report = validate_proposed_packs(repository, commit)
+
+    assert report.ok, report.errors
+    assert report.compiled_rules == 1
+    assert not proposal.exists()
+
+
+def test_proposed_rule_pack_uses_trusted_schema(repository: Path) -> None:
+    _add_rule(repository, metadata={"author": ""})
+    schema = repository / "rules/rule-packs/metadata-schema.yaml"
+    trusted_schema = schema.read_text(encoding="utf-8")
+    schema.write_text("required: []\n", encoding="utf-8")
+    commit = _commit_packs(repository)
+    schema.write_text(trusted_schema, encoding="utf-8")
+
+    report = validate_proposed_packs(repository, commit)
+
+    assert not report.ok
+    assert any("required metadata 'author'" in error for error in report.errors)
+
+
+def test_proposed_rule_pack_rejects_nonregular_entries(repository: Path) -> None:
+    proposal = _add_rule(repository)
+    proposal.with_name("pointer.md").symlink_to("README.md")
+    commit = _commit_packs(repository)
+
+    with pytest.raises(ValueError, match="regular non-executable files"):
+        validate_proposed_packs(repository, commit)
 
 
 def test_core_and_community_rules_compile_with_readmes(repository: Path) -> None:
