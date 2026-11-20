@@ -138,7 +138,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 21 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 22 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
@@ -224,3 +224,44 @@ dispatch still requires a self-contained sequence with the call before its resul
 
 Copied media-derived text retains its owning source even when it has part context without
 character offsets. Combining values from different conversations fails before model dispatch.
+
+## Calling another public rule
+
+Import a public rule under a local name and call it on the messages it should inspect:
+
+```text
+rule "NeedsReview"
+condition:
+    user_said("ignore")
+
+rule "SelectedReview"
+imports:
+    review = "NeedsReview"
+condition:
+    review(messages.user_messages)
+```
+
+The argument can be a messages value or a single selected message. The called rule uses that
+selection as its conversation, retains its source ownership, and shares the caller's configured
+transforms, resources, deadlines and model-call limits. Each call has its own local value memo;
+two calls over different selections cannot reuse one another's transformed value. Local content
+transforms remain local work when used as call arguments.
+
+Parameters used by a called rule count as uses in its callers, including through nested
+calls. Each child receives the declarations it references; parameters used only by its
+caller or a sibling stay outside that child's schema. Same-named declarations must agree
+on type and binding. Unused, undeclared or conflicting parameters still reject the generation.
+
+Calls may nest, but imports cannot form a cycle. A rule can import at most 128 names, each
+containing at most 256 characters. Linking checks the complete imported generation against a
+100,000-item budget for expanded condition nodes and copied string entries before cloning it.
+The imported generation is also limited to 4,096 expanded checks, including their entry points,
+and 64 call edges along any path. Prepared-policy serialization and loading enforce the same
+per-policy check and depth limits and reject cycles.
+Called checks and their compilation retries share the enclosing compilation attempt's work
+budget. Exceeding either budget rejects the generation.
+
+When a called rule orders messages with another event source, the supplied timeline must also
+order the selected conversation. Reordered, repeated or constructed selections that cannot be
+projected onto that timeline fail the rule rather than inventing an ordering. Rules that do not
+read such an ordering keep their ordinary selected-conversation behavior.

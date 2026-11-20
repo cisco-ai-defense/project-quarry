@@ -33,6 +33,7 @@ import orjson
 
 from quarry.config import QuarryConfig
 from quarry.engine import temporal as T
+from quarry.engine.artifacts import dfa_hash
 from quarry.engine.atoms import (
     MAX_MODEL_EXPRESSION_DEPTH,
     MAX_MODEL_EXPRESSION_FANOUT,
@@ -51,6 +52,8 @@ from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, Elemen
 from quarry.engine.collect import CollectPlan
 from quarry.engine.contracts import (
     COMPILER_VERSION,
+    MAX_NESTED_RULE_CHECKS,
+    MAX_NESTED_RULE_DEPTH,
     ClosedPlan,
     CompiledRuleArtifact,
     DecisionTree,
@@ -133,7 +136,7 @@ _ARTIFACT_KEYS = _wire_fields(
     CompiledRuleArtifact,
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
     "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions "
-    "full_trace_proof decision_tree flow_requirements",
+    "full_trace_proof decision_tree split_checks flow_requirements",
     unserialized="node_atom_ids",
 )
 _FLOW_REQUIREMENT_FIELDS = _wire_fields(
@@ -300,7 +303,24 @@ def _dfa_to_wire(dfa: DFA) -> dict[str, Any]:
     }
 
 
-def _artifact_to_wire(artifact: CompiledRuleArtifact) -> dict[str, Any]:
+def _called_rule_path(path: tuple[int, ...], identity: int, count: list[int]) -> tuple[int, ...]:
+    """Count occurrences, retaining only ancestors so shared siblings each consume work."""
+
+    if identity in path:
+        raise _fail("called-rule artifacts must not form a cycle")
+    if len(path) > MAX_NESTED_RULE_DEPTH:
+        raise _fail(f"called-rule depth exceeds {MAX_NESTED_RULE_DEPTH}")
+    count[0] += 1
+    if count[0] > MAX_NESTED_RULE_CHECKS:
+        raise _fail(f"called-rule check count exceeds {MAX_NESTED_RULE_CHECKS}")
+    return (*path, identity)
+
+
+def _artifact_to_wire(
+    artifact: CompiledRuleArtifact, *, _path: tuple[int, ...] = (), _count: list[int] | None = None
+) -> dict[str, Any]:
+    count = [0] if _count is None else _count
+    path = _called_rule_path(_path, id(artifact), count)
     return {
         "rule_name": artifact.rule_name,
         "dfa_hash": artifact.dfa_hash,
@@ -324,6 +344,10 @@ def _artifact_to_wire(artifact: CompiledRuleArtifact) -> dict[str, Any]:
         "full_trace_proof": artifact.full_trace_proof,
         "decision_tree": _decision_tree_to_wire(artifact.decision_tree),
         "dfa": _dfa_to_wire(artifact.dfa),
+        "split_checks": [
+            [atom_id, _artifact_to_wire(check, _path=path, _count=count)]
+            for atom_id, check in sorted(artifact.split_checks.items())
+        ],
         "flow_requirements": [
             _flow_requirement_to_wire(requirement) for requirement in artifact.flow_requirements
         ],
@@ -960,7 +984,66 @@ def _check_closed_conditions(artifact: CompiledRuleArtifact) -> None:
         visit(atom_id, ())
 
 
-def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> CompiledRuleArtifact:
+def _split_checks_from_wire(
+    raw: object, inputs: frozenset[str], path: tuple[int, ...], count: list[int]
+) -> dict[str, CompiledRuleArtifact]:
+    checks: dict[str, CompiledRuleArtifact] = {}
+    for index, entry in enumerate(_list(raw, "rule.artifact.split_checks")):
+        name = f"rule.artifact.split_checks[{index}]"
+        row = _list(entry, name)
+        if len(row) != 2:
+            raise _fail(f"{name} must contain an atom id and an artifact")
+        atom_id = _string(row[0], f"{name}.atom_id")
+        if atom_id in checks:
+            raise _fail(f"{name} duplicates atom id {atom_id!r}")
+        checks[atom_id] = _artifact_from_wire(row[1], inputs, _path=path, _count=count)
+    return checks
+
+
+def _check_split_checks(artifact: CompiledRuleArtifact) -> None:
+    read = set(artifact.automaton_atoms)
+    for atom_id in tuple(read):
+        if plan := artifact.tool_quantifiers.get(atom_id):
+            read.update(T.atoms_of(plan.body))
+    splits = {
+        atom_id
+        for atom_id in read
+        if atom_id in artifact.atom_specs and artifact.atom_specs[atom_id].detector == "split"
+    }
+    if set(artifact.split_checks) != splits:
+        raise _fail("split checks must match the split atoms the automata read")
+    for atom_id, check in artifact.split_checks.items():
+        spec = artifact.atom_specs[atom_id]
+        if (
+            spec.predicate != "external"
+            or spec.detector_arg != "any"
+            or spec.model_expression is None
+        ):
+            raise _fail("a split atom must carry a called-check messages expression")
+        minimum_cost = max(
+            (child.cost for child in check.atom_specs.values()),
+            key=lambda cost: cost.rank,
+            default=Cost.PURE,
+        )
+        if model_expression_requires_model(spec.model_expression):
+            minimum_cost = max(minimum_cost, Cost.LLM, key=lambda cost: cost.rank)
+        if spec.cost.rank < minimum_cost.rank:
+            raise _fail("a split atom cost cannot hide work done by its called check")
+        if (
+            len(spec.patterns) != 2
+            or spec.patterns[1] != check.dfa_hash
+            or (check.dfa_hash != dfa_hash(check.dfa, check.compiler_version))
+        ):
+            raise _fail("a split atom must name the check it carries")
+
+
+def _artifact_from_wire(
+    raw: object,
+    inputs: frozenset[str] = frozenset(),
+    *,
+    _path: tuple[int, ...] = (),
+    _count: list[int] | None = None,
+) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
     compiler_version = _string(value.get("compiler_version"), "rule.artifact.compiler_version")
     if compiler_version != COMPILER_VERSION:
@@ -968,6 +1051,8 @@ def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> Co
             f"compiler_version {compiler_version!r} is unsupported; expected {COMPILER_VERSION!r}"
         )
     _exact_keys(value, _ARTIFACT_KEYS, "rule.artifact")
+    count = [0] if _count is None else _count
+    path = _called_rule_path(_path, id(value), count)
     specs = [
         _atom_from_wire(item, index)
         for index, item in enumerate(_list(value["atom_specs"], "rule.artifact.atom_specs"))
@@ -987,6 +1072,7 @@ def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> Co
         collect_plan=_collect_from_wire(value["collect_plan"]),
         tool_quantifiers=_tool_quantifiers_from_wire(value["tool_quantifiers"]),
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
+        split_checks=_split_checks_from_wire(value["split_checks"], inputs, path, count),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
         flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),
@@ -1012,6 +1098,7 @@ def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> Co
     ):
         raise _fail("tool quantifier body atoms must be static")
     _check_closed_conditions(artifact)
+    _check_split_checks(artifact)
     _check_decision_tree(artifact)
     return artifact
 

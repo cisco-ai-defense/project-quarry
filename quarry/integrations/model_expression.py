@@ -1825,6 +1825,7 @@ def build_model_result_evidence(
         refusals=trace.refusals,
         judge_reasons=trace.judge_reasons,
         omitted_judge_reasons=trace.omitted_judge_reasons,
+        call_count=len(trace.calls),
     )
 
 
