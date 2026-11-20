@@ -150,19 +150,29 @@ samples, raw outputs, and media out of the contribution.
 
 ## Automated checks
 
-The CI workflow (`.github/workflows/ci.yml`)
-runs the rule-pack validator (`rules/validate.py`)
-on every pull request and on pushes to `main`, using Python 3.11, 3.12, and 3.13.
-It checks all core and community packs across every publisher:
+The [trusted rule pack workflow](../.github/workflows/trusted-rule-packs.yml)
+checks proposed core and community packs before merge. It runs the validator,
+compiler, and locked dependencies from the pull request's base commit on
+`main` and reads the proposed merge's pack files as data from Git.
+It uses the metadata schema from `main`. The regular CI workflow validates the
+published packs again on pushes to `main` across Python 3.11, 3.12, and 3.13.
+Land compiler or schema changes before submitting rules that depend on them.
+
+The validator checks:
 
 - Rule folder and file layout, one README per rule, and globally unique names.
-- Required string metadata and compilation against the
-  checkout's Quarry runtime, including `requires_quarry` compatibility.
+- Required string metadata and compilation against the trusted Quarry runtime,
+  including `requires_quarry` compatibility.
 - Supported text file formats and bounded, contained file paths.
 
 CI compiles rules offline. It does not run models or probers, fetch linked
 datasets, or determine whether text contains prohibited content. Maintainers
 review contributions for compliance with the content policy.
+
+To enforce this check before merge, configure the organization ruleset to
+require the workflow file from `refs/heads/main` for the `main` branch of
+`cisco-ai-defense/project-quarry`. Select the workflow itself so the requirement
+is tied to the protected source.
 
 ## Maintainer review
 

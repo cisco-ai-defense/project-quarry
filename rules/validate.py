@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import yaml
@@ -31,6 +33,9 @@ from quarry.engine.compiler import compile_rule
 from quarry.safety.validator import RuleValidator
 
 _MAX_FILE_BYTES = 2 * 1024 * 1024
+_MAX_PACK_BYTES = 64 * 1024 * 1024
+_PACK_PATH = PurePosixPath("rules/rule-packs")
+_SCHEMA_PATH = _PACK_PATH / "metadata-schema.yaml"
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _STEM = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
 _PACK_DEPTH = {"core": 3, "community": 4}
@@ -212,7 +217,7 @@ def validate_repository(repo_root: Path) -> ValidationReport:
     """Check the on-disk pack layout, metadata and rule compilation."""
     root = Path(repo_root).resolve()
     report = ValidationReport()
-    packs_dir = root / "rules/rule-packs"
+    packs_dir = root / _PACK_PATH
     files = _pack_files(root, packs_dir, report)
     if report.errors:
         return report
@@ -237,12 +242,86 @@ def validate_repository(repo_root: Path) -> ValidationReport:
     return report
 
 
+def _git(root: Path, *args: str) -> bytes:
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
+
+
+def validate_proposed_packs(trusted_root: Path, proposed_commit: str) -> ValidationReport:
+    """Validate a proposed Git tree as data using the checkout's trusted schema."""
+    if re.fullmatch(r"[0-9a-f]{40}", proposed_commit) is None:
+        raise ValueError("expected a full Git commit SHA")
+    entries = _git(
+        trusted_root, "ls-tree", "-rlz", "--full-tree", proposed_commit, "--", _PACK_PATH.as_posix()
+    )
+
+    with TemporaryDirectory(prefix="quarry-proposed-packs-") as directory:
+        staged = Path(directory)
+        (staged / _PACK_PATH).mkdir(parents=True)
+        total_bytes = 0
+        has_schema = False
+        for entry in entries.split(b"\x00"):
+            if not entry:
+                continue
+            header, raw_path = entry.split(b"\t", 1)
+            mode, kind, oid, size = header.split()
+            if mode != b"100644" or kind != b"blob":
+                raise ValueError("rule pack entries must be regular non-executable files")
+            name = raw_path.decode("utf-8")
+            path = PurePosixPath(name)
+            if (
+                path == _PACK_PATH
+                or not path.is_relative_to(_PACK_PATH)
+                or ".." in path.parts
+                or "\\" in name
+                or ":" in name
+                or path.as_posix() != name
+            ):
+                raise ValueError("invalid rule pack path")
+            if path == _SCHEMA_PATH:
+                has_schema = True
+                continue
+            length = int(size)
+            total_bytes += length
+            if length > _MAX_FILE_BYTES or total_bytes > _MAX_PACK_BYTES:
+                raise ValueError("rule pack input exceeds the file or pack size limit")
+            destination = staged / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as stream:
+                stream.write(_git(trusted_root, "cat-file", "blob", oid.decode("ascii")))
+
+        if not has_schema:
+            raise ValueError("proposed rule packs must retain metadata-schema.yaml")
+        (staged / _SCHEMA_PATH).write_text(
+            _read_text(trusted_root / _SCHEMA_PATH), encoding="utf-8"
+        )
+        return validate_repository(staged)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--root", type=Path, default=Path(__file__).resolve().parents[1], help="repository root"
     )
-    report = validate_repository(parser.parse_args(argv).root)
+    parser.add_argument(
+        "--proposed-commit", help="validate only rule pack data from a fetched Git commit"
+    )
+    args = parser.parse_args(argv)
+    if args.proposed_commit is not None:
+        try:
+            report = validate_proposed_packs(args.root, args.proposed_commit)
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            print("FAIL: could not read the proposed rule pack files")
+            return 1
+        # Compiler diagnostics can contain submitted text. Keep it out of CI logs.
+        print(
+            f"{'PASS' if report.ok else 'FAIL'}: {report.compiled_rules} rules compiled, "
+            f"{len(report.errors)} errors, {len(report.warnings)} warnings"
+        )
+        if not report.ok:
+            print("Run the rule pack validator locally to see the diagnostics.")
+        return 0 if report.ok else 1
+
+    report = validate_repository(args.root)
     for warning in report.warnings:
         print(f"WARNING: {warning}")
     for error in report.errors:
