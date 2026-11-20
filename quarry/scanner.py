@@ -19,8 +19,8 @@
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
 
@@ -96,6 +96,7 @@ from quarry.safety.validator import (
     validate_conversation,
     validate_conversation_arguments,
 )
+from quarry.telemetry import ModelUsageLedger, add_durations, elapsed_seconds, merge_model_usage
 from quarry.types.context import ScanContext
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
@@ -133,6 +134,28 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
     if issubclass(error_type, EvaluationError):
         return ScanFailureCategory.EVALUATION
     return ScanFailureCategory.UNKNOWN
+
+
+def _raised_timeout_result(
+    error: Exception,
+    *,
+    file_path: Path | None,
+    scan_time: float,
+) -> ScanResult | None:
+    """Project safe partial telemetry from a raised scan timeout into wrapper semantics."""
+
+    if not isinstance(error, QuarryTimeoutError) or error.scan_result is None:
+        return None
+    partial = error.scan_result
+    return ScanResult(
+        file_path=file_path,
+        rule_matches=[],
+        scan_time=scan_time,
+        error=str(error),
+        error_category=ScanFailureCategory.TIMEOUT,
+        rule_timings=dict(sorted((partial.rule_timings or {}).items())) or None,
+        model_usage=merge_model_usage([partial.model_usage]),
+    )
 
 
 def _required_surfaces(artifact: CompiledRuleArtifact) -> set[str]:
@@ -1076,8 +1099,23 @@ class DSLScanner:
         verdict of its request is final, under its own ``evidence_deadline``.
         """
 
-        start_time = datetime.now()
+        start_time = monotonic()
+        model_usage = ModelUsageLedger()
+        partial_rule_timings: dict[str, float] = {}
         timed_out_rules = []
+
+        def timeout_result(*, timed_out: list[str] | None = None) -> ScanResult:
+            """Detach the bounded telemetry available when fail-on-timeout raises."""
+
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=elapsed_seconds(start_time),
+                timed_out_rules=timed_out or None,
+                rule_timings=dict(sorted(partial_rule_timings.items())) or None,
+                model_usage=model_usage.snapshot(),
+            )
+
         selected_names = rules_subset if rules_subset is not None else set(self.compiled_rules)
         parameter_schema = tuple(
             spec
@@ -1090,7 +1128,7 @@ class DSLScanner:
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=0.0,
+                scan_time=elapsed_seconds(start_time),
                 error=f"Parameter validation error: {message}",
                 validation_error=message,
             )
@@ -1130,7 +1168,7 @@ class DSLScanner:
                 return ScanResult(
                     file_path=file_path,
                     rule_matches=[],
-                    scan_time=(datetime.now() - start_time).total_seconds(),
+                    scan_time=elapsed_seconds(start_time),
                     error=f"Rule selection error: {reason}",
                     error_category=ScanFailureCategory.RULE_SELECTION,
                 )
@@ -1261,11 +1299,15 @@ class DSLScanner:
                 chat = {"messages": []}
         except QuarryTimeoutError as exc:
             if self.limits.fail_on_timeout:
+                partial = timeout_result()
+                partial.error = f"Input preparation timed out: {exc}"
+                partial.error_category = ScanFailureCategory.TIMEOUT
+                exc.with_scan_result(partial)
                 raise
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=f"Input preparation timed out: {exc}",
                 error_category=ScanFailureCategory.TIMEOUT,
             )
@@ -1294,7 +1336,7 @@ class DSLScanner:
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=f"Conversation validation error: {message}",
                 validation_error=message,
             )
@@ -1303,7 +1345,7 @@ class DSLScanner:
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=f"Conversation preparation failed: {diagnostic}",
                 error_category=ScanFailureCategory.PREPARATION,
                 evaluation_error_categories={"conversation_preparation": _failure_category(exc)},
@@ -1315,11 +1357,15 @@ class DSLScanner:
                 validate_conversation_arguments(context.conversation.messages)
             except QuarryTimeoutError as exc:
                 if self.limits.fail_on_timeout:
+                    partial = timeout_result()
+                    partial.error = f"Tool argument validation timed out: {exc}"
+                    partial.error_category = ScanFailureCategory.TIMEOUT
+                    exc.with_scan_result(partial)
                     raise
                 return ScanResult(
                     file_path=file_path,
                     rule_matches=[],
-                    scan_time=(datetime.now() - start_time).total_seconds(),
+                    scan_time=elapsed_seconds(start_time),
                     error=f"Tool argument validation timed out: {exc}",
                     error_category=ScanFailureCategory.TIMEOUT,
                 )
@@ -1330,7 +1376,7 @@ class DSLScanner:
                     return ScanResult(
                         file_path=file_path,
                         rule_matches=[],
-                        scan_time=(datetime.now() - start_time).total_seconds(),
+                        scan_time=elapsed_seconds(start_time),
                         error=f"Conversation validation error: {message}",
                         validation_error=message,
                     )
@@ -1395,11 +1441,15 @@ class DSLScanner:
             )
         except QuarryTimeoutError as exc:
             if self.limits.fail_on_timeout:
+                partial = timeout_result()
+                partial.error = f"Input preparation timed out: {exc}"
+                partial.error_category = ScanFailureCategory.TIMEOUT
+                exc.with_scan_result(partial)
                 raise
             return ScanResult(
                 file_path=file_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=f"Input preparation timed out: {exc}",
                 error_category=ScanFailureCategory.TIMEOUT,
             )
@@ -1454,8 +1504,8 @@ class DSLScanner:
             record = ScanRecord()
             reports_path = decision_paths and tree is not None and tree.decomposed
             path_record = record if reports_path else None
+            rule_start = monotonic()
             try:
-                rule_start = datetime.now()
                 # Version 1 preserves its separate external-inference budget. Version 2 uses
                 # one optional rule-wide budget for local work, limiter waits, retries, and
                 # provider calls. The inspection deadline remains an independent upper bound.
@@ -1544,7 +1594,7 @@ class DSLScanner:
                             else f"Rule {rule_name} timeout"
                         )
                         raise QuarryTimeoutError(message) from e
-                rule_elapsed = (datetime.now() - rule_start).total_seconds()
+                rule_elapsed = elapsed_seconds(rule_start)
                 rule_ctx.evaluation_warnings.extend(warnings)
 
                 return {
@@ -1575,6 +1625,7 @@ class DSLScanner:
                     "error": None,
                     "matched": False,
                     "decision_path": path_record,
+                    "timing": elapsed_seconds(rule_start),
                 }
 
             except Exception as e:
@@ -1588,7 +1639,10 @@ class DSLScanner:
                     "timeout": False,
                     "matched": False,
                     "decision_path": path_record,
+                    "timing": elapsed_seconds(rule_start),
                 }
+            finally:
+                partial_rule_timings[rule_name] = elapsed_seconds(rule_start)
 
         # Run rules in parallel (filter by subset if provided). Invalid empty subsets
         # were rejected above; keep the explicit None check so selection is exact.
@@ -1624,17 +1678,24 @@ class DSLScanner:
                 selected_rules[name] = rule
         rules_to_run = selected_rules
         call_limit = self.limits.max_model_calls if self.limits.enforce_limits else None
-        with model_call_budget(call_limit):
+        with model_call_budget(call_limit, model_usage):
             tasks = [
                 asyncio.create_task(evaluate_rule(name, rule))
                 for name, rule in rules_to_run.items()
             ]
             try:
                 results = await asyncio.gather(*tasks)
-            except BaseException:
+            except BaseException as error:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                if isinstance(error, QuarryTimeoutError):
+                    timed_out = [
+                        name
+                        for (name, _rule), task in zip(rules_to_run.items(), tasks, strict=True)
+                        if not task.cancelled() and isinstance(task.exception(), QuarryTimeoutError)
+                    ]
+                    error.with_scan_result(timeout_result(timed_out=timed_out))
                 raise
 
         matches = []
@@ -1647,6 +1708,7 @@ class DSLScanner:
 
         for res in results:
             rule_name = res["rule_name"]
+            rule_timings[rule_name] = res["timing"]
             if res["decision_path"] is not None:
                 paths[rule_name] = res["decision_path"]
 
@@ -1663,8 +1725,6 @@ class DSLScanner:
                 continue
 
             verdicts.append(res)
-            rule_timings[rule_name] = res["timing"]
-
             if res.get("warnings"):
                 context.evaluation_warnings.extend(res["warnings"])
 
@@ -1784,6 +1844,7 @@ class DSLScanner:
                 else None,
                 outputs=outputs,
                 decision_paths=decision_path_records(),
+                model_usage=model_usage.snapshot(),
                 **evidence(),
             )
 
@@ -1793,16 +1854,41 @@ class DSLScanner:
             scan = current_scan()
 
             async def finish(result: ScanResult) -> ScanResult:
-                with scan_scope(scan):
-                    await gather_evidence()
-                return replace(result, decision_paths=decision_path_records(), **evidence())
+                evidence_started = monotonic()
+                try:
+                    with scan_scope(scan), model_call_budget(call_limit, model_usage):
+                        await gather_evidence()
+                except QuarryTimeoutError as error:
+                    partial = replace(
+                        result,
+                        scan_time=add_durations(
+                            result.scan_time,
+                            elapsed_seconds(evidence_started),
+                        ),
+                        model_usage=model_usage.snapshot(),
+                    )
+                    error.with_scan_result(partial)
+                    raise
+                return replace(
+                    result,
+                    scan_time=add_durations(
+                        result.scan_time,
+                        elapsed_seconds(evidence_started),
+                    ),
+                    decision_paths=decision_path_records(),
+                    model_usage=model_usage.snapshot(),
+                    **evidence(),
+                )
 
             deferred_evidence.append(finish)
-            return scan_result((datetime.now() - start_time).total_seconds())
+            return scan_result(elapsed_seconds(start_time))
 
-        with evidence_deadline(self.limits.explore_timeout), model_call_budget(call_limit):
+        with (
+            evidence_deadline(self.limits.explore_timeout),
+            model_call_budget(call_limit, model_usage),
+        ):
             await gather_evidence()
-        return scan_result((datetime.now() - start_time).total_seconds())
+        return scan_result(elapsed_seconds(start_time))
 
     def scan_batch_data(
         self,
@@ -1811,10 +1897,11 @@ class DSLScanner:
         enable_explain: ExplainLevel = False,
     ) -> ScanResult:
         """Scan multiple conversations from a batch file."""
-        start_time = datetime.now()
+        start_time = monotonic()
         all_matches = []
         all_outputs = {}
         all_evidence = []
+        usage_reports = []
         total_scan_time = 0.0
         errors = []
         aggregated_timings = {}
@@ -1865,6 +1952,7 @@ class DSLScanner:
                 for rule_name, output in result.outputs.items():
                     all_outputs[f"{label}:{rule_name}"] = output
                 total_scan_time += result.scan_time
+                usage_reports.append(result.model_usage)
 
                 if result.rule_timings:
                     for rule_name, timing in result.rule_timings.items():
@@ -1910,6 +1998,20 @@ class DSLScanner:
                         errors.append(f"Conversation {i + 1}: Rule {rule_name} timeout")
             except Exception as e:
                 errors.append(f"Conversation {i + 1}: {str(e)}")
+                partial = _raised_timeout_result(
+                    e,
+                    file_path=file_path,
+                    scan_time=(
+                        e.scan_result.scan_time
+                        if isinstance(e, QuarryTimeoutError) and e.scan_result is not None
+                        else 0.0
+                    ),
+                )
+                if partial is not None:
+                    total_scan_time += partial.scan_time
+                    usage_reports.append(partial.model_usage)
+                    for rule_name, timing in (partial.rule_timings or {}).items():
+                        aggregated_timings.setdefault(rule_name, []).append(timing)
                 # An unexpected per-conversation failure is a non-authoritative result; make sure
                 # it also blocks a complete batch even if nothing else set a completion signal.
                 agg_evaluation_errors[label] = str(e)
@@ -1919,7 +2021,7 @@ class DSLScanner:
         for rule_name, timings in aggregated_timings.items():
             avg_timings[rule_name] = sum(timings) / len(timings)
 
-        scan_time = (datetime.now() - start_time).total_seconds()
+        scan_time = elapsed_seconds(start_time)
         error_msg = "; ".join(errors) if errors else None
 
         return ScanResult(
@@ -1937,11 +2039,12 @@ class DSLScanner:
             rule_timings=avg_timings if avg_timings else None,
             evaluation_warnings=agg_evaluation_warnings or None,
             explanations=all_evidence or None,
+            model_usage=merge_model_usage(usage_reports),
         )
 
     def scan_file(self, json_path: Path, enable_explain: ExplainLevel = False) -> ScanResult:
         """Scan a single JSON file with loaded rules."""
-        start_time = datetime.now()
+        start_time = monotonic()
 
         if self.verbose:
             logger.info(f"[STATUS] Scanning file: {json_path}")
@@ -1953,7 +2056,7 @@ class DSLScanner:
             return ScanResult(
                 file_path=json_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=str(e),
                 error_category=ScanFailureCategory.INPUT_READ,
             )
@@ -1963,10 +2066,17 @@ class DSLScanner:
                 return self.scan_batch_data(data, json_path, enable_explain)
             return self.scan_data(data, json_path, enable_explain)
         except Exception as e:
+            partial = _raised_timeout_result(
+                e,
+                file_path=json_path,
+                scan_time=elapsed_seconds(start_time),
+            )
+            if partial is not None:
+                return partial
             return ScanResult(
                 file_path=json_path,
                 rule_matches=[],
-                scan_time=(datetime.now() - start_time).total_seconds(),
+                scan_time=elapsed_seconds(start_time),
                 error=str(e),
                 error_category=_failure_category(e),
             )

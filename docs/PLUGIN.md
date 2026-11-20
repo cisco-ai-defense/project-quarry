@@ -782,6 +782,12 @@ Configured model rate limits are shared across every compile and scan handled by
 | Decision-flow aggregate work | 2,000,000 units |
 | Decision-flow aggregate scalar data | 16,000,000 bytes |
 | Decision-flow nested container depth | 128 |
+| Reported scan duration | 31,536,000 seconds |
+| Model aliases in one usage summary | 128 |
+| Operations per model alias | 8 |
+| Model-usage records | 512 |
+| Attempted model calls | 1,000,000 |
+| One reported model alias | 200 characters |
 
 `limit` bounds `index` and `search`. `get` and `rejected` reject `limit`; a `get` returns every
 requested ID, with duplicates collapsed in the response after enforcing the 50-ID input bound.
@@ -799,6 +805,33 @@ request, including additive fields and threshold overrides, before validation or
 Aggregate failures use the stable diagnostics `flow request exceeds the structural work limit`,
 `flow request exceeds the aggregate scalar-byte limit`, and
 `flow request exceeds the nesting limit`.
+
+### Scan telemetry
+
+Scan telemetry is diagnostic only. It never changes a verdict, completion state, failure, or
+decision path. `timings.total_seconds` uses a monotonic clock and is always finite and
+nonnegative. For one conversation it covers that conversation's verdict work plus evidence work;
+deferred evidence adds only its own execution time, not time waiting for other batch items.
+`timings.rules` measures each rule from evaluation start through success, error, or timeout, so
+concurrent rule durations can overlap. A batch's top-level total is the monotonic elapsed time of
+the whole ordered batch scan. A request that fails before scanning keeps `timings` empty. Durations
+above 31,536,000 seconds saturate at that limit. The CLI JSON report uses the same `timings`,
+`model_usage`, and `models_called` objects. CSV appends deterministic JSON cells with those names.
+
+`model_usage.calls` counts physical adapter invocations attempted by the scan. Each retry counts;
+an invocation that times out or fails still counts. A completed cache hit and a caller that only
+waits for another scan's shared request count zero, preventing the same provider attempt from
+being counted twice. Cancellation after an adapter starts preserves its count; cancellation while
+waiting for a rate-limiter ticket does not count because no adapter was invoked. Records are
+sorted by public model alias and generic operation (`score`,
+`classify`, `complete`, or `input_tokens`). `models_called` is the sorted list of aliases retained
+in those records. Quarry does not expose provider response payloads, provider model names, prompts,
+model content, endpoints, credentials, trace data, pricing, or unnormalized token metadata.
+
+Usage saturates at 1,000,000 calls, 128 aliases, eight operation slots per alias, and 512 records;
+aliases are at most 200 characters. If detail is omitted, invalid, or saturated,
+`model_usage.truncated` is true; telemetry truncation does not make the scan incomplete. A
+local-only or fully cached scan reports zero calls, no records, and no models called.
 
 Reference and compilation work run outside the MCP event loop. Scanning awaits Quarry's async
 engine directly so transport cancellation reaches the active scan. Conversation size and nesting

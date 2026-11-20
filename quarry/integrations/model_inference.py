@@ -49,6 +49,7 @@ from quarry.integrations.model_usage import ModelRetryHistory, ModelUsage
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError, clamp_to_evaluation_deadline
+from quarry.telemetry import ModelOperation, public_model_operation
 from quarry.types.exceptions import (
     MODEL_REFUSED,
     ConfigurationError,
@@ -2106,6 +2107,7 @@ class ModelInferenceBackend:
                     model_id,
                     rate_limit_model,
                     lambda attempt_timeout: send(model, *arguments, timeout=attempt_timeout),
+                    operation_name=public_model_operation(method),
                     timeout=timeout,
                     retry_history=retry_history,
                 )
@@ -2200,6 +2202,7 @@ class ModelInferenceBackend:
         rate_limit_model: str,
         operation: Callable[[float | None], Awaitable[Any]],
         *,
+        operation_name: ModelOperation,
         timeout: float | None,
         retry_history: ModelRetryHistory,
     ) -> Any:
@@ -2210,6 +2213,7 @@ class ModelInferenceBackend:
                 rate_limit_model,
                 operation,
                 budget_alias=model_id,
+                operation_name=operation_name,
                 timeout=timeout,
                 retry_history=retry_history,
             )
