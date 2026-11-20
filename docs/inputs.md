@@ -42,6 +42,32 @@ condition:
 
 Only sections read by selected rules are validated. A bad section fails rules that read it while other rules retain their verdicts. An unknown top-level key makes the scan invalid. Each read section and the chat have their own size and nesting limits.
 
+## Text spans
+
+Declared content fields support string spans and bounded extraction windows:
+
+```text
+rule "Located memory text"
+strings:
+    $p = "Remember"
+condition:
+    any w in memory.writes where
+        w.content.extract($p.spans(w.content), right=12) contains "Remember"
+```
+
+Input evidence identifies its section, item ID, content field and character offsets.
+Selecting or combining input projections retains their canonical owners. Equal text from
+different input objects stays distinct. Local text transforms map detections back through
+their character provenance while extraction from the selected message retains its current
+text. A model's message indices always refer to its selected input order.
+
+Span searches follow each selected occurrence, including different transformed copies of
+one source message. Indexed `.content` and `.result` sources retain their owning selection;
+reading message content alone does not decode its tool arguments.
+
+Compiler identity is 21 with compiled-policy format 9 unchanged. Recompile older artifacts
+from their saved rule sources; current artifacts reload without recompilation.
+
 For declared-input scans, plugin decision paths hash only the rule's selected, validated data. Unread sections do not change `conversation_sha256`; it is null when the selected data cannot be safely hashed.
 
 ## Timeline and clocks

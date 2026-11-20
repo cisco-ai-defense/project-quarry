@@ -146,14 +146,18 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "and": (2, 2),
     "as_messages": (1, 1),
     "binding": (0, 0),
+    "call_texts": (1, 1),
     "compare": (2, 2),
     "concat": (2, MAX_MODEL_EXPRESSION_FANOUT),
     "conditional": (3, 3),
     "extract_span": (4, 4),
+    "extract_windows": (5, 5),
     "field": (1, 1),
     "field_text": (1, 1),
     "if_refused": (2, 2),
     "index": (1, 1),
+    "input_message": (3, MAX_MODEL_EXPRESSION_FANOUT),
+    "input_state": (0, 0),
     "join": (1, 1),
     "literal": (0, 0),
     "local_transform": (1, 1),
@@ -167,16 +171,27 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "model_transform": (1, 1),
     "not": (1, 1),
     "or": (2, 2),
+    "outermost": (1, 1),
     "parameter": (0, 0),
+    "place_of": (1, 1),
     "refused": (1, 1),
     "slice": (3, 3),
+    "span_all": (2, 2),
+    "span_any": (2, 2),
+    "span_count": (1, 1),
+    "span_covered": (2, 2),
+    "span_filter": (3, 3),
+    "span_text": (1, 1),
     "split_any": (2, 2),
     "string_compare": (2, 2),
     "string_patterns": (0, MAX_MODEL_EXPRESSION_FANOUT),
+    "string_spans": (2, MAX_MODEL_EXPRESSION_FANOUT),
     "text_equals": (1, 1),
     "text_ref": (0, 0),
     "tools": (0, 0),
     "transform": (1, 1),
+    "union": (2, 2),
+    "view_spans": (1, 1),
     "+": (2, 2),
     "-": (2, 2),
     "*": (2, 2),
@@ -187,18 +202,26 @@ _NONE_VALUE_KINDS = frozenset(
         "add_message",
         "and",
         "as_messages",
+        "call_texts",
         "concat",
         "conditional",
         "extract_span",
+        "extract_windows",
         "field_text",
         "if_refused",
         "message",
         "messages",
         "not",
         "or",
+        "outermost",
+        "place_of",
         "refused",
         "slice",
+        "span_count",
+        "span_covered",
         "tools",
+        "union",
+        "view_spans",
         "+",
         "-",
         "*",
@@ -263,6 +286,9 @@ def validate_model_expression(expression: ModelExpression) -> None:
             "message_select",
             "parameter",
             "split_any",
+            "span_all",
+            "span_any",
+            "span_filter",
         } and (not isinstance(node.value, str) or not node.value.isidentifier()):
             raise ValueError(f"invalid {node.kind} name {node.value!r}")
         if node.kind == "text_ref" and (not isinstance(node.value, str) or not node.value):
@@ -279,7 +305,7 @@ def validate_model_expression(expression: ModelExpression) -> None:
             and not isinstance(node.value, str)
         ):
             raise TypeError("model text equality value must be a string or null")
-        if node.kind == "field":
+        if node.kind in {"field", "span_text"}:
             parts = node.value.split(".") if isinstance(node.value, str) else ()
             if not parts or any(
                 not part
@@ -287,6 +313,39 @@ def validate_model_expression(expression: ModelExpression) -> None:
                 for index, part in enumerate(parts)
             ):
                 raise ValueError(f"invalid model field selector {node.value!r}")
+        if node.kind == "string_spans":
+            if not isinstance(node.value, str) or not node.value:
+                raise ValueError("string span producer requires a nonempty name")
+            if any(child.kind != "string_patterns" for child in node.children[1:]):
+                raise ValueError("string span patterns must be declared string patterns")
+        if node.kind == "input_message":
+            names = node.value.split(".") if isinstance(node.value, str) else ()
+            role, order, *parts = node.children
+            fields = order.value.split("\x1f") if isinstance(order.value, str) else ()
+            if len(names) != 2 or any(not name.isidentifier() for name in names):
+                raise ValueError("located input section must be a namespaced name")
+            if role.kind != "literal" or role.value not in {
+                "system",
+                "developer",
+                "user",
+                "assistant",
+            }:
+                raise ValueError("located input role must be a literal message role")
+            if (
+                order.kind != "literal"
+                or not fields
+                or any(not name.isidentifier() for name in fields)
+                or len(set(fields)) != len(fields)
+            ):
+                raise ValueError("located input fields must have a unique declared order")
+            if any(part.kind != "field" or part.value not in fields for part in parts):
+                raise ValueError("located input parts must read declared content fields")
+            if any(part.children != parts[0].children for part in parts[1:]):
+                raise ValueError("located input parts must read one canonical item")
+        if node.kind == "input_state":
+            names = node.value.split(".") if isinstance(node.value, str) else ()
+            if len(names) != 2 or any(not name.isidentifier() for name in names):
+                raise ValueError("input state must name a declared section")
         if node.kind == "index" and (
             isinstance(node.value, bool) or not isinstance(node.value, int)
         ):
@@ -475,6 +534,7 @@ def validate_constructed_message_graph(
             if content.kind not in {
                 "conditional",
                 "extract_span",
+                "extract_windows",
                 "field",
                 "if_refused",
                 "join",

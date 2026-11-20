@@ -28,10 +28,11 @@ from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import getattr_static
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Literal, Self, cast, overload
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self, cast, overload
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from quarry.engine.matchers import field_access, value_texts
 from quarry.language.metadata import (
     DSLParameter,
     SurfaceFieldExclusion,
@@ -42,7 +43,7 @@ from quarry.language.metadata import (
 )
 from quarry.types.exceptions import ConversationValidationError, EvaluationError, InvalidInputError
 from quarry.types.message_links import LinkEvent, resolve_links
-from quarry.types.results import Span
+from quarry.types.results import InputText, Span
 from quarry.types.transforms import (
     ContentSourcePart,
     ContentSourceRange,
@@ -52,6 +53,28 @@ from quarry.types.transforms import (
     source_part_mapping_for,
     source_ranges_for,
 )
+
+if TYPE_CHECKING:
+    from quarry.types.origins import Origin
+
+
+def _input_span_text(span: Span, left: int, right: int) -> str:
+    """Cut a span from its input item's ordered content fields."""
+
+    source, owner = span.source, span._source
+    assert isinstance(source, InputText)
+    fields = source.fields[
+        source.fields.index(span.field) : source.fields.index(span.end_field) + 1
+    ]
+    covered: list[str] = []
+    for name in fields:
+        value = owner.get(name) if isinstance(owner, Mapping) else getattr(owner, name, None)
+        covered.append(value if isinstance(value, str) else "")
+    if len(covered) == 1:
+        return covered[0][max(0, span.start - left) : span.end + right]
+    covered[0] = covered[0][max(0, span.start - left) :]
+    covered[-1] = covered[-1][: span.end + right]
+    return "".join(covered)
 
 
 def wire_digest(wire: Mapping[str, Any]) -> bytes:
@@ -826,6 +849,47 @@ class ToolCall(OpenAIObject):
 
         return self.function.arguments
 
+    def argument_texts(self, field: str) -> list[tuple[str, str]]:
+        """Return each scalar argument value with its own field path."""
+
+        if field == "raw_arguments":
+            return [(field, self.raw_arguments)]
+        head, _, path = field.partition(".")
+        if head != "arguments" or not path:
+            return []
+        if path == "*":
+            return value_texts(self.arguments, "arguments")
+        if path.endswith(".*"):
+            root = field[:-2]
+            return value_texts(field_access(self.arguments, path[:-2]), root)
+        return value_texts(field_access(self.arguments, path), field)
+
+    def argument_text(self, field: str) -> str | None:
+        """Return one scalar argument text by its exact path."""
+
+        if field == "raw_arguments":
+            return self.raw_arguments
+        return dict(value_texts(self.arguments, "arguments")).get(field)
+
+    def texts(self) -> tuple[tuple[str, str], ...]:
+        """Return argument texts in written order, or freeform argument text."""
+
+        try:
+            values = self.argument_texts("arguments.*")
+        except EvaluationError:
+            values = []
+        if values:
+            return tuple(values)
+        raw = self.raw_arguments
+        return (("raw_arguments", raw),) if raw.strip() not in ("", "{}") else ()
+
+    def field_rank(self, field: str) -> int:
+        """Order one text among the call's arguments."""
+
+        if field == "raw_arguments":
+            return -1
+        return next((index for index, (name, _) in enumerate(self.texts()) if name == field), -1)
+
     @property
     def arguments(self) -> dict[str, Any]:
         """Decode and return a defensive argument object on first access.
@@ -1316,6 +1380,31 @@ def _synthetic_key(message: Message) -> tuple[str, object] | None:
     return "instance", id(identity)
 
 
+def _reindex_input_provenance_steps(
+    message: Message,
+    old: int,
+    new: int,
+    meter: _CombineMeter,
+) -> Generator[None, None, None]:
+    """Rebase only a located projection's private message coordinates during grafting."""
+
+    if message._provenance is None:
+        return
+    segments = []
+    for segment in message._provenance:
+        yield from _charge_combine_steps(meter, "provenance_visits")
+        sources = []
+        parts = []
+        for target, values in ((sources, segment.sources), (parts, segment.parts)):
+            for value in values:
+                yield from _charge_combine_steps(meter, "provenance_visits")
+                if value.message_index != old:
+                    raise ValueError("input projection has foreign source provenance")
+                target.append(replace(value, message_index=new))
+        segments.append(replace(segment, sources=tuple(sources), parts=tuple(parts)))
+    object.__setattr__(message, "_provenance", tuple(segments))
+
+
 def _charge_combine_steps(
     meter: _CombineMeter,
     field: str,
@@ -1631,6 +1720,8 @@ class Messages(Sequence[MessageType]):
         "_segments",
         "_position_variants",
         "_chunk",
+        "_origins",
+        "_positions",
         "_sealed",
     )
 
@@ -1656,6 +1747,8 @@ class Messages(Sequence[MessageType]):
         self._position_variants: Mapping[int, MessageType] = MappingProxyType({})
         # Whether this view is a ``split`` chunk (see ``_select_ranges``).
         self._chunk = False
+        self._origins: tuple[Origin | None, ...] = ()
+        self._positions: tuple[int, ...] = ()
         self._sealed = True
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -1746,6 +1839,7 @@ class Messages(Sequence[MessageType]):
         object.__setattr__(root, "_max_nesting_depth", max_nesting_depth)
         object.__setattr__(root, "_tool_call_types", MappingProxyType(registry))
         object.__setattr__(root, "_source_root", root)
+        object.__setattr__(root, "_origins", (None,) * len(items))
         cls._build_indices(root, max_nesting_depth)
         return root
 
@@ -1757,6 +1851,7 @@ class Messages(Sequence[MessageType]):
         max_nesting_depth: int,
         *,
         source_root: Messages | None,
+        origins: tuple[Origin | None, ...] | None = None,
     ) -> Messages:
         """Build a root from EXISTING, already-validated ``Message`` objects, reusing them (and
         their cached ``ContentPart``s, ``ToolCall``s, and ``ToolMessage``s) BY IDENTITY.
@@ -1775,6 +1870,9 @@ class Messages(Sequence[MessageType]):
         object.__setattr__(root, "_max_nesting_depth", max_nesting_depth)
         object.__setattr__(root, "_tool_call_types", MappingProxyType(registry))
         object.__setattr__(root, "_source_root", source_root)
+        object.__setattr__(root, "_origins", (None,) * len(items) if origins is None else origins)
+        if len(root._origins) != len(items):
+            raise ValueError("every message must have one origin slot")
         cls._build_indices(root, max_nesting_depth)
         return root
 
@@ -1852,6 +1950,12 @@ class Messages(Sequence[MessageType]):
                 {name: tuple(responses) for name, responses in responses_by_name.items()}
             ),
         )
+        position = 0
+        positions = []
+        for message in root._items:
+            positions.append(position)
+            position += 1 + len(getattr(message, "tool_calls", ()))
+        object.__setattr__(root, "_positions", tuple(positions))
 
     @staticmethod
     def _validate_nesting_limit(max_nesting_depth: int) -> None:
@@ -2060,6 +2164,8 @@ class Messages(Sequence[MessageType]):
         view._calls_by_name = self._root._calls_by_name
         view._responses_by_name = self._root._responses_by_name
         view._tool_call_types = self._root._tool_call_types
+        view._origins = self._root._origins
+        view._positions = self._root._positions
         view._segments = MappingProxyType(
             {ordinal: self._segments[ordinal] for ordinal in selected if ordinal in self._segments}
         )
@@ -2408,6 +2514,7 @@ class Messages(Sequence[MessageType]):
         if source_root is not None and len(source_root._items) > _MAX_COMBINED_MESSAGES:
             raise ValueError(f"combined message source exceeds {_MAX_COMBINED_MESSAGES} messages")
         items: list[MessageType] = []
+        origins: list[Origin | None] = []
         if source_root is not None:
             for canonical in source_root._items:
                 yield from _charge_combine_steps(
@@ -2415,10 +2522,12 @@ class Messages(Sequence[MessageType]):
                     "canonical_message_visits",
                 )
                 items.append(canonical)
+                origins.append(source_root._origins[len(origins)])
         registry = source_root._tool_call_types if source_root is not None else MappingProxyType({})
         nesting = source_root._max_nesting_depth if source_root is not None else 100
         synthetic_ordinals: dict[tuple[str, object], int] = {}
         synthetic_sources: dict[tuple[str, object], MessageType] = {}
+        constructed_count = 0
         specifications: list[tuple[Messages, tuple[int, ...], list[MessageType]]] = []
 
         for part in parts:
@@ -2460,11 +2569,13 @@ class Messages(Sequence[MessageType]):
                         ):
                             raise ValueError("constructed identity has different content variants")
                     if mapped < 0:
-                        if len(synthetic_ordinals) >= _MAX_SYNTHETIC_MESSAGES:
-                            raise ValueError(
-                                "combined input exceeds "
-                                f"{_MAX_SYNTHETIC_MESSAGES} constructed messages"
-                            )
+                        if part._root._origins[ordinal] is None:
+                            if constructed_count >= _MAX_SYNTHETIC_MESSAGES:
+                                raise ValueError(
+                                    "combined input exceeds "
+                                    f"{_MAX_SYNTHETIC_MESSAGES} constructed messages"
+                                )
+                            constructed_count += 1
                         if len(items) >= _MAX_COMBINED_MESSAGES:
                             raise ValueError(
                                 "combined message selection exceeds "
@@ -2485,9 +2596,17 @@ class Messages(Sequence[MessageType]):
                         clone = canonical.model_copy()
                         object.__setattr__(clone, "_message_index", len(items))
                         mapped = len(items)
+                        if part._root._origins[ordinal] is not None:
+                            yield from _reindex_input_provenance_steps(
+                                clone,
+                                ordinal,
+                                mapped,
+                                meter,
+                            )
                         synthetic_ordinals[key] = mapped
                         synthetic_sources[key] = canonical
                         items.append(clone)
+                        origins.append(part._root._origins[ordinal])
                 mapped_ordinals.append(mapped)
                 piece = selected
                 reanchor = (
@@ -2499,6 +2618,8 @@ class Messages(Sequence[MessageType]):
                     yield from _charge_combine_steps(meter, "message_clone_visits")
                     piece = piece.model_copy()
                     object.__setattr__(piece, "_message_index", mapped)
+                    if part._root._origins[ordinal] is not None:
+                        yield from _reindex_input_provenance_steps(piece, ordinal, mapped, meter)
                     if reanchor:
                         object.__setattr__(piece, "_rewrite_source", items[mapped])
                 mapped_items.append(piece)
@@ -2509,6 +2630,7 @@ class Messages(Sequence[MessageType]):
             registry,
             nesting,
             source_root=source_root,
+            origins=tuple(origins),
         )
         normalized = []
         for original, ordinals, variants in specifications:
@@ -2664,10 +2786,12 @@ class Messages(Sequence[MessageType]):
                         if meter.record("provenance_visits") and meter.checkpoint():
                             yield
                         synthetic_source = _synthetic_key(message) is not None
+                        input_projection = root._origins[ordinal] is not None
                         if (
-                            not synthetic_source
+                            (not synthetic_source or input_projection)
                             and source.message_index != ordinal
                             or synthetic_source
+                            and not input_projection
                             and (
                                 root._source_root is None
                                 or source.message_index >= len(root._source_root._items)
@@ -3094,6 +3218,58 @@ class Messages(Sequence[MessageType]):
             for value in (left, right)
         ):
             raise ValueError("extract() context bounds must be non-negative integers")
+        if span.source is not None:
+            if (
+                isinstance(span._view, Message)
+                and span._view_start is not None
+                and span._view_end is not None
+            ):
+                selected = next(
+                    (
+                        message
+                        for message in self
+                        if message is span._view or _same_message_variant(message, span._view)
+                    ),
+                    None,
+                )
+                if selected is not None:
+                    return selected.content[
+                        max(0, span._view_start - left) : min(
+                            len(selected.content), span._view_end + right
+                        )
+                    ]
+            return _input_span_text(span, left, right)
+        if isinstance(span._source, ToolCall):
+            call = span._source
+            if not any(known is call for known in self._root._all_calls):
+                raise ValueError("span source call is not present in these messages")
+            texts = (
+                {"raw_arguments": call.raw_arguments}
+                if span.field == "raw_arguments"
+                else dict(call.texts())
+            )
+            order = list(texts)
+            if span.field not in texts or span.end_field not in texts:
+                raise ValueError("span is outside the call's argument texts")
+            selected = order[order.index(span.field) : order.index(span.end_field) + 1]
+            if not selected:
+                raise ValueError("span ends before it starts")
+            covered = [texts[name] for name in selected]
+            if span.start > len(covered[0]) or span.end > len(covered[-1]):
+                raise ValueError("span is outside the call's argument texts")
+            if len(covered) == 1:
+                return covered[0][max(0, span.start - left) : span.end + right]
+            covered[0] = covered[0][max(0, span.start - left) :]
+            covered[-1] = covered[-1][: span.end + right]
+            return "".join(covered)
+        if isinstance(span._source, Message):
+            if not span.within_one_text:
+                return self._extract_across_texts(span, left, right)
+            message = self._span_message(span, require_bound=False)
+            if span._source is not message:
+                raise ValueError("span source message is not present in these messages")
+            content = message.content
+            return content[max(0, span.start - left) : min(len(content), span.end + right)]
         message = self._span_message(span, require_bound=True)
         selected = self._segments.get(span.message_index)
         if isinstance(span._view, Message):
@@ -3119,6 +3295,33 @@ class Messages(Sequence[MessageType]):
             ]
         content = message.content
         return content[max(0, span.start - left) : min(len(content), span.end + right)]
+
+    def _extract_across_texts(self, span: Span, left: int, right: int) -> str:
+        """Read a bound range across consecutive chat and call texts."""
+
+        texts: list[tuple[int, str, str, object]] = []
+        for ordinal, message in enumerate(self._root._items):
+            position = self._root._positions[ordinal]
+            texts.append((position, "", message.content, message))
+            for number, call in enumerate(getattr(message, "tool_calls", ())):
+                texts.extend(
+                    (position + number + 1, field, text, call) for field, text in call.texts()
+                )
+        places = [(position, field) for position, field, _, _ in texts]
+        start, end = (span.position, span.field), (span.end_position, span.end_field)
+        if start not in places or end not in places:
+            raise ValueError("span is outside the texts of these messages")
+        first, last = places.index(start), places.index(end)
+        if first > last or texts[first][3] is not span._source:
+            raise ValueError("span source is not present in these messages")
+        covered = [text for _, _, text, _ in texts[first : last + 1]]
+        if span.start > len(covered[0]) or span.end > len(covered[-1]):
+            raise ValueError("span is outside the texts it covers")
+        if len(covered) == 1:
+            return covered[0][max(0, span.start - left) : span.end + right]
+        covered[0] = covered[0][max(0, span.start - left) :]
+        covered[-1] = covered[-1][: span.end + right]
+        return "".join(covered)
 
     def _bind_span(self, span: Span) -> Span:
         """Map a model-local span to its selected source or constructed message."""
@@ -3171,7 +3374,28 @@ class Messages(Sequence[MessageType]):
             _view_end=span.end,
         )
         message = self._span_message(span, require_bound=False)
-        return span._bind_to_message(message)
+        origin = self._root._origins[ordinal]
+        if origin is not None:
+            from quarry.types.origins import SourceText, message_origin
+
+            assert span._view_start is not None and span._view_end is not None
+            mapped = SourceText(selected.content, message_origin(selected, origin), ordinal).span(
+                span._view_start, span._view_end
+            )
+            return replace(
+                mapped,
+                score=span.score,
+                label=span.label,
+                source_ranges=span.source_ranges,
+                source_unmapped=span.source_unmapped,
+                source_parts=span.source_parts,
+                _view=span._view,
+                _view_start=span._view_start,
+                _view_end=span._view_end,
+            )
+        return replace(span, place_position=self._root._positions[ordinal])._bind_to_message(
+            message
+        )
 
     def _span_message(self, span: Span, *, require_bound: bool) -> MessageType:
         """Return the selected canonical message after validating one span."""
@@ -3637,7 +3861,9 @@ class Messages(Sequence[MessageType]):
         if not specifications:
             return self
         existing = [
-            message for message in self._root._items if message._synthetic_identity is not None
+            message
+            for index, message in enumerate(self._root._items)
+            if message._synthetic_identity is not None and self._root._origins[index] is None
         ]
         if len(existing) + len(specifications) > _MAX_SYNTHETIC_MESSAGES:
             raise ValueError(f"constructed input exceeds {_MAX_SYNTHETIC_MESSAGES} messages")
@@ -3691,6 +3917,7 @@ class Messages(Sequence[MessageType]):
             self._root._tool_call_types,
             self._root._max_nesting_depth,
             source_root=self._root._source_root,
+            origins=(*self._root._origins, *((None,) * len(additions))),
         )
         result = root._view_ordinals(
             (*self._ordinals, *(message.message_index for message in additions))
@@ -3699,6 +3926,44 @@ class Messages(Sequence[MessageType]):
         object.__setattr__(result, "_position_variants", self._position_variants)
         object.__setattr__(result, "_chunk", self._chunk)
         return result
+
+    @classmethod
+    def message_parts(cls, role: str, texts: Sequence[str], origin: Origin) -> Messages:
+        """Build one message from input text parts and retain their source places."""
+
+        from quarry.cache.keys import input_key
+        from quarry.types.origins import origin_key
+
+        if role not in {"system", "developer", "user", "assistant"}:
+            raise ValueError("located message role must be system, developer, user, or assistant")
+        if type(texts) not in {list, tuple} or not texts:
+            raise ValueError("located message parts must be a nonempty text sequence")
+        if len(texts) > _MAX_COMBINED_MESSAGES or any(type(text) is not str for text in texts):
+            raise ValueError("located message parts must be bounded plain text")
+        if sum(len(text) for text in texts) > _MAX_SYNTHETIC_TEXT_CHARACTERS:
+            raise ValueError("located input text exceeds its character limit")
+        if sum(_validate_synthetic_text(text) for text in texts) > _MAX_SYNTHETIC_TEXT_BYTES:
+            raise ValueError("located input text exceeds its UTF-8 byte limit")
+        content: str | list[dict[str, str]] = (
+            texts[0] if len(texts) == 1 else [{"type": "text", "text": text} for text in texts]
+        )
+        message_class: type[MessageType] = {
+            "system": SystemMessage,
+            "developer": DeveloperMessage,
+            "user": UserMessage,
+            "assistant": AssistantMessage,
+        }[role]
+        message = message_class.model_validate({"role": role, "content": content}, strict=True)
+        object.__setattr__(message, "_message_index", 0)
+        # A private digest includes canonical owner identity as well as the exact projection.
+        # Repeating one input selection shares its occurrence; equal wire text from another
+        # owner does not. The origin itself remains held by the root throughout that scope.
+        identity = (
+            id(cls.message_parts.__func__),
+            int.from_bytes(input_key("located-message", role, origin_key(origin)), "big"),
+        )
+        object.__setattr__(message, "_synthetic_identity", identity)
+        return cls._from_items((message,), None, 100, source_root=None, origins=(origin,))
 
     def to_openai_messages(self) -> list[dict[str, Any]]:
         """Return selected messages as fresh OpenAI-compatible dictionaries."""
