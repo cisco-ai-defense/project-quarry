@@ -1357,6 +1357,10 @@ class DSLScanner:
                 validate_conversation_arguments(context.conversation.messages)
             except QuarryTimeoutError as exc:
                 if self.limits.fail_on_timeout:
+                    partial = timeout_result()
+                    partial.error = f"Tool argument validation timed out: {exc}"
+                    partial.error_category = ScanFailureCategory.TIMEOUT
+                    exc.with_scan_result(partial)
                     raise
                 return ScanResult(
                     file_path=file_path,
@@ -1437,6 +1441,10 @@ class DSLScanner:
             )
         except QuarryTimeoutError as exc:
             if self.limits.fail_on_timeout:
+                partial = timeout_result()
+                partial.error = f"Input preparation timed out: {exc}"
+                partial.error_category = ScanFailureCategory.TIMEOUT
+                exc.with_scan_result(partial)
                 raise
             return ScanResult(
                 file_path=file_path,

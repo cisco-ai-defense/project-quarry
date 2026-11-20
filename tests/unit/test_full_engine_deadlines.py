@@ -26,6 +26,52 @@ _FAST_RULE = 'rule "fast" condition: len(user_messages) > 0'
 _ATTACK = {"messages": [{"role": "user", "content": "attack"}]}
 
 
+@pytest.mark.parametrize("stage", ["arguments", "inputs"])
+@pytest.mark.parametrize("api", ["sync", "async"])
+@pytest.mark.parametrize("fail_on_timeout", [False, True])
+def test_preflight_timeouts_preserve_zero_call_telemetry(monkeypatch, stage, api, fail_on_timeout):
+    import quarry.scanner as scanner_module
+
+    scanner = DSLScanner(
+        QuarryConfig(
+            config_version=2,
+            quarry_rule_texts=(_FAST_RULE,),
+            safety_limits=SafetyLimits(rule_timeout=None, fail_on_timeout=fail_on_timeout),
+        )
+    )
+    failure = QuarryTimeoutError("controlled preflight timeout")
+
+    def expire(*_args, **_kwargs):
+        raise failure
+
+    if stage == "arguments":
+        monkeypatch.setattr(scanner_module, "validate_conversation_arguments", expire)
+    else:
+        monkeypatch.setattr(type(scanner.input_registry), "prepare", expire)
+
+    def scan():
+        if api == "sync":
+            return scanner.scan_data(_ATTACK)
+        return asyncio.run(scanner.scan_data_async(_ATTACK))
+
+    if fail_on_timeout:
+        with pytest.raises(QuarryTimeoutError, match="controlled preflight timeout") as raised:
+            scan()
+        assert raised.value is failure
+        result = raised.value.scan_result
+        assert result is not None
+        assert raised.value.result is result
+    else:
+        result = scan()
+
+    assert result.completion_state == "incomplete"
+    assert result.error_category == "timeout"
+    assert result.rule_matches == []
+    assert result.rule_timings is None
+    assert result.model_usage == {"calls": 0, "records": [], "truncated": False}
+    assert math.isfinite(result.scan_time) and result.scan_time >= 0
+
+
 class _SlowAdapter:
     """A configured provider fake with an input-specific delay."""
 
