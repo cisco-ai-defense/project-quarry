@@ -1034,7 +1034,7 @@ class InputRegistry:
         conversation_order: list[tuple[Any, ...]] = []
         result: list[tuple[int, Any]] = []
         for position, entry in enumerate(order):
-            if not isinstance(entry, dict):
+            if type(entry) is not dict:
                 raise ConversationValidationError(f"Timeline entry {position} must be an object")
             if set(entry) == {"input", ITEM_ID}:
                 surface, item_id = entry["input"], entry[ITEM_ID]

@@ -22,7 +22,9 @@ fail_on_timeout: true
 
 Quarry sorts discovered rule files and rejects duplicate names. A directory loads its top-level `.rule` files. Use the CLI's `--recursive` option or `DSLScanner(recursive=True)` for nested directories. Unknown configuration fields fail validation.
 
-The scanner validates and compiles selected rules before it accepts scans. The compiler also applies its own work and state limits to prevent rules with excessive automaton construction cost. A compile failure blocks the candidate rule generation. Input limits and scan deadlines apply when conversations arrive. `max_total_size` measures the in-memory footprint of the input graph, counting a shared Python object once; use the message, tool-call, and per-item limits alongside it. Breaching an input limit always fails the scan. Keep limits enabled for input you do not control, and call `ScanResult.raise_for_status()` before using matches.
+The scanner validates and compiles selected rules before it accepts scans. The compiler also applies its own work and state limits to prevent rules with excessive automaton construction cost. A compile failure blocks the candidate rule generation. Input limits and scan deadlines apply when conversations arrive. `max_total_size` measures the aggregate in-memory footprint that validation and canonicalization materialize: each repeated container occurrence is charged separately, while shared immutable scalars may be identity-deduplicated. Use the message, tool-call, and per-item limits alongside it. Breaching an input limit always fails the scan. Keep limits enabled for input you do not control, and call `ScanResult.raise_for_status()` before using matches.
+
+Raw conversation objects must use exact built-in `dict` and `list` containers and exact string object keys. Mapping wrappers and container subclasses are rejected without invoking their accessors. Tool schemas receive JSON type, cycle, depth and aggregate-work validation before canonicalization. Invalid plugin inputs have no verdict or conversation digest and are never hashed for exploration.
 
 ## Named text
 

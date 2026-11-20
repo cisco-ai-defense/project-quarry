@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-18 preserves opaque message holders through
-# part/content transforms and attributes guarded field faults only to actual readers.
-COMPILER_VERSION = "compiler-18"
+# previously produced artifacts. Compiler-20 records cross-section until clock
+# requirements so declaration order cannot substitute for an explicit timeline.
+COMPILER_VERSION = "compiler-20"
 
 
 @dataclass(frozen=True, slots=True)

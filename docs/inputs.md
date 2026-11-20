@@ -58,8 +58,20 @@ A list section keeps its own item order. To compare its items with chat steps or
 
 The timeline must contain each read item exactly once and preserve chat order. Without a needed timeline, a cross-source flow is incomplete. A flow over chat alone counts chat steps. A flow that reads input items counts timeline entries; `within` and `right_after` therefore include intervening input items. A bounded input flow also needs the sections whose items could occupy steps between its operands, unless a static condition already settles it.
 
+An `until` flow that sustains one list section and releases on another also requires their
+timeline when both can affect the verdict. Declaration order never supplies that ordering.
+An `until` over a single section keeps its known item order; empty operands and conditions
+already settled without ordering retain their verdicts.
+
 ## Native data adapters
 
 An `InputAdapter` converts native data under one conversation key into requested sections. Configure its key and registered adapter name in `adapters:`. The adapter declares the sections it can fill and returns only the sections the scanner requests. The host can supply trusted adapter instances to `DSLScanner(input_adapters={...})`; packages can register factories under the `quarry.input_adapters` entry point group. Adapter name and version, and every input declaration read by a compiled policy, are part of that policy's identity.
 
 The plugin's `quarry_reference` response lists configured sections under `inputs` so rule authors can discover their fields.
+
+Declared inputs preserve lazy chat-field reads. Freeform argument text and non-object JSON
+expose no named fields. Non-finite numbers and excessive decoded nesting fault only rules
+that read those decoded arguments, with `invalid_input`; independent input, tool, and
+name-only call rules retain their results. Raw model input preserves the original argument
+text without forcing a decoded-field read. Unreadable senders, calls, or causal links still
+prevent model dispatch.

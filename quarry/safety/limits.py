@@ -54,10 +54,12 @@ class SafetyLimits:
     max_message_size: int = 10_000_000
     max_tool_argument_size: int = 1_000_000
     max_tool_calls: int = 1_000
-    # Maximum JSON nesting depth for a tool-call argument object. Bounds both the
-    # scanner's post-size-preflight validation and the lazy rule-local decoder
-    # (``ToolCall.arguments``).
+    # Maximum JSON nesting depth for message content, offered tool definitions, and tool-call
+    # argument objects. Tool definitions are checked after total-size preflight; arguments are
+    # checked both after preflight and by the lazy rule-local decoder (``ToolCall.arguments``).
     max_nesting_depth: int = 100
+    # Aggregate object/materialization budget. Reused containers are charged per occurrence
+    # because validation and canonicalization materialize every occurrence independently.
     max_total_size: int = 50_000_000  # 50MB
     max_timeline_items: int = 10_000
     max_comprehension_size: int = 10_000
@@ -176,9 +178,9 @@ def json_size(value: Any, limit: int) -> int:
             return limit + 1
         if type(current) is str:
             # A string's UTF-8 bytes are at least its length; skip encoding one that is over.
-            if len(current) > limit - total:
+            if str.__len__(current) > limit - total:
                 return limit + 1
-            total += json_string_size(current)
+            total += json_string_size(str.__str__(current))
         elif current is True or current is None:
             total += 4
         elif current is False:
@@ -192,9 +194,9 @@ def json_size(value: Any, limit: int) -> int:
         elif type(current) is dict:
             total += 2
             stack.append([(item for pair in current.items() for item in pair), True, 0])
-        elif type(current) in (list, tuple):
+        elif type(current) in {list, tuple}:
             total += 2
-            stack.append([iter(cast(list | tuple, current)), False, 0])
+            stack.append([iter(cast(list[Any] | tuple[Any, ...], current)), False, 0])
         if total > limit or len(stack) > _MAX_JSON_DEPTH:
             return limit + 1
     return total

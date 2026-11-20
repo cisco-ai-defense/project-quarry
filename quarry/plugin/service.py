@@ -60,8 +60,14 @@ from quarry.plugin.visualization import (
 )
 from quarry.policy import _validated_sample, bind_prepared_policy
 from quarry.prepared import PreparedRuleCache
+from quarry.safety.limits import json_size
 from quarry.safety.quality import quality_warnings
-from quarry.safety.validator import Complexity, RuleValidator
+from quarry.safety.validator import (
+    Complexity,
+    RuleValidator,
+    _validate_json_tree,
+    _validate_raw_json_container_types,
+)
 from quarry.scanner import DSLScanner
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -73,6 +79,24 @@ from quarry.types.exceptions import (
     RuleValidationError,
 )
 from quarry.types.parameters import ParameterValueError
+
+
+def _reportable_conversation(value: dict[str, Any], scanner: DSLScanner) -> dict[str, Any] | None:
+    """Keep partial rule results without hashing unsafe or oversized raw sections."""
+
+    limits = scanner.limits
+    try:
+        _validate_raw_json_container_types(value)
+        if (
+            limits.enforce_limits
+            and json_size(value, limits.max_total_size) > limits.max_total_size
+        ):
+            return None
+        _validate_json_tree(value, "conversation", limits.max_nesting_depth)
+    except ConversationValidationError:
+        return None
+    return value
+
 
 _logger = get_app_logger()
 
@@ -639,7 +663,7 @@ class QuarryPlugin:
                 f"conversations must contain between 1 and {MAX_SCAN_BATCH} items"
             )
         selected = [conversation] if conversation is not None else conversations or []
-        if any(not isinstance(item, dict) for item in selected):
+        if any(not issubclass(type(item), dict) for item in selected):
             raise PluginInputError("every conversation must be a JSON object")
         if (
             isinstance(explore_rate, bool)
@@ -754,7 +778,7 @@ class QuarryPlugin:
                 conversation=report_input,
                 parameter_digest=result.parameter_digest,
                 explain=bool(explain),
-                explore_rate=0.0 if result.validation_error is not None else float(explore_rate),
+                explore_rate=0.0 if report_input is None else float(explore_rate),
             )
             if verbosity == "full":
                 payload["decision_path"] = path
