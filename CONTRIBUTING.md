@@ -1,3 +1,21 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # How to Contribute
 
 Thanks for your interest in contributing to Project Quarry! Here are a few
@@ -26,6 +44,20 @@ For scanner correctness tests, use `SafetyLimits(rule_timeout=None)` so a busy C
 cannot turn a correct verdict into a timeout. Deadline tests should configure a timeout
 explicitly, use controlled delayed work, and assert the resulting status or work stopped.
 Avoid narrow elapsed-time assertions in required CI tests; measure throughput separately.
+
+## Detection Rule Contributions
+
+See the [rule-pack workflow](rules/README.md) and
+[rule contribution guidelines](rules/rules-contribution-guidelines.md) for rule
+layout, metadata, README requirements, and the prohibited content policy. Check
+existing core and community rules before adding overlapping coverage. Anyone may
+improve an existing rule. Preserve original attribution and add contributor credit.
+
+From the repository root, run `uv run --frozen python rules/validate.py` and
+include the result in your pull request. Repository maintainers review all rule changes.
+The [automated rule-pack checks](rules/rules-contribution-guidelines.md#automated-checks)
+cover every core and community pack on pull requests. Maintainers review
+content, detection quality, and overlap with existing rules.
 
 ## Other Ways to Contribute
 
