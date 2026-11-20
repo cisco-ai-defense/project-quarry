@@ -1,0 +1,12 @@
+rule "Outbound action without Al's OK"
+metadata:
+    severity = "high"
+    description = "The AI called a tool that sends something outside (push, upload, publish, email, post, webhook) and no user message in this conversation approved it."
+    plain = "The AI tried to send something out without your OK."
+strings:
+    $outbound = "(?i)(push|upload|publish|send_?mail|send_?email|post_|_post|webhook|tweet|share_file)" regex
+    $ok = ["approved", "go ahead", "you have my ok", "keeper ok"] nocase
+condition:
+    any call in tool_calls where $outbound in call.name
+    and
+    not (any msg in user_messages where msg.content contains_any $ok)

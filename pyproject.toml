@@ -47,6 +47,7 @@ dependencies = [
 
 [project.scripts]
 quarry = "quarry.cli:main"
+keeper = "keeper.cli:main"
 quarry-mcp = "quarry.plugin.server:main"
 
 [project.optional-dependencies]
@@ -91,7 +92,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["quarry"]
+packages = ["quarry", "keeper"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "quarry/py.typed" = "quarry/py.typed"
@@ -99,6 +100,7 @@ packages = ["quarry"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/quarry",
+    "/keeper",
     "/CHANGELOG.md",
     "/CODE_OF_CONDUCT.md",
     "/CONTRIBUTING.md",
