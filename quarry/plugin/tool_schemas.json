@@ -734,6 +734,12 @@
             "title": "Description",
             "type": "string"
           },
+          "display_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
           "operations": {
             "items": {
               "type": "string"
@@ -1202,9 +1208,16 @@
             "type": "string"
           },
           "conversation_sha256": {
-            "pattern": "^[0-9a-f]{64}$",
-            "title": "Conversation Sha256",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Sha256"
           },
           "exploration": {
             "$ref": "#/$defs/ExplorationDetails"
