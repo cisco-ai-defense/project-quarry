@@ -17,6 +17,8 @@
 """Public conversation and scanner behavior retained from the first OSS engine."""
 
 import json
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import ClassVar
 
 import pytest
@@ -149,7 +151,36 @@ def test_compiled_scanner_uses_the_same_public_tool_and_message_contract() -> No
 
 
 def test_untrusted_conversation_data_is_validated_at_entry() -> None:
-    with pytest.raises(ConversationValidationError, match="Expected mapping"):
+    with pytest.raises(ConversationValidationError, match="Expected exact built-in dict"):
         Conversation.from_openai([])  # type: ignore[arg-type]
     with pytest.raises(ConversationValidationError):
         Conversation.from_openai({"messages": [{"role": "unknown", "content": "text"}]})
+
+
+def test_conversation_from_openai_rejects_mapping_wrappers_without_access() -> None:
+    class HookedMapping(Mapping):
+        triggered = False
+
+        def _access(self, *args, **kwargs):
+            self.triggered = True
+            raise AssertionError("mapping hooks must not run")
+
+        __getitem__ = _access
+        __iter__ = _access
+        __len__ = _access
+
+    hooked = HookedMapping()
+    for value in (
+        MappingProxyType({"messages": [{"role": "user", "content": "ok"}]}),
+        hooked,
+    ):
+        with pytest.raises(ConversationValidationError, match="Expected exact built-in dict"):
+            Conversation.from_openai(value)  # type: ignore[arg-type]
+
+    assert hooked.triggered is False
+
+
+def test_conversation_from_openai_accepts_an_exact_dict() -> None:
+    conversation = Conversation.from_openai({"messages": [{"role": "user", "content": "ordinary"}]})
+
+    assert conversation.to_openai_dict() == {"messages": [{"role": "user", "content": "ordinary"}]}
