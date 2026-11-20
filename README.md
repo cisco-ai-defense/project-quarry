@@ -1,3 +1,21 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Project Quarry
 
 Project Quarry is a Python framework for detecting threats and behavior patterns in agent conversations. Write rules over messages, tool calls, tool results, and event order. You can also call a configured model adapter from a rule when local checks are not enough.
@@ -71,7 +89,7 @@ A `.rule` file contains one named rule. Quarry parses, validates, links, and com
 ```text
 rule "Suspicious request"
 metadata:
-    severity = "medium"
+    description = "Match requests to reveal a secret or override policy"
 strings:
     $blocked = ["reveal a secret", "ignore the policy"] nocase
 variables:
@@ -92,6 +110,22 @@ condition:
     any call in tool_calls where call.name == "Bash"
        and $needle in call.arguments.*
 ```
+
+## Detection rule packs
+
+The [core packs](rules/rule-packs/core) are maintained by the Quarry team. The
+[community packs](rules/rule-packs/community) are maintained by their contributors
+and reviewed by the project maintainers. Every rule includes a README describing
+the threats it covers and its limits. See the [rule-pack overview](rules/README.md).
+
+Quarry does not encourage, support, or recommend using or sharing active attack
+payloads, sexually explicit or NSFW content, child sexual abuse material (CSAM),
+or other prohibited material, even for testing or research. This applies to
+every contribution, including encoded or embedded content, attachments, and
+links used to share prohibited material. Pull requests containing such material
+will be rejected, and contributors may be banned from the project. Follow the
+[rules contribution guidelines](rules/rules-contribution-guidelines.md) for the
+full policy and permitted dataset references.
 
 ## Python API
 
@@ -119,7 +153,7 @@ for match in matches:
 - [Optional formal rule verification](docs/formal-verification.md)
 - [Agent plugin](docs/PLUGIN.md) for Codex, Claude Code, and MCP hosts
 - [Architecture](docs/architecture.md) and [testing](docs/testing.md)
-- [Synthetic examples](examples/README.md)
+- [Examples](examples/README.md)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to work on Quarry. Report security issues through [SECURITY.md](SECURITY.md). Keep conversation data and credentials out of public issues.
 
