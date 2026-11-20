@@ -22,9 +22,10 @@ import asyncio
 import threading
 from collections import deque
 from collections.abc import AsyncGenerator, Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from time import monotonic
 
+from quarry.safety.timer import QuarryTimeoutError, current_evaluation_deadline
 from quarry.types.rate_limit import RateLimitConfig
 
 
@@ -64,6 +65,13 @@ class _BucketLimiter:
                 with self._lock:
                     wake.clear()
                     now = monotonic()
+                    deadline = current_evaluation_deadline()
+                    deadline_remaining = None
+                    if deadline is not None:
+                        deadline_remaining = deadline.expires_at - now
+                        if deadline_remaining <= 0:
+                            raise QuarryTimeoutError(deadline.error_message)
+
                     self._prune_expired(now)
                     concurrency_open = (
                         self.max_concurrent is None or self._active < self.max_concurrent
@@ -84,12 +92,30 @@ class _BucketLimiter:
                             0.0,
                             self.interval_seconds - (now - self._timestamps[0]),
                         )
+                        # A rate window that opens after the deadline cannot yield a usable
+                        # ticket, so fail without extending the operation.
+                        if (
+                            deadline is not None
+                            and deadline_remaining is not None
+                            and wait_for >= deadline_remaining
+                        ):
+                            raise QuarryTimeoutError(deadline.error_message)
+
+                    deadline_error = None
+                    # A concurrency slot has no predictable release time. Bound that wait by
+                    # the active deadline and preserve its safe, caller-owned error.
+                    if wait_for is None and deadline is not None and deadline_remaining is not None:
+                        wait_for = deadline_remaining
+                        deadline_error = deadline.error_message
 
                 if wait_for is None:
                     await wake.wait()
                 else:
-                    with suppress(TimeoutError):
+                    try:
                         await asyncio.wait_for(wake.wait(), timeout=wait_for)
+                    except TimeoutError:
+                        if deadline_error is not None:
+                            raise QuarryTimeoutError(deadline_error) from None
         finally:
             with self._lock:
                 self._waiters.discard((loop, wake))
