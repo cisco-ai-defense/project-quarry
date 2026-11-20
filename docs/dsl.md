@@ -34,6 +34,15 @@ Use `any` and `all` comprehensions to inspect collections. String declarations s
 
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
+A new value alias can be used before or after its declaration within the same `and`
+chain. For example, `pi(note) and (memory.notes[0] as note)` passes the selected note to
+`pi`. When an alias shadows a name already in scope, earlier clauses and alias
+initializers retain that name's original meaning: `len(messages) > 1 and
+(user_messages as messages) and len(messages) == 1` still tests the complete
+conversation first. Comprehension variables and called-rule bodies retain their own
+bindings. Forward references do not escape an `or` branch.
+Recompile saved policies from their rule source after this compiler-version change.
+
 ```text
 rule "Repeated shell requests"
 condition:
