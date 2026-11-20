@@ -44,7 +44,8 @@ if TYPE_CHECKING:
 # Bump when compilation or admission semantics change in a way that must invalidate
 # previously produced artifacts. Compiler-25 preserves lexical alias scopes and inner
 # initializers while retaining bounded expansion, eager admission and guarded calls.
-COMPILER_VERSION = "compiler-25"
+# Compiler-26 permits new-name forward aliases while preserving existing bindings.
+COMPILER_VERSION = "compiler-26"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64

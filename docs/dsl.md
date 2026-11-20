@@ -39,15 +39,14 @@ expression.
 
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
-A value alias such as `(user_messages as messages)` applies to subsequent clauses in its
-`and` chain. A nested parenthesized chain keeps its own declarations, which can shadow
-outer names inside that chain. Earlier clauses and earlier alias values keep their
-original meaning; an inner initializer can read an outer alias without capturing its
-later local uses. Called rules keep their own alias scope. Compiler 25 records these
-rules; saved compiler-24 policies require recompilation from rule source. Compiled-policy
-format 10 also retains declared resource requirements when constant folding removes an
-expression. Reload validates the same model configuration and capabilities as source
-compilation, without dispatching a model for an expression skipped at runtime.
+A new value alias can be used before or after its declaration within the same `and`
+chain. For example, `pi(note) and (memory.notes[0] as note)` passes the selected note to
+`pi`. When an alias shadows a name already in scope, earlier clauses and alias
+initializers retain that name's original meaning: `len(messages) > 1 and
+(user_messages as messages) and len(messages) == 1` still tests the complete
+conversation first. Comprehension variables and called-rule bodies retain their own
+bindings. Forward references do not escape an `or` branch or a nested alias scope.
+Recompile saved policies from their rule source after this compiler-version change.
 
 Every clause is validated when a rule loads, including clauses after `false`. Runtime
 short-circuiting still skips model inputs and calls that cannot affect the verdict.

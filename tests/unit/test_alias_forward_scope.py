@@ -7,6 +7,7 @@ import pytest
 
 from quarry import DSLScanner, compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
+from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import RuleValidationError
 from tests.unit.test_nested_rule_runtime_contracts import _policy
 
@@ -19,6 +20,13 @@ CHAT = {
     ]
 }
 CASES = [
+    ("len(ns) == 4 and (messages as ns)", True),
+    ("(ns as original) and (messages as ns) and len(original) == 4", True),
+    ("len(ns) == 3 and (messages[1:] as ns)", True),
+    (
+        '(any ns in user_messages where ns.content == "needle") and (messages as ns) and len(ns) == 4',
+        True,
+    ),
     ("len(messages) > 1 and ((user_messages as messages) and len(messages) == 1)", True),
     ("len(messages) == 1 and ((user_messages as messages) and len(messages) == 1)", False),
     ("count(messages) == 4 and (user_messages as messages) and count(messages) == 1", True),
@@ -80,7 +88,7 @@ def _source(condition):
 def test_aliases_do_not_rewrite_preceding_reads_or_capture_earlier_aliases(
     condition, matched, restored, explain
 ):
-    config = QuarryConfig(config_version=2)
+    config = QuarryConfig(config_version=2, safety_limits=SafetyLimits(rule_timeout=None))
     policy = compile_policy(_source(condition), runtime_config=config)
     if restored:
         wire = policy.to_bytes()
@@ -105,7 +113,11 @@ def test_callee_forward_aliases_are_independent_of_the_callers_aliases(
         name = f"Caller{number}"
         source += f'\nrule "{name}" imports: check = "{previous}" condition: (messages as messages) and check(messages)'
         previous = name
-    policy = _policy(source, QuarryConfig(config_version=2), restored)
+    policy = _policy(
+        source,
+        QuarryConfig(config_version=2, safety_limits=SafetyLimits(rule_timeout=None)),
+        restored,
+    )
     result = policy.scan(CHAT, explain=explain)
     assert result.is_complete, result.evaluation_errors
     assert result.rule_matches == ([previous] if matched else [])
@@ -133,10 +145,20 @@ def test_duplicate_aliases_still_fail_before_execution(condition):
 @pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("explain", [False, True])
 def test_nested_alias_declarations_keep_their_own_scope(condition, restored, explain):
-    policy = compile_policy(_source(condition), runtime_config=QuarryConfig(config_version=2))
+    policy = compile_policy(
+        _source(condition),
+        runtime_config=QuarryConfig(
+            config_version=2, safety_limits=SafetyLimits(rule_timeout=None)
+        ),
+    )
     if restored:
         wire = policy.to_bytes()
-        policy = load_compiled_policy(wire, runtime_config=QuarryConfig(config_version=2))
+        policy = load_compiled_policy(
+            wire,
+            runtime_config=QuarryConfig(
+                config_version=2, safety_limits=SafetyLimits(rule_timeout=None)
+            ),
+        )
         assert policy.to_bytes() == wire
     result = policy.scan(CHAT, explain=explain)
     assert result.is_complete and result.rule_matches == ["Read"]
@@ -183,3 +205,26 @@ def test_scalar_shadow_keeps_its_outer_initializer_and_its_local_uses(
     assert result.rule_matches == (["Read"] if matched else [])
     assert adapter.classifications == calls
     assert adapter.classification_messages == ([CHAT["messages"]] if calls else [])
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("explain", [False, True])
+@pytest.mark.parametrize("matched", [False, True])
+def test_forward_input_alias_can_feed_a_called_rule(restored, explain, matched):
+    config = QuarryConfig(
+        config_version=2,
+        inputs={"memory.notes": {"content": ["content"]}},
+        safety_limits=SafetyLimits(rule_timeout=None),
+    )
+    source = (
+        'rule "Leaf" condition: user_said("needle")\n'
+        'rule "Read" imports: pi = "Leaf" condition: '
+        "pi(note) and (memory.notes[0] as note)"
+    )
+    policy = _policy(source, config, restored)
+    result = policy.scan(
+        {"memory": {"notes": [{"id": "n", "content": "needle" if matched else "other"}]}},
+        explain=explain,
+    )
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == (["Read"] if matched else [])
