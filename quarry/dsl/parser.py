@@ -16,6 +16,7 @@
 
 """Parser for the DSL"""
 
+import hashlib
 import re
 
 from lark import Lark
@@ -23,6 +24,7 @@ from lark.exceptions import GrammarError, UnexpectedInput, UnexpectedToken, Visi
 
 from quarry.core.logging import get_app_logger
 from quarry.dsl.grammar import DSL_GRAMMAR
+from quarry.dsl.syntax_errors import format_syntax_error, validate_terminal_labels
 from quarry.dsl.transformer import DSLTransformer
 from quarry.types.exceptions import RuleParseError
 from quarry.types.rules import DSLRule
@@ -34,24 +36,59 @@ class DSLParser:
     """Parse DSL text into tree and transform into Rule object"""
 
     def __init__(self):
-        self.parser = Lark(DSL_GRAMMAR, parser="lalr")
+        self.parser = Lark(DSL_GRAMMAR, parser="lalr", start=["start", "module"])
+        validate_terminal_labels(self.parser)
         self.transformer = DSLTransformer()
 
     def parse(self, rule_text: str, *, source: str | None = None) -> DSLRule:
         """Parse DSL text -> tree -> Rule object"""
         try:
-            tree = self.parser.parse(rule_text)
+            tree = self.parser.parse(rule_text, start="start")
             rule = self.transformer.transform(tree)
+            if rule.import_groups:
+                raise ValueError("imports require loading a rule module")
             return rule
         except (GrammarError, UnexpectedToken, UnexpectedInput) as e:
             line = getattr(e, "line", None)
             logger.error(f"[ERROR] Rule grammar failed: error_type={type(e).__name__} line={line}")
-            message = _single_equals_message(e, rule_text) or str(e)
+            message = (
+                _single_equals_message(e, rule_text)
+                or format_syntax_error(e, rule_text, self.parser)
+                if isinstance(e, UnexpectedInput)
+                else str(e)
+            )
             raise RuleParseError(
                 rule_name="<unknown>", line=line, message=message, source=source
             ) from e
         except Exception as e:
             logger.error(f"[ERROR] Rule parse failed: error_type={type(e).__name__}")
+            message = _NESTED_TOO_DEEPLY if _exceeds_recursion_limit(e) else str(e)
+            raise RuleParseError(
+                rule_name="<unknown>", line=None, message=message, source=source
+            ) from e
+
+    def parse_many(self, rule_text: str, *, source: str | None = None) -> tuple[DSLRule, ...]:
+        """Parse a source module of public rules for import linking."""
+        try:
+            rules = self.transformer.transform(self.parser.parse(rule_text, start="module"))
+            if not isinstance(rules, tuple) or not all(isinstance(r, DSLRule) for r in rules):
+                raise TypeError("Parser did not return DSLRule declarations")
+            digest = hashlib.sha256(rule_text.encode("utf-8")).hexdigest()
+            for rule in rules:
+                rule.source_sha256 = digest
+            return rules
+        except (GrammarError, UnexpectedToken, UnexpectedInput) as e:
+            line = getattr(e, "line", None)
+            message = (
+                _single_equals_message(e, rule_text)
+                or format_syntax_error(e, rule_text, self.parser)
+                if isinstance(e, UnexpectedInput)
+                else str(e)
+            )
+            raise RuleParseError(
+                rule_name="<unknown>", line=line, message=message, source=source
+            ) from e
+        except Exception as e:
             message = _NESTED_TOO_DEEPLY if _exceeds_recursion_limit(e) else str(e)
             raise RuleParseError(
                 rule_name="<unknown>", line=None, message=message, source=source

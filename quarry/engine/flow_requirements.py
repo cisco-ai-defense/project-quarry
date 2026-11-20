@@ -96,6 +96,14 @@ def flows_settled(
     """Whether every flow is decided without reading the timeline."""
 
     check_deadline()
+    # A called rule evaluates its own selected messages. The caller's static
+    # environment cannot prove that a descendant no longer needs its clock.
+    if any(
+        check.orders_input_items
+        for atom_id, check in artifact.split_checks.items()
+        if atom_id in artifact.automaton_atoms
+    ):
+        return False
     _, static_value = _static_values(artifact, evaluation_input, regex_backend, check_deadline)
     return all(_settled(requirement, static_value) for requirement in artifact.flow_requirements)
 
@@ -117,6 +125,10 @@ def clock_feeds_settled(
         _settled(requirement, static_value)
         for requirement in artifact.flow_requirements
         if missing.intersection(requirement.clock_surfaces)
+    ) and all(
+        clock_feeds_settled(check, missing, evaluation_input, regex_backend, check_deadline)
+        for atom_id, check in artifact.split_checks.items()
+        if atom_id in artifact.automaton_atoms and missing.intersection(check.clock_only_surfaces)
     )
 
 
