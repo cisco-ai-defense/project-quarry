@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 # from rule source; the loader cannot migrate their serialized automata.
 # Compiler-9 keeps scalar aliases forward-scoped and prevents later aliases
 # from capturing earlier alias values. Compiler-8 policies require recompilation.
-COMPILER_VERSION = "compiler-9"
+# Compiler-10 permits new-name forward aliases while preserving existing bindings.
+COMPILER_VERSION = "compiler-10"
 
 
 @dataclass(frozen=True, slots=True)

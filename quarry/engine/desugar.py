@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 from quarry.engine import core as C
 from quarry.engine.budget import charge
 from quarry.engine.diagnostics import UnsupportedConstruct
-from quarry.engine.extension_surfaces import EVENT_SURFACES
+from quarry.engine.extension_surfaces import EVENT_SURFACES, STATIC_SURFACES
 from quarry.language.runtime import surface_names
 from quarry.types.dsl import (
     AllComprehension,
@@ -191,7 +191,7 @@ class Desugarer:
             and node.operator in ("and", "or")
         ):
             if node.operator == "and":
-                return C.conj(self.cond(part, scope) for part in self._unaliased(node))
+                return C.conj(self.cond(part, scope) for part in self._unaliased(node, scope))
             left, right = self.cond(node.left, scope), self.cond(node.right, scope)
             return C.disj([left, right])
         if isinstance(node, UnaryOp) and node.operator == "not":
@@ -243,8 +243,8 @@ class Desugarer:
         binding = _lookup(scope, var)
         return C.Pred(node, binding.var, binding.surface)
 
-    def _unaliased(self, node) -> list:
-        """Inline ``as`` values in subsequent clauses of one ``and`` chain."""
+    def _unaliased(self, node, scope=()) -> list:
+        """Inline aliases without changing earlier reads of names already in scope."""
 
         parts: list = []
         pending = [node]
@@ -272,8 +272,18 @@ class Desugarer:
                 raise UnsupportedConstruct(
                     f"`as {var}` names two values in one `and`; give each its own name"
                 )
-            parts[index:] = [
-                self._t.substitute_identifier(part, var, expr) for part in parts[index:]
+            # New names may be used before their declaration in this chain. A
+            # shadowing alias keeps the meaning of preceding reads and initializers.
+            visible = set(surface_names()) | {binding.name for binding in scope} | {"params"}
+            visible |= {
+                surface.partition(".")[0]
+                for surface in EVENT_SURFACES.get() | STATIC_SURFACES.get()
+            }
+            if self._value_var is not None:
+                visible.add(self._value_var)
+            first = index if var in visible else 0
+            parts[first:] = [
+                self._t.substitute_identifier(part, var, expr) for part in parts[first:]
             ]
             index -= 1
         return parts
