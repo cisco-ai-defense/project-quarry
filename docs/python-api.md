@@ -40,6 +40,11 @@ print(result.rule_matches, result.detailed_matches, result.outputs)
 
 `scan_data_async` serves async applications. `ScanResult.completion_state` is `complete`, `invalid`, or `incomplete`; `is_complete` is true only for an authoritative result. Explain evidence and typed `outputs` follow the same status rule.
 
+When constructing `SafetyLimits` in Python, `max_total_size` must be a nonnegative integer;
+booleans, floats, strings and `None` raise `ValueError` at construction. Zero is a real budget
+that rejects nonempty input. To disable limit enforcement for trusted input, set
+`enforce_limits=False` with a valid budget.
+
 ## Typed scan failures
 
 `result.failures` is an immutable tuple of `ScanFailure` records. Each record has a
