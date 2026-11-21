@@ -62,4 +62,6 @@ The timeline must contain each read item exactly once and preserve chat order. W
 
 An `InputAdapter` converts native data under one conversation key into requested sections. Configure its key and registered adapter name in `adapters:`. The adapter declares the sections it can fill and returns only the sections the scanner requests. The host can supply trusted adapter instances to `DSLScanner(input_adapters={...})`; packages can register factories under the `quarry.input_adapters` entry point group. Adapter name and version, and every input declaration read by a compiled policy, are part of that policy's identity.
 
+Native data is checked against `max_total_size` before conversion. This preflight counts compact JSON bytes in UTF-8, including integer digits, boolean spelling, keys and punctuation. Printable Python integers can use the available byte budget up to the interpreter's active integer conversion limit. A value that cannot be printed within that limit fails the size check before the adapter runs.
+
 The plugin's `quarry_reference` response lists configured sections under `inputs` so rule authors can discover their fields.
