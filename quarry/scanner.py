@@ -1336,6 +1336,16 @@ class DSLScanner:
                 parameter_specs={spec.name: spec for spec in parameter_schema},
                 _total_size_preflight=total_size_preflight,
             )
+        except QuarryTimeoutError as exc:
+            if self.limits.fail_on_timeout:
+                raise
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=f"Input preparation timed out: {exc}",
+                error_category=ScanFailureCategory.TIMEOUT,
+            )
         except ConversationValidationError as exc:
             message = str(exc)
             return ScanResult(
