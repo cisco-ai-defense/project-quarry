@@ -559,7 +559,9 @@ async def test_a_batch_deadline_raises_when_timeouts_are_configured_to_fail(
         nonlocal now
         result = await score(*args, **kwargs)
         if adapter.calls == 2:
-            now += 11
+            deadline = timer.current_evaluation_deadline()
+            assert deadline is not None
+            now = deadline.expires_at
         return result
 
     monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
