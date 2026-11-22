@@ -3244,6 +3244,7 @@ class ModelInferenceBackend:
                 config.size,
                 config.step,
                 config.scope,
+                rendering.last_turn if encoding is None and config.scope == "last_turn" else None,
                 limit,
             ),
             prepare_plan,
