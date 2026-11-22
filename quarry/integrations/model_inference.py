@@ -59,7 +59,12 @@ from quarry.integrations.message_ranges import (
     gather_split_tasks,
 )
 from quarry.integrations.message_readability import require_model_messages
-from quarry.integrations.model_usage import RETRYABLE_ERROR_CODES, ModelRetryHistory, ModelUsage
+from quarry.integrations.model_usage import (
+    RETRYABLE_ERROR_CODES,
+    ModelPreparationError,
+    ModelRetryHistory,
+    ModelUsage,
+)
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.shared_transforms import (
     TRANSFORM_BATCH_SIZE,
@@ -2505,7 +2510,7 @@ class ModelInferenceBackend:
         retry_history = ModelRetryHistory()
 
         async def request(*, timeout: float | None) -> Any:
-            async def invoke(attempt_timeout):
+            def prepare_attempt():
                 # Construct a fresh payload for each retry. A host adapter may mutate it.
                 try:
                     arguments = payload()
@@ -2513,14 +2518,18 @@ class ModelInferenceBackend:
                     raise _attributed_failure(
                         exc.message, exc, model_id, private_model=rate_limit_model
                     ) from exc
-                response = send(model, *arguments, timeout=attempt_timeout)
-                return await response if inspect.isawaitable(response) else response
+
+                async def invoke(attempt_timeout):
+                    response = send(model, *arguments, timeout=attempt_timeout)
+                    return await response if inspect.isawaitable(response) else response
+
+                return invoke
 
             try:
                 response = await self._send(
                     model_id,
                     rate_limit_model,
-                    invoke,
+                    prepare_attempt,
                     timeout=timeout,
                     retry_history=retry_history,
                 )
@@ -2628,7 +2637,7 @@ class ModelInferenceBackend:
         self,
         model_id: str,
         rate_limit_model: str,
-        operation: Callable[[float | None], Awaitable[Any]],
+        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[Any]]],
         *,
         timeout: float | None,
         retry_history: ModelRetryHistory,
@@ -2636,13 +2645,17 @@ class ModelInferenceBackend:
         """Run one logical model call and normalize its final provider failure."""
 
         try:
-            return await self.model_usage.run(
-                rate_limit_model,
-                operation,
-                budget_alias=model_id,
-                timeout=timeout,
-                retry_history=retry_history,
-            )
+            try:
+                return await self.model_usage.run(
+                    rate_limit_model,
+                    None,
+                    budget_alias=model_id,
+                    timeout=timeout,
+                    retry_history=retry_history,
+                    prepare_attempt=prepare_attempt,
+                )
+            except ModelPreparationError as exc:
+                raise exc.error from None
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the
             # trusted Quarry alias. Rewrite only the structured leading model label; if an
