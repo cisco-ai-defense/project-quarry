@@ -208,3 +208,35 @@ async def test_host_cannot_claim_text_removed_from_the_selected_projection(tmp_p
         await service.model_classify_messages("classes", selected)
     assert error.value.details["code"] == "invalid_output"
     assert adapter.encodings == adapter.requests == []
+
+
+@pytest.mark.asyncio
+async def test_character_last_turn_plans_keep_each_alias_slice(tmp_path):
+    class SelectedTurn(WindowAdapter):
+        source = None
+
+        async def render_window_input(self, config, messages, tools):
+            if self.source is None:
+                self.source = (await join_window_input(messages, tools)).source
+            bounds = (0, 4) if config.model == "left" else (5, 10)
+            return WindowInput(self.source, "", bounds)
+
+    adapter = SelectedTurn()
+    windows = {"unit": "characters", "size": 100, "renderer": "host", "scope": "last_turn"}
+    models = {
+        name: {**model_entry(classify=0), "model": name, "windows": windows}
+        for name in ("left", "right")
+    }
+    service = backend(tmp_path, models, adapter)
+    policy = compile_policy(
+        'rule "Read" condition: model("left").classify(messages) > 0.1 '
+        'and model("right").classify(messages) > 0.1',
+        runtime_config=service.config,
+        model_inference_backend=service,
+    )
+    result_cache.clear()
+
+    result = await policy.scan_async({"messages": [{"role": "user", "content": "left/right"}]})
+
+    assert result.is_complete and result.rule_matches == ["Read"], result.evaluation_errors
+    assert sorted(batches for batches, _, _ in adapter.requests) == [("left",), ("right",)]
