@@ -1015,10 +1015,17 @@ def test_an_invalid_configuration_is_rejected_with_its_reason(
     assert str(exc_info.value) == message
 
 
-def test_an_unreadable_text_file_is_named_in_the_error(tmp_path) -> None:
+def test_an_unreadable_text_file_is_named_in_the_error(tmp_path, monkeypatch) -> None:
     policy = tmp_path / "policy.md"
     policy.write_text("keep secrets", encoding="utf-8")
-    policy.chmod(0)
+    read_text = Path.read_text
+
+    def refuse_policy(path, *args, **kwargs):
+        if path == policy:
+            raise PermissionError(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse_policy)
 
     with pytest.raises(ValueError) as exc_info:
         QuarryConfig.from_mapping(
