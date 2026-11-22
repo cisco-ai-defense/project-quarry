@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 # Bump when compilation or admission semantics change in a way that must invalidate
 # previously produced artifacts. Compiler-27 preserves extraction operation kinds and
-# explicit default bounds in labels while retaining eager admission and guarded calls.
+# explicit default bounds in labels alongside new-name forward aliases and existing bindings.
 COMPILER_VERSION = "compiler-27"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
