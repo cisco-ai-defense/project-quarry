@@ -213,10 +213,13 @@ async def test_host_cannot_claim_text_removed_from_the_selected_projection(tmp_p
 @pytest.mark.asyncio
 async def test_character_last_turn_plans_keep_each_alias_slice(tmp_path):
     class SelectedTurn(WindowAdapter):
+        source = None
+
         async def render_window_input(self, config, messages, tools):
-            rendered = await join_window_input(messages, tools)
+            if self.source is None:
+                self.source = (await join_window_input(messages, tools)).source
             bounds = (0, 4) if config.model == "left" else (5, 10)
-            return WindowInput(rendered.source, rendered.context, bounds)
+            return WindowInput(self.source, "", bounds)
 
     adapter = SelectedTurn()
     windows = {"unit": "characters", "size": 100, "renderer": "host", "scope": "last_turn"}
