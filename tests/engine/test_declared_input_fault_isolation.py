@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Declared inputs preserve eager chat validation and independent source clocks."""
+"""Declared inputs preserve lazy argument faults and independent source clocks."""
 
 from copy import deepcopy
 from dataclasses import replace
@@ -97,7 +97,7 @@ def _configuration(source: str, feature: str):
 @pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("explain", [False, True])
 @pytest.mark.parametrize("arguments", ["{not valid json", "[]"])
-def test_chat_argument_validation_does_not_depend_on_unread_features(
+def test_chat_argument_reads_do_not_depend_on_unread_features(
     condition, feature, restored, explain, arguments
 ):
     source = f'rule "Chat" condition: {condition}'
@@ -112,9 +112,11 @@ def test_chat_argument_validation_does_not_depend_on_unread_features(
         result = DSLScanner(config, input_adapters=adapters).scan_data(
             _chat(arguments), enable_explain=explain
         )
-    assert result.completion_state == "invalid"
-    assert result.rule_matches == []
-    assert result.validation_error
+    assert result.is_complete and result.validation_error is None
+    # Freeform text and non-object JSON expose no named fields; they are not faults.
+    reads_empty_arguments = 'get_tool_calls("lookup")' in condition
+    assert result.rule_matches == ([] if reads_empty_arguments else ["Chat"])
+    assert not result.failures
 
 
 @pytest.mark.parametrize("adapted", [False, True])
@@ -128,7 +130,7 @@ def test_bad_chat_arguments_do_not_fail_independent_inputs_tools_or_constants(
         inputs=INPUTS,
         safety_limits=SafetyLimits(rule_timeout=None),
         quarry_rule_texts=(
-            'rule "Chat" condition: called_tool("lookup")',
+            'rule "Chat" condition: any c in get_tool_calls("lookup") where c.arguments.q == "hi"',
             'rule "Memory" condition: any w in memory.writes where w.content == "safe"',
             'rule "Tools" condition: any t in tools where t.name == "lookup"',
             'rule "Constant" condition: true',
@@ -137,9 +139,9 @@ def test_bad_chat_arguments_do_not_fail_independent_inputs_tools_or_constants(
     )
     data = {"memory": MEMORY, "tools": TOOLS}
     if adapted:
-        data["native"] = _chat("{not valid json")
+        data["native"] = _chat('{"q":NaN}')
     else:
-        data.update(_chat("{not valid json"))
+        data.update(_chat('{"q":NaN}'))
     subset = {"Memory", "Tools", "Constant"} | ({"Chat"} if selected_chat else set())
     result = DSLScanner(
         config, input_adapters={"owned-chat": ChatAdapter()} if adapted else {}
@@ -228,19 +230,22 @@ def test_clock_projection_does_not_hide_bad_timeline_structure(problem):
 
 
 @pytest.mark.parametrize("bounded", [False, True])
-def test_bad_chat_does_not_poison_an_independent_input_only_clock(bounded):
+@pytest.mark.parametrize("fault", ["wire", "decoded"])
+def test_bad_chat_does_not_poison_an_independent_input_only_clock(bounded, fault):
     op = "after(within: 3)" if bounded else "after"
     config = QuarryConfig(
         config_version=2,
         inputs=INPUTS,
         safety_limits=SafetyLimits(rule_timeout=None),
         quarry_rule_texts=(
-            'rule "Chat" condition: called_tool("lookup")',
+            'rule "Chat" condition: any c in get_tool_calls("lookup") where c.arguments.q == "hi"',
             f'rule "Flow" condition: (any w in memory.writes where w.id == "w2") {op} (any w in memory.writes where w.id == "w1")',
             'rule "Constant" condition: true',
         ),
     )
-    data = _chat("{not valid json")
+    data = _chat('{"q":NaN}')
+    if fault == "wire":
+        data["messages"][0]["role"] = 4
     data.update(
         {
             "memory": {"writes": [{"id": name, "content": "safe"} for name in ["w1", "w2"]]},
@@ -255,8 +260,11 @@ def test_bad_chat_does_not_poison_an_independent_input_only_clock(bounded):
         }
     )
     result = DSLScanner(config).scan_data(data)
-    assert set(result.rule_matches) == ({"Constant"} if bounded else {"Constant", "Flow"})
-    assert set(result.evaluation_errors) == ({"Chat", "Flow"} if bounded else {"Chat"})
+    # A semantic argument fault leaves every clock item present; a structural chat
+    # fault makes a bounded clock incomplete while leaving an unbounded flow usable.
+    unknown_clock = fault == "wire" and bounded
+    assert set(result.rule_matches) == ({"Constant"} if unknown_clock else {"Constant", "Flow"})
+    assert set(result.evaluation_errors) == ({"Chat", "Flow"} if unknown_clock else {"Chat"})
 
 
 def test_valid_wide_argument_values_keep_exact_comparisons_with_declared_inputs():
@@ -292,8 +300,11 @@ def test_valid_clock_items_are_still_counted_by_bounded_flows(intervening_item):
 
 
 @pytest.mark.parametrize("feature", ["declared", "adapter"])
-def test_argument_size_limits_precede_new_eager_decode(feature, monkeypatch):
-    config, adapters = _configuration('rule "Chat" condition: called_tool("lookup")', feature)
+def test_argument_size_limits_precede_lazy_decode(feature, monkeypatch):
+    config, adapters = _configuration(
+        'rule "Chat" condition: any c in get_tool_calls("lookup") where c.arguments.q == "hi"',
+        feature,
+    )
     config = replace(
         config, safety_limits=SafetyLimits(rule_timeout=None, max_tool_argument_size=16)
     )
@@ -301,7 +312,7 @@ def test_argument_size_limits_precede_new_eager_decode(feature, monkeypatch):
     def unexpected_decode(*args, **kwargs):
         pytest.fail("argument decoding happened before size-limit refusal")
 
-    monkeypatch.setattr("quarry.scanner.validate_conversation_arguments", unexpected_decode)
+    monkeypatch.setattr("quarry.types.messages.decode_tool_arguments", unexpected_decode)
     result = DSLScanner(config, input_adapters=adapters).scan_data(_chat("{" + "x" * 100))
     assert result.completion_state == "invalid" and result.rule_matches == []
     assert "max_tool_argument_size" in result.validation_error
@@ -309,20 +320,25 @@ def test_argument_size_limits_precede_new_eager_decode(feature, monkeypatch):
 
 @pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("explain", [False, True])
-def test_bad_chat_cannot_reach_a_model_or_explanation_call(restored, explain, monkeypatch):
+@pytest.mark.parametrize("arguments", ["{not valid json", '{"q":NaN}'])
+def test_raw_model_input_does_not_force_argument_decoding(
+    restored, explain, arguments, monkeypatch
+):
     from quarry.integrations import model_inference
+    from tests.unit.model_fakes import classification
 
-    class NoDispatch:
+    class RawRecorder:
         def __init__(self):
-            self.calls = 0
+            self.requests = []
 
-        async def score(self, *args, **kwargs):
-            self.calls += 1
-            raise AssertionError("malformed chat reached a model")
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            assert tools == []
+            self.requests.append(deepcopy(messages))
+            return classification(0.9)
 
-    adapter = NoDispatch()
+    adapter = RawRecorder()
     monkeypatch.setattr(model_inference, "_default_adapters", lambda: {"owned": adapter})
-    source = 'rule "Model" condition: model("judge").score(messages, "Assess the sample") > 0.5'
+    source = 'rule "Model" condition: model("judge").classify(messages) > 0.5'
     config = QuarryConfig.from_mapping(
         {
             "config_version": 2,
@@ -332,11 +348,7 @@ def test_bad_chat_cannot_reach_a_model_or_explanation_call(restored, explain, mo
                 "judge": {
                     "adapter": "owned",
                     "model": "owned-score",
-                    "score": {
-                        "message_builder": "constitution",
-                        "boundary_seed": 9,
-                        "tokens": {"negative": "0", "positive": "1"},
-                    },
+                    "classify": {"class_index": 0},
                 }
             },
         },
@@ -347,8 +359,8 @@ def test_bad_chat_cannot_reach_a_model_or_explanation_call(restored, explain, mo
     if restored:
         policy = compile_policy(source, runtime_config=config)
         policy = load_compiled_policy(policy.to_bytes(), runtime_config=config)
-        result = policy.scan(_chat("{not valid json"), explain=explain)
+        result = policy.scan(_chat(arguments), explain=explain)
     else:
-        result = DSLScanner(config).scan_data(_chat("{not valid json"), enable_explain=explain)
-    assert result.completion_state == "invalid" and result.rule_matches == []
-    assert adapter.calls == 0
+        result = DSLScanner(config).scan_data(_chat(arguments), enable_explain=explain)
+    assert result.is_complete and result.rule_matches == ["Model"]
+    assert adapter.requests == [_chat(arguments)["messages"]]
