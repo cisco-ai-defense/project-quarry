@@ -67,7 +67,7 @@ def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits):
         pytest.param(SafetyLimits(rule_timeout=0.05), 0.5, None, True, True, id="rule-timeout"),
         pytest.param(SafetyLimits(rule_timeout=5.0), 0.1, None, False, True, id="within-timeout"),
         pytest.param(
-            SafetyLimits(rule_timeout=10.0), 1.0, 0.05, True, True, id="deadline-caps-timeout"
+            SafetyLimits(rule_timeout=10.0), 1.0, 0.05, True, None, id="deadline-caps-timeout"
         ),
         pytest.param(SafetyLimits(), 1.0, 0.0, True, False, id="expired-deadline-calls-nothing"),
     ],
@@ -82,7 +82,26 @@ def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
 
     assert (result.timed_out_rules or []) == (["m"] if timed_out else [])
     assert result.rule_matches == ([] if timed_out else ["m"])
-    assert bool(adapter.calls) is reached_the_model
+    # A positive scan deadline may expire during input preparation, before dispatch.
+    if reached_the_model is not None:
+        assert bool(adapter.calls) is reached_the_model
+
+
+def test_scan_deadline_caps_model_request_timeout(tmp_path) -> None:
+    class TimeoutAdapter(_SlowAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            self.received_timeout = timeout
+            return await super().classify_messages(config, messages, tools, timeout=timeout)
+
+    adapter = TimeoutAdapter(0)
+    scanner = _scanner(
+        tmp_path, _MODEL_RULE, adapter=adapter, limits=SafetyLimits(rule_timeout=120.0)
+    )
+    result = asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=60.0))
+
+    assert result.rule_matches == ["m"]
+    assert adapter.calls == 1
+    assert adapter.received_timeout is not None and 0 < adapter.received_timeout <= 60.0
 
 
 def test_a_local_rule_completes_while_a_model_rule_times_out(tmp_path) -> None:
