@@ -102,6 +102,11 @@ stage; a later scan execution failure retains its exception-based category.
 
 ## Prepared policies
 
+For a source with imported helpers, pass the entry rule's name with
+`compile_policy(source, entry_rule="Entry")`. Helpers can be in the same source
+or in the configured rule files. The saved policy contains the entry rule's
+compiled checks, including the imported checks.
+
 `compile_policy(source, policy_parameters=...)` creates a reusable `CompiledPolicy`. Supply scan parameters with `policy.scan(conversation, parameters=...)` or its async and batch methods. A prepared policy can report its decision tree and produce versioned bytes:
 
 ```python
