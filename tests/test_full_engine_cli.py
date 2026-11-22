@@ -369,7 +369,7 @@ def test_cli_human_output_marks_an_incomplete_partial_match_non_authoritative(
     ],
 )
 def test_cli_timeout_is_incomplete_and_serializes_the_timed_out_rules(
-    quarry, tmp_path, output_format, timed_out_rules
+    quarry, tmp_path, output_format, timed_out_rules, expire_rule_clock
 ):
     config = _cli_config(tmp_path, _GREETING_RULE, rule_timeout=1e-9)
 

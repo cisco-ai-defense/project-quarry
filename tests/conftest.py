@@ -41,6 +41,20 @@ hypothesis_settings.register_profile("deep", max_examples=5000, **_PROPERTY_CHEC
 hypothesis_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 
+@pytest.fixture
+def expire_rule_clock(monkeypatch):
+    """Consume a rule's budget at its first checkpoint, independent of timer resolution."""
+    from quarry.safety import timer
+
+    monotonic = timer.time.monotonic
+
+    def clock():
+        deadline = timer.current_evaluation_deadline()
+        return monotonic() if deadline is None else deadline.expires_at
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+
+
 def rule_matches(rule_text: str, conversation: dict) -> bool:
     """Run a rule through the public scanner and require an authoritative verdict."""
 

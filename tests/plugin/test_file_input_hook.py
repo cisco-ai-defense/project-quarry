@@ -83,7 +83,7 @@ def _files(files: dict[str, str | bytes]) -> Callable[[Path], None]:
             if isinstance(content, bytes):
                 path.write_bytes(content)
             else:
-                path.write_text(content, encoding="utf-8")
+                path.write_bytes(content.encode("utf-8"))
 
     return write
 

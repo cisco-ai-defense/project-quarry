@@ -8,6 +8,7 @@ from copy import deepcopy
 import pytest
 
 from quarry import compile_policy, load_compiled_policy
+from quarry import config as config_module
 from quarry.config import QuarryConfig
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.types.exceptions import ConfigurationError
@@ -66,7 +67,12 @@ def test_shared_nonrecursive_definitions_are_valid_and_not_mutated(tmp_path):
 
 def test_oversized_expanded_environment_value_is_not_exposed_in_error(tmp_path, monkeypatch):
     marker = "OWNED_PRIVATE_MODEL_SETTING_"
-    monkeypatch.setenv("QUARRY_TEMPLATE_PRIVATE_VALUE", marker + "x" * 1_000_000)
+    # A detached mapping reaches the resolver limit even on hosts that cap env values.
+    monkeypatch.setattr(
+        config_module.os,
+        "environ",
+        {**config_module.os.environ, "QUARRY_TEMPLATE_PRIVATE_VALUE": marker + "x" * 1_000_000},
+    )
     document = {
         "model_templates": {"base": {"model": "${QUARRY_TEMPLATE_PRIVATE_VALUE}"}},
         "models": {"runtime": {"extends": "base"}},

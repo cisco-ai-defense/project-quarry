@@ -59,7 +59,7 @@ def test_generated_catalog_and_reference_match_the_annotated_implementation(tmp_
     output = tmp_path / "spec.json"
     assert write_language_spec(output) == SPEC
     assert output.read_bytes() == (LANGUAGE_DIR / "spec.json").read_bytes()
-    assert render_reference(SPEC) == (LANGUAGE_DIR / "reference.md").read_text()
+    assert render_reference(SPEC) == (LANGUAGE_DIR / "reference.md").read_text(encoding="utf-8")
 
 
 def test_every_model_operation_is_published_as_a_model_method():
@@ -81,8 +81,8 @@ _RUNNABLE_CHECKS = [
 
 @pytest.mark.parametrize(("rule_path", "check"), _RUNNABLE_CHECKS)
 def test_a_published_example_check_produces_its_declared_verdict(rule_path, check):
-    rule_text = (LANGUAGE_DIR / rule_path).read_text()
-    conversation = json.loads((LANGUAGE_DIR / check["input_path"]).read_text())
+    rule_text = (LANGUAGE_DIR / rule_path).read_text(encoding="utf-8")
+    conversation = json.loads((LANGUAGE_DIR / check["input_path"]).read_text(encoding="utf-8"))
     assert rule_matches(rule_text, conversation) is check["expected_match"]
 
 
@@ -98,7 +98,9 @@ def test_every_runnable_example_shows_a_match_and_a_clean_conversation():
 @pytest.mark.parametrize(
     "rule_text",
     [
-        pytest.param((LANGUAGE_DIR / example["rule_path"]).read_text(), id=example["id"])
+        pytest.param(
+            (LANGUAGE_DIR / example["rule_path"]).read_text(encoding="utf-8"), id=example["id"]
+        )
         for example in SPEC["examples"]
         if example["requires_backend"]
     ],

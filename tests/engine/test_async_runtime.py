@@ -445,7 +445,7 @@ _AST_TYPES = ("quarry.types.dsl", "quarry.language.metadata", "quarry.rule_versi
 
 def _quarry_imports(path: Path) -> set[str]:
     modules = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:

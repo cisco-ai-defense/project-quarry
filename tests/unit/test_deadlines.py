@@ -17,7 +17,6 @@
 """Tests for task-local deadlines and the signal timer."""
 
 import asyncio
-import time
 
 import pytest
 
@@ -32,7 +31,13 @@ from quarry.safety.timer import (
 
 
 @pytest.mark.asyncio
-async def test_task_deadlines_are_nested_isolated_and_validated() -> None:
+async def test_task_deadlines_are_nested_isolated_and_validated(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from quarry.safety import timer
+
+    now = 0.0
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
     with evaluation_deadline(0.2, "outer"):
         outer_remaining = clamp_to_evaluation_deadline(10)
         with evaluation_deadline(5, "inner"):
@@ -43,7 +48,7 @@ async def test_task_deadlines_are_nested_isolated_and_validated() -> None:
         pytest.raises(QuarryTimeoutError, match="expired"),
         evaluation_deadline(0.001, "expired"),
     ):
-        time.sleep(0.01)
+        now += 0.01
         raise_if_evaluation_expired()
 
     with evaluation_deadline(0.2, "outer") as outer:
@@ -51,7 +56,7 @@ async def test_task_deadlines_are_nested_isolated_and_validated() -> None:
             pytest.raises(QuarryTimeoutError, match="inner"),
             evaluation_deadline(0.001, "inner"),
         ):
-            time.sleep(0.01)
+            now += 0.01
 
         assert current_evaluation_deadline() is outer
         assert 0 < clamp_to_evaluation_deadline(1) <= 0.2

@@ -50,7 +50,7 @@ _FENCE = re.compile(r"^```([A-Za-z0-9_-]*)\n(.*?)^```", re.MULTILINE | re.DOTALL
 def _examples() -> list[tuple[str, str, str]]:
     examples = []
     for document in DOCUMENTS:
-        text = document.read_text()
+        text = document.read_text(encoding="utf-8")
         for match in _FENCE.finditer(text):
             language, body = match.group(1), match.group(2).strip()
             if language not in ("", "quarry", "quarry-condition") or not body:

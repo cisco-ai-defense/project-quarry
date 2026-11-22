@@ -614,9 +614,15 @@ def test_resolved_large_schema_annotation_fanout_is_byte_bounded(tmp_path, monke
 
 
 def test_short_environment_placeholder_cannot_hide_oversized_expansion(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "QUARRY_MODEL_CONFIG_OVERSIZED_MODEL",
-        "x" * (config_module.MAX_RESOLVED_MODEL_CONFIG_BYTES + 1),
+    # Exercise expansion beyond the resolver limit without an OS environment-size cap.
+    monkeypatch.setattr(
+        config_module.os,
+        "environ",
+        {
+            **config_module.os.environ,
+            "QUARRY_MODEL_CONFIG_OVERSIZED_MODEL": "x"
+            * (config_module.MAX_RESOLVED_MODEL_CONFIG_BYTES + 1),
+        },
     )
 
     with pytest.raises(ConfigurationError, match="aggregate limit of 1000000 bytes"):
@@ -983,7 +989,7 @@ def _judge(**fields) -> dict:
         ),
         pytest.param(
             {"texts": {"policy": {"file": "/nonexistent/quarry/policy.md"}}},
-            "Text resource 'policy' file not found: /nonexistent/quarry/policy.md",
+            f"Text resource 'policy' file not found: {Path('/nonexistent/quarry/policy.md')}",
             id="absolute-text-file-missing",
         ),
         pytest.param(
