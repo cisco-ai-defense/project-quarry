@@ -64,7 +64,7 @@ def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits):
 @pytest.mark.parametrize(
     ("limits", "delay", "deadline", "timed_out", "reached_the_model"),
     [
-        pytest.param(SafetyLimits(rule_timeout=0.05), 0.5, None, True, True, id="rule-timeout"),
+        pytest.param(SafetyLimits(rule_timeout=0.05), 0.5, None, True, None, id="rule-timeout"),
         pytest.param(SafetyLimits(rule_timeout=5.0), 0.1, None, False, True, id="within-timeout"),
         pytest.param(
             SafetyLimits(rule_timeout=10.0), 1.0, 0.05, True, None, id="deadline-caps-timeout"
@@ -82,12 +82,17 @@ def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
 
     assert (result.timed_out_rules or []) == (["m"] if timed_out else [])
     assert result.rule_matches == ([] if timed_out else ["m"])
-    # A positive scan deadline may expire during input preparation, before dispatch.
+    # A positive deadline may expire during input preparation, before dispatch.
     if reached_the_model is not None:
         assert bool(adapter.calls) is reached_the_model
 
 
-def test_scan_deadline_caps_model_request_timeout(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("rule_timeout", "deadline_seconds"),
+    [(120.0, 60.0), (60.0, None)],
+    ids=["scan-deadline", "rule-deadline"],
+)
+def test_deadline_caps_model_request_timeout(tmp_path, rule_timeout, deadline_seconds) -> None:
     class TimeoutAdapter(_SlowAdapter):
         async def classify_messages(self, config, messages, tools, *, timeout=None):
             self.received_timeout = timeout
@@ -95,9 +100,12 @@ def test_scan_deadline_caps_model_request_timeout(tmp_path) -> None:
 
     adapter = TimeoutAdapter(0)
     scanner = _scanner(
-        tmp_path, _MODEL_RULE, adapter=adapter, limits=SafetyLimits(rule_timeout=120.0)
+        tmp_path,
+        _MODEL_RULE,
+        adapter=adapter,
+        limits=SafetyLimits(rule_timeout=rule_timeout, inference_timeout=None),
     )
-    result = asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=60.0))
+    result = asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=deadline_seconds))
 
     assert result.rule_matches == ["m"]
     assert adapter.calls == 1
