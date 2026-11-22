@@ -43,7 +43,12 @@ from quarry.integrations.read_identity import (
 from quarry.integrations.read_reporting import build_aggregates, scope_report
 from quarry.integrations.read_tokens import TextTokenAtlas, TextTokenBasis
 from quarry.integrations.rule_scope import _rule_scope
-from quarry.integrations.window_observations import WindowObservationLimits, _WindowObservationStore
+from quarry.integrations.window_observations import (
+    WindowObservationLimits,
+    _snapshot_probabilities,
+    _static_probabilities,
+    _WindowObservationStore,
+)
 from quarry.types.read_observations import _text_read_observer
 
 MeasurementState = Literal[
@@ -583,7 +588,14 @@ class ReadUsageSession:
             count = len(windows)
             character_report = {"state": "unavailable", "value": None}
             token_report = {"state": "unavailable", "value": None}
-            if type(characters) is UnitMeasurement and store.work < store.limits.max_work:
+            if (
+                not windows
+                and type(characters) is UnitMeasurement
+                and characters.state == "measured"
+                and not characters.intervals
+            ):
+                character_report = {"state": "measured", "value": 0}
+            elif type(characters) is UnitMeasurement and store.work < store.limits.max_work:
                 remaining = max(0, store.limits.max_work - store.work)
                 coverage = ReadCoverage(
                     max_work=max(1, remaining),
@@ -637,19 +649,40 @@ class ReadUsageSession:
         store = self._windows
         if store is None or self._pid != os.getpid():
             return
+        count = len(chunks)
         with self._lock:
             if self._closed or identity not in self._events:
                 return
-            if store.begin_reply(identity, generation, provider_model, len(chunks), cached):
-                store.safe_chunks(generation, chunks)
+            admitted = store.begin_reply(identity, generation, provider_model, count, cached)
+        if not admitted:
+            return
+        for ordinal in range(count):
+            with self._lock:
+                if self._closed or not store.charge(1):
+                    return
+            try:
+                # Host objects and temporary references are inspected and released outside
+                # the lock. A hostile finalizer cannot reenter a held session mutex.
+                probabilities = _static_probabilities(chunks[ordinal])
+                self._window_vector(generation, ordinal, probabilities, selected=False)
+            except Exception:
+                continue
 
-    def _window_vector(self, generation, ordinal, probabilities):
+    def _window_vector(self, generation, ordinal, probabilities, *, selected=True):
         store = self._windows
         if store is None or self._pid != os.getpid():
             return
+        count = len(probabilities) if type(probabilities) in (tuple, list) else -1
+        with self._lock:
+            admitted = not self._closed and store.prepare_vector(
+                generation, ordinal, count, selected=selected
+            )
+        if not admitted:
+            return
+        values, state = _snapshot_probabilities(probabilities, count)
         with self._lock:
             if not self._closed:
-                store.vector(generation, ordinal, probabilities, selected=True)
+                store.commit_vector(generation, ordinal, values, state, selected=selected)
 
     def window_observation_report(self):
         """Return detached reached-window metadata without exposing read identities."""

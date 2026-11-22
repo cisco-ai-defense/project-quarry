@@ -43,6 +43,29 @@ class WindowObservationLimits:
                 raise ValueError("invalid window observation limit")
 
 
+def _static_probabilities(chunk):
+    """Read ordinary Python storage without invoking an unused host property."""
+    probabilities = getattr_static(chunk, "probabilities", None)
+    if type(probabilities) is MemberDescriptorType:
+        probabilities = probabilities.__get__(chunk, type(chunk))
+    return probabilities
+
+
+def _snapshot_probabilities(probabilities, count):
+    """Project a bounded native slice outside locks, including temporary finalizers."""
+    # Exact list/tuple slicing cannot invoke a host override and copies at most count
+    # references even if another thread grows the original between admission and copy.
+    snapshot = probabilities[:count]
+    if len(snapshot) != count:
+        return None, "conflicting_probability_vector"
+    values = []
+    for value in snapshot:
+        if type(value) not in (float, int) or not 0 <= value <= 1 or not isfinite(value):
+            return None, "invalid_probability_vector"
+        values.append(float(value))
+    return tuple(values), "measured"
+
+
 class _WindowObservationStore:
     """All methods run under the owning read session's lock; no host callbacks run here."""
 
@@ -158,7 +181,35 @@ class _WindowObservationStore:
             reply["vectors"][ordinal] = None
         reply["states"][ordinal] = state
 
-    def vector(self, generation, ordinal, probabilities, *, selected=False):
+    def prepare_vector(self, generation, ordinal, count, *, selected):
+        """Admit bounded projection work using only native scalar metadata."""
+        reply = self.replies.get(generation)
+        if reply is None or not 0 <= ordinal < len(reply["vectors"]):
+            return False
+        previous = reply["vectors"][ordinal]
+        if (previous is not None and not selected) or reply["states"][
+            ordinal
+        ] == "conflicting_probability_vector":
+            return False
+        if not self.charge(1):
+            self._drop_vector(reply, ordinal, "limit_exceeded")
+            return False
+        if count < 0:
+            if selected:
+                self._drop_vector(reply, ordinal, "unavailable")
+            return False
+        if count == 0:
+            self._drop_vector(reply, ordinal, "invalid_probability_vector")
+            return False
+        if count > self.limits.max_probabilities - self.values + (
+            len(previous) if previous is not None else 0
+        ) or not self.charge(3 * count):
+            self._drop_vector(reply, ordinal, "limit_exceeded")
+            return False
+        return True
+
+    def commit_vector(self, generation, ordinal, values, state, *, selected):
+        """Commit detached native floats after projection outside the session lock."""
         reply = self.replies.get(generation)
         if reply is None or not 0 <= ordinal < len(reply["vectors"]):
             return
@@ -167,58 +218,23 @@ class _WindowObservationStore:
             ordinal
         ] == "conflicting_probability_vector":
             return
-        if type(probabilities) not in (tuple, list):
-            if selected:
-                self._drop_vector(reply, ordinal, "unavailable")
+        if values is None:
+            self._drop_vector(reply, ordinal, state)
             return
-        count = len(probabilities)
-        if count == 0:
-            self._drop_vector(reply, ordinal, "invalid_probability_vector")
-            return
-        if count > self.limits.max_probabilities - self.values + (
-            len(previous) if previous is not None else 0
-        ) or not self.charge(count + 1):
-            self._drop_vector(reply, ordinal, "limit_exceeded")
-            return
-        values = []
-        for value in probabilities:
-            # Do not invoke user numeric conversions or reinterpret invalid unused classes.
-            if type(value) not in (float, int) or not 0 <= value <= 1 or not isfinite(value):
-                self._drop_vector(reply, ordinal, "invalid_probability_vector")
-                return
-            values.append(float(value))
         if previous is not None:
-            if previous != tuple(values):
-                # A mutating host reply has no single defensible replay vector. Do not
-                # publish a snapshot that disagrees with the reader's accepted values.
+            if previous != values:
                 self._drop_vector(reply, ordinal, "conflicting_probability_vector")
+            return
+        count = len(values)
+        # Concurrent projections may have committed while this one copied its input.
+        if count > self.limits.max_probabilities - self.values:
+            self._drop_vector(reply, ordinal, "limit_exceeded")
             return
         self.values += count
         reply["values"] += count
         reply["measured"] += 1
-        reply["vectors"][ordinal] = tuple(values)
+        reply["vectors"][ordinal] = values
         reply["states"][ordinal] = "measured"
-
-    def safe_chunks(self, generation, chunks):
-        reply = self.replies.get(generation)
-        if reply is None or type(chunks) not in (tuple, list):
-            return
-        if len(chunks) != len(reply["vectors"]):
-            return
-        for ordinal, chunk in enumerate(chunks):
-            if not self.charge(1):
-                return
-            if reply["vectors"][ordinal] is not None:
-                continue
-            # Static lookup avoids invoking an unselected host property. Native Python
-            # slots are safe storage reads; arbitrary descriptors remain unavailable.
-            try:
-                probabilities = getattr_static(chunk, "probabilities", None)
-                if type(probabilities) is MemberDescriptorType:
-                    probabilities = probabilities.__get__(chunk, type(chunk))
-                self.vector(generation, ordinal, probabilities)
-            except Exception:
-                continue
 
     def report(self, bindings, events, *, finalized):
         rows, seen = [], {}
