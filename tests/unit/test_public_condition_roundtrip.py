@@ -97,3 +97,16 @@ def test_rendered_unicode_and_regex_keep_verdicts_through_guarded_reload(
             )
             assert result.is_complete, result.evaluation_errors
             assert result.rule_matches == expected
+
+
+def test_compile_rule_reports_a_malformed_python_field_path():
+    from quarry.engine.compiler import compile_rule
+    from quarry.types.dsl import FieldAccess
+
+    rule = DSLParser().parse('rule "Broken" condition: true')
+    rule.condition = FieldAccess(FunctionCall("conversation", []), None)
+
+    result = compile_rule(rule)
+
+    assert not result.ok and result.artifact is None
+    assert result.diagnostics.errors[0].message == "field access requires a list of field names"

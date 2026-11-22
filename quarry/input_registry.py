@@ -112,6 +112,31 @@ def _scoped_children(
             and field_name == "right"
         ):
             child_scope = _conjunction_scope(node.left, scope)
+        elif (
+            isinstance(node, BinaryOp)
+            and not isinstance(node, FlowOp)
+            and node.operator == "and"
+            and field_name == "left"
+            and isinstance(node.right, Assignment)
+        ):
+            # Resolve a new forward alias before projecting called-rule inputs.
+            # Existing bindings keep their meaning before a shadowing declaration.
+            from quarry.language.runtime import surface_names
+
+            alias = node.right
+            if (
+                alias.variable not in scope
+                and alias.variable not in surface_names() | _RESERVED
+                and not (
+                    isinstance(alias.expression, BinaryOp) and alias.expression.operator == "in"
+                )
+            ):
+                child_scope = {
+                    **scope,
+                    alias.variable: _ScopedName(
+                        "alias", alias.expression, _conjunction_scope(node.left, scope)
+                    ),
+                }
         value = getattr(node, field_name)
         if isinstance(value, ConditionNode):
             children.append((value, child_scope))
