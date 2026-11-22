@@ -67,7 +67,49 @@ def _path(tree_sha256: str, *, outcome: bool = True, leaf: str | None = "match")
             {
                 "node": "t:volume",
                 "outcome": outcome,
-                "number": {"value": 2, "operator": ">", "threshold": 1},
+                "number": {"value": 2 if outcome else 1, "operator": ">", "threshold": 1},
+            }
+        ],
+    }
+
+
+def _score_tree() -> dict:
+    return _hashed(
+        {
+            "schema_version": 1,
+            "root": "t:score",
+            "nodes": {
+                "t:score": {
+                    "id": "t:score",
+                    "kind": "score",
+                    "label": "synthetic score exceeds a half",
+                    "source_nodes": ["n0"],
+                    "score_form": {"quantifier": "none", "operator": ">=", "threshold": 0.5},
+                    "true": "match",
+                    "false": "no_match",
+                }
+            },
+        }
+    )
+
+
+def _score_path(tree: dict, *, value: float | None, outcome: bool | None) -> dict:
+    return {
+        "tree_sha256": tree["tree_sha256"],
+        "config_sha256": _CONFIG_DIGEST,
+        "parameter_digest": _PARAMETER_DIGEST,
+        "conversation_sha256": _CONVERSATION_DIGEST,
+        "leaf": None if outcome is None else "match" if outcome else "no_match",
+        "path": [
+            {
+                "node": "t:score",
+                "outcome": outcome,
+                "score": {
+                    "value": value,
+                    "operator": ">=",
+                    "threshold": 0.5,
+                    "evaluations": 0 if value is None else 1,
+                },
             }
         ],
     }
@@ -272,6 +314,101 @@ def test_malformed_or_impossible_paths_are_rejected(change) -> None:
     change(path)
 
     with pytest.raises(ValueError, match=r"path 0"):
+        decision_flows(tree, [path])
+
+
+@pytest.mark.parametrize("thresholds", [None, {"t:volume": 1}], ids=["recorded", "unchanged"])
+def test_a_number_record_that_contradicts_its_outcome_is_rejected(thresholds) -> None:
+    tree = _tree()
+    path = _path(tree["tree_sha256"], outcome=False, leaf="no_match")
+    path["path"][0]["number"]["value"] = 2
+
+    with pytest.raises(ValueError, match="path 0 records a number whose value and threshold"):
+        decision_flows(tree, [path], thresholds=thresholds)
+
+
+@pytest.mark.parametrize(("value", "outcome"), [(0.7, False), (0.2, True), (0.5, False)])
+def test_a_score_record_that_contradicts_its_outcome_is_rejected(value, outcome) -> None:
+    tree = _score_tree()
+
+    with pytest.raises(ValueError, match="path 0 records a score whose value and threshold"):
+        decision_flows(tree, [_score_path(tree, value=value, outcome=outcome)])
+
+
+def test_reapplying_the_recorded_threshold_keeps_a_consistent_count() -> None:
+    tree = _tree()
+    paths = [
+        _path(tree["tree_sha256"]),
+        _path(tree["tree_sha256"], outcome=False, leaf="no_match"),
+    ]
+
+    recorded = decision_flows(tree, paths)
+    unchanged = decision_flows(tree, paths, thresholds={"t:volume": 1})
+
+    assert recorded["leaves"] == unchanged["leaves"]
+    assert recorded["steps"] == unchanged["steps"]
+
+
+@pytest.mark.parametrize(
+    ("value", "outcome", "leaf"),
+    [
+        pytest.param(0.5, True, "match", id="boundary"),
+        pytest.param(None, False, "no_match", id="missing-input"),
+        pytest.param(0.7, None, "error", id="unanswered"),
+    ],
+)
+def test_consistent_missing_and_unanswered_score_records_are_counted(value, outcome, leaf) -> None:
+    tree = _score_tree()
+
+    counted = decision_flows(tree, [_score_path(tree, value=value, outcome=outcome)])
+
+    assert counted["leaves"][leaf] == {"all": 1}
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        pytest.param(
+            lambda entry: entry["number"].update({"operator": ">="}),
+            "records a number operator its step does not use",
+            id="operator",
+        ),
+        pytest.param(
+            lambda entry: entry.update(
+                {"score": {"value": 0.9, "operator": ">", "threshold": 0.5, "evaluations": 1}}
+            ),
+            "records a score for a step that has none",
+            id="kind",
+        ),
+    ],
+)
+def test_a_measurement_its_step_cannot_have_is_rejected(change, message) -> None:
+    tree = _tree()
+    path = _path(tree["tree_sha256"])
+    change(path["path"][0])
+
+    with pytest.raises(ValueError, match=message):
+        decision_flows(tree, [path])
+
+
+def test_a_contradictory_off_path_record_is_rejected() -> None:
+    tree = _repeated_tree()
+    path = _repeated_path(tree, gate_outcome=True, repeated_key="t:shared")
+    path["exploration"] = {
+        "rate": 1.0,
+        "sample_value": 0.0,
+        "selected": True,
+        "off_path": [
+            {
+                "node": "t:gate",
+                "outcome": True,
+                "number": {"value": 4, "operator": ">", "threshold": 5},
+            }
+        ],
+        "failed": [],
+    }
+
+    with pytest.raises(ValueError, match="path 0 records a number whose value and threshold"):
         decision_flows(tree, [path])
 
 
