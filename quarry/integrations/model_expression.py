@@ -266,6 +266,7 @@ async def evaluate_model_expression(
         )
         if not isinstance(spans, CollectionResult):
             raise TypeError("a span quantifier requires a span collection")
+        _check_span_limit(context, len(spans.items), "span quantifier source")
         wanted = kind == "span_any"
         for item in spans.items:
             held = truth(

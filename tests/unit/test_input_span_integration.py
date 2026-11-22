@@ -93,3 +93,29 @@ def test_span_gated_judge_keeps_reasons_out_of_public_decision_records(tmp_path,
     assert reason not in json.dumps(asdict(result.decision_paths["Read"]))
     if explain:
         assert reason in json.dumps([asdict(item) for item in result.explanations])
+
+
+@pytest.mark.parametrize("quantifier,predicate", [("any", "true"), ("all", "false")])
+@pytest.mark.parametrize("enforce", [False, True])
+def test_span_quantifier_checks_the_combined_input_before_evaluating(
+    quantifier, predicate, enforce
+):
+    from quarry.safety.limits import SafetyLimits
+
+    config = QuarryConfig(
+        config_version=2,
+        safety_limits=SafetyLimits(max_comprehension_size=2, enforce_limits=enforce),
+    )
+    source = (
+        'rule "Read" strings: $a="a" $b="b" condition: '
+        f"{quantifier} s in union($a.spans(messages), $b.spans(messages)) where {predicate}"
+    )
+    policy = compile_policy(source, runtime_config=config)
+    result = policy.scan({"messages": [{"role": "user", "content": "aabb"}]})
+
+    if enforce:
+        assert result.completion_state == "incomplete"
+        assert "max_comprehension_size=2" in result.evaluation_errors["Read"]
+    else:
+        assert result.is_complete
+        assert result.rule_matches == (["Read"] if quantifier == "any" else [])
