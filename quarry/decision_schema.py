@@ -181,7 +181,7 @@ class DecisionPathPayload(TypedDict):
     tree_sha256: Sha256Digest
     config_sha256: Sha256Digest
     parameter_digest: Sha256Digest
-    conversation_sha256: Sha256Digest
+    conversation_sha256: Sha256Digest | None
     leaf: Literal["match", "no_match"] | None
     path: list[DecisionStep]
     exploration: NotRequired[ExplorationDetails]

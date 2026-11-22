@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Literal, NotRequired
+from typing import Annotated, Any, Literal, NotRequired
 
-from pydantic import TypeAdapter, with_config
+from pydantic import Field, StrictStr, TypeAdapter, with_config
 from typing_extensions import TypedDict
 
 from quarry.decision_schema import (
@@ -93,6 +93,7 @@ class ModelAliasSummary(TypedDict):
     """Operations exposed by one trusted runtime model alias."""
 
     operations: list[str]
+    display_name: NotRequired[Annotated[StrictStr, Field(min_length=1, max_length=100)]]
     description: NotRequired[str]
 
 

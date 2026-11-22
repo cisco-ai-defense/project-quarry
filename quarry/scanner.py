@@ -17,7 +17,7 @@
 """Scanner engine."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -95,8 +95,9 @@ from quarry.safety.validator import (
     _validate_json_tree,
     validate_conversation,
     validate_conversation_arguments,
+    validate_conversation_top_level,
 )
-from quarry.types.context import ScanContext
+from quarry.types.context import ScanContext, preflight_conversation_total_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -1031,6 +1032,7 @@ class DSLScanner:
         rules_subset: set[str] | None = None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute parameters already validated by ``CompiledPolicy``."""
@@ -1045,6 +1047,7 @@ class DSLScanner:
                 parameters=parameters,
                 decision_paths=decision_paths,
                 explore=explore,
+                explore_selector=explore_selector,
                 deferred_evidence=deferred_evidence,
             )
 
@@ -1059,6 +1062,7 @@ class DSLScanner:
         parameters: dict[str, ParameterValue] | None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
@@ -1096,8 +1100,14 @@ class DSLScanner:
             )
         bound_parameters = parameters or {}
         legacy_chat = not self.input_registry.declarations and not self.input_adapters
+        total_size_preflight = None
         if legacy_chat:
             try:
+                raw_messages, raw_tools = validate_conversation_top_level(data)
+                if self.limits.enforce_limits:
+                    total_size_preflight = preflight_conversation_total_size(
+                        raw_messages, raw_tools, self.limits.max_total_size
+                    )
                 validate_conversation(
                     data,
                     parse_arguments=False,
@@ -1233,13 +1243,12 @@ class DSLScanner:
                 chat.pop("tools", None)
             chat.setdefault("messages", [])
             try:
-                if (
-                    not legacy_chat
-                    and self.limits.enforce_limits
-                    and (json_size(chat, self.limits.max_total_size) > self.limits.max_total_size)
-                ):
-                    raise ConversationValidationError("Conversation exceeds max_total_size")
                 if not legacy_chat:
+                    raw_messages, raw_tools = validate_conversation_top_level(chat)
+                    if self.limits.enforce_limits:
+                        total_size_preflight = preflight_conversation_total_size(
+                            raw_messages, raw_tools, self.limits.max_total_size
+                        )
                     validate_conversation(
                         chat,
                         parse_arguments=False,
@@ -1259,6 +1268,7 @@ class DSLScanner:
                     raise
                 part_faults.update(dict.fromkeys(chat_surfaces, exc))
                 chat = {"messages": []}
+                total_size_preflight = None
         except QuarryTimeoutError as exc:
             if self.limits.fail_on_timeout:
                 raise
@@ -1288,6 +1298,7 @@ class DSLScanner:
                 tool_call_types=self.tool_call_types,
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
+                _total_size_preflight=total_size_preflight,
             )
         except ConversationValidationError as exc:
             message = str(exc)
@@ -1414,6 +1425,9 @@ class DSLScanner:
                 evaluation_error_categories={"input_preparation": _failure_category(exc)},
                 evaluation_errors={"input_preparation": diagnostic},
             )
+
+        if explore_selector is not None:
+            explore = explore_selector(data)
 
         # Inputs exceeding a limit have been refused before any rule runs.
 

@@ -420,7 +420,8 @@ def test_the_python_footprint_limit_says_what_it_measures_without_a_fake_size() 
 
     assert result.completion_state == "invalid"
     assert "total_size" in result.validation_error and str(limit) in result.validation_error
-    assert "PYTHON OBJECT footprint in memory, not serialized length" in result.validation_error
+    assert "aggregate PYTHON OBJECT budget" in result.validation_error
+    assert "repeated container references are charged per occurrence" in result.validation_error
     assert "serialized bytes" not in result.validation_error
     # The measurement stops at the budget, so it would always read limit + 1.
     assert str(limit + 1) not in result.validation_error
