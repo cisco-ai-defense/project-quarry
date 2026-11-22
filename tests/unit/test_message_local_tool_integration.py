@@ -235,3 +235,20 @@ async def test_cancelled_local_paid_work_does_not_poison_the_next_scan(tmp_path,
     adapter.waiting = False
     result = await policy.scan_async(DATA, explain=True)
     assert result.is_complete and result.rule_matches == ["Read"]
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("fused", [False, True])
+def test_excluded_opaque_call_does_not_fault_a_paid_quantifier(tmp_path, restored, fused):
+    filter_condition = 'model("reader").score(message("user", "filter"), "synthetic") < 0.1'
+    filtered = f"[c for c in assistant_messages[-1].tool_calls if {filter_condition}]"
+    body = 'c.name == "lookup"'
+    condition = (
+        f"any c in {filtered} where {body}" if fused else f"any c in ({filtered})[:1] where {body}"
+    )
+    policy, adapter = local_policy(tmp_path, condition, restored=restored)
+
+    result = policy.scan({"messages": transcript()})
+
+    assert result.is_complete and result.rule_matches == [], result.evaluation_errors
+    assert len(adapter.score_messages) == 1
