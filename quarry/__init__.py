@@ -22,6 +22,7 @@ from quarry.inputs import InputAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.read_tokens import TextTokenBasis
 from quarry.integrations.read_usage import ReadUsageLimits, ReadUsageSession, model_read_usage
+from quarry.integrations.rule_scope import current_rule_name
 from quarry.policy import CompiledPolicy, compile_policy
 from quarry.policy_serialization import load_compiled_policy
 from quarry.prepared import PreparedRuleCache
@@ -65,6 +66,7 @@ from quarry.types.rules import ScanResult
 
 __all__ = [
     "__version__",
+    "current_rule_name",
     "QuarryError",
     "QuarryGuard",
     "AssistantMessage",

@@ -111,6 +111,7 @@ from quarry.integrations.read_usage import (
     retain_read_usage,
 )
 from quarry.integrations.resources import ResourceManager, ResourcePreparationError
+from quarry.integrations.rule_scope import _rule_scope
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
@@ -1774,6 +1775,7 @@ class DSLScanner:
         # to deferred evidence through value_lifetimes.pop_all().
         with (
             head_scope,
+            _rule_scope(None),
             read_usage_scope(None, scope=read_scope) if read_scope is not None else nullcontext(),
             ExitStack() as value_lifetimes,
         ):

@@ -42,6 +42,7 @@ from quarry.integrations.read_identity import (
 )
 from quarry.integrations.read_reporting import build_aggregates, scope_report
 from quarry.integrations.read_tokens import TextTokenAtlas, TextTokenBasis
+from quarry.integrations.rule_scope import _rule_scope
 from quarry.types.read_observations import _text_read_observer
 
 MeasurementState = Literal[
@@ -1221,10 +1222,11 @@ def read_usage_scope(rule: str | None, *, scope: int | None = 0, phase: str = "d
         and phase in _PHASES
     )
     token = _READER.set(_Reader(scope, rule, phase) if valid else None)
-    try:
-        yield
-    finally:
-        _READER.reset(token)
+    with _rule_scope(rule):
+        try:
+            yield
+        finally:
+            _READER.reset(token)
 
 
 @contextmanager
