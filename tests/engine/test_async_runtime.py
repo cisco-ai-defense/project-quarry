@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,29 +256,49 @@ def test_a_capture_over_a_long_field_of_one_repeated_value_matches():
     assert result.detailed_matches[0].captured_value == "x"
 
 
-async def _loop_turns_during(rule: str, messages: list[dict]) -> int:
-    """Count peer turns during a complete scan, independently of rule deadlines."""
+async def _loop_turns_during(rule: str, messages: list[dict], monkeypatch) -> int:
+    """Count peer turns on the engine loop while its owning scan task is still running."""
     scanner = DSLScanner(
         QuarryConfig(quarry_rule_texts=(rule,), safety_limits=SafetyLimits(rule_timeout=None))
     )
-    done = False
     turns = 0
+    peer_task = None
+    original_due = pacing.Pacer.due
 
-    async def peer():
+    async def peer(owner):
         nonlocal turns
-        while not done:
+        while not owner.done():
             await asyncio.sleep(0)
-            turns += 1
+            if not owner.done():
+                turns += 1
 
-    async def scan():
-        nonlocal done
+    def observe_due(pacer):
+        nonlocal peer_task
+        # Observe the real pacer on the managed engine loop. Caller-loop progress can
+        # continue even when the engine never yields, and cannot prove cooperation.
+        if peer_task is None and pacing.current_dispatch() is not None:
+            owner = asyncio.current_task()
+            assert owner is not None
+            peer_task = asyncio.create_task(peer(owner))
+        return original_due(pacer)
+
+    async def finish_peer():
+        peer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await peer_task
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pacing.Pacer, "due", observe_due)
         try:
             result = await scanner.scan_data_async({"messages": messages})
             assert result.is_complete, result.completion_issues
         finally:
-            done = True
-
-    await asyncio.gather(scan(), peer())
+            if peer_task is not None:
+                loop = peer_task.get_loop()
+                if loop is asyncio.get_running_loop():
+                    await finish_peer()
+                else:
+                    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(finish_peer(), loop))
     return turns
 
 
@@ -304,13 +325,13 @@ _CAPTURE_A = (
     ],
 )
 async def test_a_long_evaluation_shares_the_event_loop(condition, messages, monkeypatch):
-    # Request a pause at each pacing check so peer progress depends on cooperative
-    # evaluation, rather than how much work this machine can finish in a millisecond.
+    # Use deterministic elapsed-time pacing where applicable; managed scans retain
+    # their normal step cadence.
     monkeypatch.setattr(pacing, "INTERVAL", 0.0)
-    # The same scan over one short message is the baseline: whatever the scanner itself awaits.
+    # A short scan accounts for the engine task's own setup and cleanup awaits.
     rule = _rule(condition, '$a = "a" regex')
-    baseline = await _loop_turns_during(rule, [_user("b")])
-    assert await _loop_turns_during(rule, messages) > baseline + 10
+    baseline = await _loop_turns_during(rule, [_user("b")], monkeypatch)
+    assert await _loop_turns_during(rule, messages, monkeypatch) > baseline + 10
 
 
 async def test_a_capture_reference_check_shares_the_event_loop(monkeypatch):
@@ -324,9 +345,9 @@ async def test_a_capture_reference_check_shares_the_event_loop(monkeypatch):
     # Capture-enumeration pauses must not hide missing pauses in the reference check.
     monkeypatch.setattr(captures, "iter_capture_values", without_capture_pauses)
     rule = _rule(_CAPTURE_A, '$a = "a" regex')
-    baseline = await _loop_turns_during(rule, [_user("b")])
+    baseline = await _loop_turns_during(rule, [_user("b")], monkeypatch)
     messages = [_user("a"), *[_assistant("z" * 100)] * 9_000]
-    assert await _loop_turns_during(rule, messages) > baseline + 10
+    assert await _loop_turns_during(rule, messages, monkeypatch) > baseline + 10
 
 
 class _SpanAdapter:
