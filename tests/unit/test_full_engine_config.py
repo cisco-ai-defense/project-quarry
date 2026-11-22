@@ -349,6 +349,75 @@ def test_null_removes_inherited_optional_model_sections(tmp_path):
     assert model.tokens is None
 
 
+_REMOVABLE_SECTIONS = {
+    "tokens": {"adapter": "synthetic", "extraction": {"count": "count"}},
+    "score": {"boundary_seed": 1},
+    "classify": {"class_index": 1},
+    "spans": {"class_index": 2},
+    "complete": {
+        "response_schema": {
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+            "required": ["label"],
+            "additionalProperties": False,
+        }
+    },
+}
+
+
+@pytest.mark.parametrize("section", sorted(_REMOVABLE_SECTIONS))
+def test_repeating_a_null_removal_keeps_the_optional_section_absent(tmp_path, section):
+    config = QuarryConfig.from_mapping(
+        {
+            "model_templates": {
+                "base": {
+                    "model": "synthetic/model",
+                    "category": "SYNTHETIC",
+                    section: _REMOVABLE_SECTIONS[section],
+                },
+                "without": {"extends": "base", section: None},
+            },
+            "models": {
+                "removed_twice": {"extends": "without", section: None},
+                "removed_once": {"extends": "without"},
+            },
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert getattr(config.models["removed_twice"], section) is None
+    assert config.models["removed_twice"] == config.models["removed_once"]
+
+
+@pytest.mark.parametrize("section", sorted(_REMOVABLE_SECTIONS))
+def test_null_removal_of_a_section_no_ancestor_defines_leaves_it_absent(tmp_path, section):
+    config = QuarryConfig.from_mapping(
+        {
+            "model_templates": {"base": {"model": "synthetic/model"}},
+            "models": {"plain": {"extends": "base", section: None}},
+        },
+        tmp_path,
+        require_rules=False,
+    )
+
+    assert getattr(config.models["plain"], section) is None
+
+
+def test_null_still_rejects_a_required_model_field_that_was_never_set(tmp_path):
+    with pytest.raises(
+        ValueError, match="Inference model 'plain' requires a non-empty 'model' string"
+    ):
+        QuarryConfig.from_mapping(
+            {
+                "model_templates": {"base": {"adapter": "synthetic"}},
+                "models": {"plain": {"extends": "base", "model": None}},
+            },
+            tmp_path,
+            require_rules=False,
+        )
+
+
 def test_alias_metadata_is_not_inherited_from_another_alias(tmp_path):
     config = QuarryConfig.from_mapping(
         {

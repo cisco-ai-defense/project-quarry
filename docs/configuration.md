@@ -89,7 +89,9 @@ models:
 ```
 
 Declaration order does not matter. Nested mappings merge recursively and the child value wins.
-Setting a field or section to `null` removes the inherited value. `description` belongs to one
+Setting a field or section to `null` removes the inherited value. Setting an optional section
+(`tokens`, `score`, `classify`, `spans` or `complete`) to `null` when no parent defines it, for example
+because an ancestor already removed it, leaves it absent. `description` belongs to one
 runtime alias, cannot appear in a template, and is not inherited when one model extends another.
 Template and model names share one namespace. Unknown parents, duplicate names, inheritance cycles,
 unknown fields, and malformed sections fail configuration loading, including errors in templates

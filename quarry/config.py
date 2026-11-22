@@ -117,6 +117,10 @@ _INFERENCE_MODEL_FIELDS = frozenset(
     }
 )
 
+# Optional model sections that null removes. Repeating the removal when an ancestor already removed
+# the section leaves it absent instead of turning it into an invalid null value.
+_REMOVABLE_MODEL_SECTIONS = frozenset({"tokens", "score", "classify", "spans", "complete"})
+
 _ANY_MAPPING = object()
 _LIST_OR_MAPPING = object()
 _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
@@ -993,7 +997,7 @@ def _merge_model_definition(parent: dict, child: dict, depth: int = 1) -> dict:
         if value is None:
             if key in merged:
                 merged.pop(key)
-            else:
+            elif depth > 1 or key not in _REMOVABLE_MODEL_SECTIONS:
                 # Preserve validation behavior for a null field that did not override anything.
                 # Null is inheritance removal syntax, not a way to bypass a required field.
                 merged[key] = None
