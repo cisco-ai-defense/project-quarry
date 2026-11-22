@@ -2223,6 +2223,7 @@ class Messages(Sequence[MessageType]):
         mapped: list[ContentSourceRange] = []
         unmapped = False
         if contains_constructed:
+            seen: set[ContentSourceRange] = set()
             for ordinal in self._ordinals:
                 message = self._message_at(ordinal)
                 if not message.content:
@@ -2235,7 +2236,10 @@ class Messages(Sequence[MessageType]):
                     check_deadline=_raise_if_combine_expired,
                 )
                 unmapped = unmapped or has_unmapped
-                mapped.extend(source for source in ranges if source not in mapped)
+                for source in ranges:
+                    if source not in seen:
+                        seen.add(source)
+                        mapped.append(source)
         return Span(
             first,
             start,
