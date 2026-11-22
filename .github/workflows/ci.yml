@@ -82,3 +82,6 @@ jobs:
         run: uv run --frozen --extra inference --extra plugin pytest
       - name: Run deterministic examples
         run: uv run --frozen --extra inference --extra plugin python scripts/e2e_signature_test.py
+      - name: Check rule pack layout and compile rules
+        if: github.event_name == 'push'
+        run: uv run --frozen --extra inference --extra plugin python rules/validate.py

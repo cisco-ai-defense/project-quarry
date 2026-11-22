@@ -95,6 +95,22 @@ def test_span_gated_judge_keeps_reasons_out_of_public_decision_records(tmp_path,
         assert reason in json.dumps([asdict(item) for item in result.explanations])
 
 
+def test_runtime_before_input_span_counts_rejects_the_saved_policy(monkeypatch):
+    from quarry import policy_serialization
+
+    policy = compile_policy(
+        'rule "Span count" strings: $p="needle" condition: len($p.spans(messages)) == 1'
+    )
+    wire = policy.to_bytes()
+    restored = load_compiled_policy(wire)
+    assert restored.scan({"messages": [{"role": "user", "content": "needle"}]}).rule_matches == [
+        "Span count"
+    ]
+    monkeypatch.setattr(policy_serialization, "COMPILER_VERSION", "compiler-8")
+    with pytest.raises(ValueError, match=r"compiler_version .*unsupported.*compiler-8"):
+        load_compiled_policy(wire)
+
+
 @pytest.mark.parametrize("quantifier,predicate", [("any", "true"), ("all", "false")])
 @pytest.mark.parametrize("enforce", [False, True])
 def test_span_quantifier_checks_the_combined_input_before_evaluating(

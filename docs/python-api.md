@@ -40,6 +40,11 @@ print(result.rule_matches, result.detailed_matches, result.outputs)
 
 `scan_data_async` serves async applications. `ScanResult.completion_state` is `complete`, `invalid`, or `incomplete`; `is_complete` is true only for an authoritative result. Explain evidence and typed `outputs` follow the same status rule.
 
+When constructing `SafetyLimits` in Python, `max_total_size` must be a nonnegative integer;
+booleans, floats, strings and `None` raise `ValueError` at construction. Zero is a real budget
+that rejects nonempty input. To disable limit enforcement for trusted input, set
+`enforce_limits=False` with a valid budget.
+
 ## Typed scan failures
 
 `result.failures` is an immutable tuple of `ScanFailure` records. Each record has a
@@ -101,6 +106,11 @@ per-rule categories under `conv_N:rule`. File `input_read` failures describe the
 stage; a later scan execution failure retains its exception-based category.
 
 ## Prepared policies
+
+For a source with imported helpers, pass the entry rule's name with
+`compile_policy(source, entry_rule="Entry")`. Helpers can be in the same source
+or in the configured rule files. The saved policy contains the entry rule's
+compiled checks, including the imported checks.
 
 `compile_policy(source, policy_parameters=...)` creates a reusable `CompiledPolicy`. Supply scan parameters with `policy.scan(conversation, parameters=...)` or its async and batch methods. A prepared policy can report its decision tree and produce versioned bytes:
 

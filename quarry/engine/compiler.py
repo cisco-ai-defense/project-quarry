@@ -1879,12 +1879,18 @@ class _Compiler:
                 f"`{render_condition(node.collection)}` is {value_type}, which a rule cannot "
                 "read as its conversation. Write messages, such as a filter of `messages`"
             )
+        references = {
+            child.name
+            for child in walk_condition_nodes(node.condition)
+            if isinstance(child, ParameterRef)
+        }
+        parameters = tuple(spec for name, spec in self.parameters.items() if name in references)
         nested = compile_core(
             _ComposedCheck(
                 self.rule_name,
                 node.condition,
                 self.strings,
-                tuple(self.parameters.values()),
+                parameters,
             ),
             response_schemas=self._response_schemas,
         )
@@ -1895,6 +1901,7 @@ class _Compiler:
             )
         check = nested.artifact
         assert check is not None
+        self.used_parameters.update(spec.name for spec in check.parameter_schema)
         cost = max(
             (spec.cost for spec in check.atom_specs.values()),
             key=lambda item: item.rank,

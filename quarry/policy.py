@@ -34,6 +34,7 @@ from quarry.engine.contracts import CompiledRuleArtifact
 from quarry.input_registry import InputRegistry
 from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
+from quarry.integrations.resources import requirements_from_artifact
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.timer import (
@@ -447,14 +448,20 @@ class CompiledPolicy:
                     record_traces=record_traces,
                     rules_subset={self._rule_name},
                     decision_paths=decision_paths,
-                    explore=_sampled(
-                        conversation,
-                        self._scanner.compiled_rules[self._rule_name].read_surfaces,
-                        self._adapter_hashes,
-                        self._scanner.compiled_rules[self._rule_name].orders_input_items,
-                        explore_rate,
-                        self._scanner.limits,
-                        self._scanner.input_registry,
+                    explore_selector=(
+                        (
+                            lambda value: _sampled(
+                                value,
+                                self._scanner.compiled_rules[self._rule_name].read_surfaces,
+                                self._adapter_hashes,
+                                self._scanner.compiled_rules[self._rule_name].orders_input_items,
+                                explore_rate,
+                                self._scanner.limits,
+                                self._scanner.input_registry,
+                            )
+                        )
+                        if explore_rate > 0
+                        else None
                     ),
                     deferred_evidence=deferred,
                 )
@@ -529,6 +536,7 @@ def bind_prepared_policy(
 def compile_policy(
     source: str,
     *,
+    entry_rule: str | None = None,
     policy_parameters: Mapping[str, object] | None = None,
     runtime_config: QuarryConfig | None = None,
     model_inference_backend=None,
@@ -536,7 +544,11 @@ def compile_policy(
     evidence_key: bytes | None = None,
     input_adapters: Mapping[str, InputAdapter] | None = None,
 ) -> CompiledPolicy:
-    """Compile one rule and bind its policy parameters into a reusable policy."""
+    """Compile a reusable policy for one rule and bind its policy parameters.
+
+    Supply ``entry_rule`` by name when the source includes imported helpers. With
+    an explicit entry, configured rule files can also provide imported helpers.
+    """
 
     if not isinstance(source, str) or not source.strip():
         raise ValueError("rule source must be a non-empty string")
@@ -548,7 +560,7 @@ def compile_policy(
         # prompts, and limits by reference — only the rule source differs.
         config = replace(
             runtime_config,
-            quarry_rules_paths=(),
+            quarry_rules_paths=runtime_config.quarry_rules_paths if entry_rule is not None else (),
             quarry_rule_texts=(source,),
         )
     scanner = DSLScanner(
@@ -558,6 +570,19 @@ def compile_policy(
         input_adapters=input_adapters,
         _allow_parameters=True,
     )
+    if entry_rule is not None:
+        if not isinstance(entry_rule, str) or entry_rule not in scanner.compiled_rules:
+            raise ValueError(f"No compiled entry rule named {entry_rule!r}")
+        artifact = scanner.compiled_rules[entry_rule]
+        scanner = DSLScanner._from_compiled_policy(
+            config,
+            rule=scanner.loaded_rules[entry_rule],
+            artifact=artifact,
+            resource_requirements=requirements_from_artifact(artifact),
+            model_inference_backend=scanner.resource_manager.inference_backend,
+            llm_rate_limiter=llm_rate_limiter,
+            input_adapters=input_adapters,
+        )
     return CompiledPolicy._from_scanner(
         scanner,
         source,

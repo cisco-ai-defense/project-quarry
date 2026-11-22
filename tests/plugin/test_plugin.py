@@ -1589,6 +1589,132 @@ async def test_an_invalid_conversation_is_reported_without_a_verdict():
     assert result["diagnostics"][0]["code"] == "invalid_conversation"
 
 
+async def test_a_deep_tool_schema_is_reported_as_invalid_input():
+    schema: dict[str, Any] = {}
+    for _ in range(600):
+        schema = {"child": schema}
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": schema},
+            }
+        ],
+    }
+
+    result = await QuarryPlugin().scan(
+        rule_text=FLOW_RULE,
+        conversation=conversation,
+        explore_rate=1.0,
+    )
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"] == [
+        {
+            "code": "invalid_conversation",
+            "message": "tools[0].function.parameters exceeds max_nesting_depth 100",
+        }
+    ]
+    assert "matched" not in result
+
+
+async def test_an_oversized_wide_tool_schema_has_no_verdict():
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"enum": list(range(1_000))},
+                },
+            }
+        ],
+    }
+    plugin = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(max_total_size=2_000)))
+
+    result = await plugin.scan(rule_text=FLOW_RULE, conversation=conversation)
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"][0]["code"] == "invalid_conversation"
+    assert "max_total_size" in result["diagnostics"][0]["message"]
+    assert "matched" not in result
+
+
+async def test_a_shared_wide_tool_schema_is_charged_for_each_tool():
+    schema = {"enum": list(range(10_000))}
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": f"lookup_{index}", "parameters": schema},
+            }
+            for index in range(4)
+        ],
+    }
+    plugin = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(max_total_size=500_000)))
+
+    result = await plugin.scan(rule_text=FLOW_RULE, conversation=conversation)
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"][0]["code"] == "invalid_conversation"
+    assert "max_total_size" in result["diagnostics"][0]["message"]
+    assert "matched" not in result
+
+
+async def test_an_overridable_schema_container_has_no_verdict_or_callback():
+    class ExpandingList(list):
+        triggered = False
+
+        def _expand(self, *args, **kwargs):
+            self.triggered = True
+            list.extend(self, [0] * 100_000)
+            raise AssertionError("overridable schema access must not run")
+
+        __iter__ = _expand
+        __getitem__ = _expand
+        __len__ = _expand
+        __bool__ = _expand
+
+    values = ExpandingList([1, 2, 3])
+    conversation = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"enum": values}},
+            }
+        ],
+    }
+
+    result = await QuarryPlugin().scan(
+        rule_text=FLOW_RULE,
+        conversation=conversation,
+        explore_rate=1.0,
+    )
+
+    assert result["completion_state"] == "invalid"
+    assert result["failures"] == [{"category": "invalid_input"}]
+    assert result["diagnostics"] == [
+        {
+            "code": "invalid_conversation",
+            "message": (
+                "conversation contains an overridable dict/list subclass; "
+                "use exact built-in dict and list containers"
+            ),
+        }
+    ]
+    assert "matched" not in result
+    assert result["decision_path"]["conversation_sha256"] is None
+    assert result["decision_path"]["leaf"] is None
+    assert values.triggered is False
+
+
 @pytest.mark.parametrize("fail_on_timeout", [True, False])
 async def test_plugin_returns_a_structured_timeout_result(fail_on_timeout):
     # A timeout is reported per conversation with its partial result, whether or not the
@@ -2565,57 +2691,115 @@ def test_reference_requires_compilation_to_verify_a_configured_model(tmp_path):
     ]
 
 
-async def test_the_server_warns_at_startup_about_each_model_without_credentials(tmp_path):
-    """A host learns at startup, before any scan, which configured models cannot be called.
+async def test_plugin_checks_credentials_only_when_a_model_alias_is_used(tmp_path):
+    """Startup, reference, and local compile do not inspect unused model credentials."""
 
-    The server names each alias and its missing variable on stderr and still starts, so tools
-    that do not use the model keep working. It writes nothing to stdout, where the host
-    expects JSON-RPC, and it exits normally when its input ends.
-    """
-
-    pytest.importorskip("mcp")
     config = tmp_path / "plugin.yaml"
     config.write_text(
         json.dumps(
             {
                 "config_version": 2,
                 "models": {
-                    "judge": {"model": "openai/gpt-4o-mini"},
-                    "reviewer": {"model": "anthropic/claude-haiku-4-5"},
+                    alias: {
+                        "adapter": "system_one",
+                        "model": "synthetic-model",
+                        "score": {"message_builder": "system_one", "boundary_seed": 1},
+                    }
+                    for alias in ("judge", "reviewer")
                 },
             }
         ),
         encoding="utf-8",
     )
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith(("OPENAI_", "ANTHROPIC_"))
-    }
-    env.update(QUARRY_PLUGIN_CONFIG=str(config), LITELLM_LOCAL_MODEL_COST_MAP="True")
-    server = await asyncio.create_subprocess_exec(
+    probe = """
+import json
+import os
+
+from quarry.plugin.service import QuarryPlugin, load_runtime_config
+
+plugin = QuarryPlugin(load_runtime_config(os.environ["QUARRY_PLUGIN_CONFIG"]))
+print(json.dumps(plugin.reference(action="index", limit=1)))
+print(json.dumps(plugin.compile(rule_text='rule "Local"\\ncondition: true\\n')))
+print(
+    json.dumps(
+        plugin.compile(
+            rule_text=(
+                'rule "Model"\\ncondition: '
+                'model("judge").score(messages, "synthetic policy") > 0.5\\n'
+            )
+        )
+    )
+)
+"""
+    env = {name: value for name, value in os.environ.items() if name != "TYPESAFE_API_KEY"}
+    env["QUARRY_PLUGIN_CONFIG"] = str(config)
+    process = await asyncio.create_subprocess_exec(
         sys.executable,
-        "-m",
-        "quarry.plugin.server",
+        "-c",
+        probe,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(server.communicate(), 60)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 60)
     finally:
-        if server.returncode is None:
-            server.kill()
-            await server.wait()
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
-    assert server.returncode == 0
-    assert "Inference model 'judge' needs OPENAI_API_KEY in the environment" in stderr.decode()
-    assert (
-        "Inference model 'reviewer' needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
-        in stderr.decode()
+    assert process.returncode == 0
+    reference, local, model = (json.loads(line) for line in stdout.splitlines())
+    assert set(reference["model_aliases"]) == {"judge", "reviewer"}
+    assert local["valid"] is True
+    assert model["valid"] is False
+    assert model["diagnostics"] == [
+        {
+            "code": "ConfigurationError",
+            "severity": "error",
+            "stage": "configure",
+            "message": "Inference model 'judge' needs TYPESAFE_API_KEY in the environment",
+        }
+    ]
+    assert "reviewer" not in json.dumps(model)
+    assert len(json.dumps(model)) < 2_000
+    assert "Inference model" not in stderr.decode()
+
+
+def test_unused_model_backends_are_not_constructed(tmp_path, monkeypatch):
+    constructed = []
+
+    def backend(_config, *, models_to_load, **_kwargs):
+        constructed.append(set(models_to_load))
+        raise ConfigurationError("Synthetic missing model credentials")
+
+    monkeypatch.setattr("quarry.integrations.resources.ModelInferenceBackend", backend)
+    config = QuarryConfig.from_mapping(
+        {
+            "config_version": 2,
+            "models": {
+                alias: {
+                    "model": "synthetic-model",
+                    "score": {"message_builder": "constitution", "boundary_seed": 7},
+                }
+                for alias in ("judge", "unused")
+            },
+        },
+        tmp_path,
+        require_rules=False,
     )
-    assert stdout == b""
+    plugin = QuarryPlugin(config)
+    assert set(plugin.reference(action="index", limit=1)["model_aliases"]) == {"judge", "unused"}
+    assert plugin.compile(rule_text='rule "Local" condition: true')["valid"]
+    assert constructed == []
+    used = plugin.compile(
+        rule_text='rule "Model" condition: model("judge").score(messages, "criterion") > 0.5'
+    )
+    assert not used["valid"]
+    assert constructed == [{"judge"}]
+    assert used["diagnostics"][0]["message"] == "Synthetic missing model credentials"
+    assert "unused" not in json.dumps(used)
 
 
 # ── MCP transport, configuration, and packaging ────────────────────────
@@ -2793,7 +2977,8 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
                 },
             },
         )
-        scan = await asyncio.wait_for(response(2), 30)
+        # The first model rule may import its optional provider stack; startup and reference do not.
+        scan = await asyncio.wait_for(response(2), 60)
         stdin.close()
         after_exit = await asyncio.wait_for(stdout.read(), 30)
         await server.wait()
@@ -3024,3 +3209,47 @@ async def test_a_caller_changing_a_scan_result_does_not_change_the_next_scan():
 
     assert second["compilation"]["rule_names"] == ["r"]
     assert first["matched"] is second["matched"] is True
+
+
+async def test_stdio_startup_does_not_inspect_unused_model_credentials(tmp_path):
+    """The stdio server starts and exits cleanly without inspecting unused credentials."""
+
+    pytest.importorskip("mcp")
+    config = tmp_path / "plugin.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "config_version": 2,
+                "models": {
+                    "judge": {"model": "openai/gpt-4o-mini"},
+                    "reviewer": {"model": "anthropic/claude-haiku-4-5"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("OPENAI_", "ANTHROPIC_"))
+    }
+    env.update(QUARRY_PLUGIN_CONFIG=str(config), LITELLM_LOCAL_MODEL_COST_MAP="True")
+    server = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "quarry.plugin.server",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(server.communicate(), 60)
+    finally:
+        if server.returncode is None:
+            server.kill()
+            await server.wait()
+
+    assert server.returncode == 0
+    assert "Inference model" not in stderr.decode()
+    assert stdout == b""

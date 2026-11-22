@@ -33,11 +33,13 @@ import pytest
 from quarry.config import QuarryConfig
 from quarry.core.conversation import Conversation
 from quarry.integrations.model_inference import ModelInferenceBackend
+from quarry.safety import validator as validator_module
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.safety.validator import validate_conversation, validate_conversation_arguments
 from quarry.scanner import DSLScanner
+from quarry.types import context as context_module
 from quarry.types import messages as canonical_messages
 from quarry.types.exceptions import (
     ConversationValidationError,
@@ -87,6 +89,84 @@ _NESTED_TOOL_PAYLOAD = {
         }
     ],
 }
+
+
+def _tool_schema_conversation(parameters: dict) -> dict:
+    return {
+        "messages": [{"role": "user", "content": "ok"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": parameters},
+            }
+        ],
+    }
+
+
+def _shared_tool_schema_conversation(parameters: dict, count: int) -> dict:
+    return {
+        "messages": [{"role": "user", "content": "ok"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": f"lookup_{index}", "parameters": parameters},
+            }
+            for index in range(count)
+        ],
+    }
+
+
+def _nested_schema(depth: int) -> dict:
+    schema: dict = {}
+    for _ in range(depth - 1):
+        schema = {"child": schema}
+    return schema
+
+
+class _ExpandingDict(dict):
+    """A container that would expand the payload if any override ran."""
+
+    triggered = False
+
+    def _expand(self, *args, **kwargs):
+        self.triggered = True
+        dict.__setitem__(self, "expanded", [0] * 100_000)
+        raise AssertionError("overridable dict access must not run")
+
+    __iter__ = _expand
+    __getitem__ = _expand
+    __len__ = _expand
+    __bool__ = _expand
+    items = _expand
+    keys = _expand
+    values = _expand
+    get = _expand
+
+
+class _ExpandingList(list):
+    """A container that would expand the payload if any override ran."""
+
+    triggered = False
+
+    def _expand(self, *args, **kwargs):
+        self.triggered = True
+        list.extend(self, [0] * 100_000)
+        raise AssertionError("overridable list access must not run")
+
+    __iter__ = _expand
+    __getitem__ = _expand
+    __len__ = _expand
+    __bool__ = _expand
+
+
+class _HostileLeaf:
+    """An unsupported leaf whose sizing hook must never execute."""
+
+    triggered = False
+
+    def __sizeof__(self):
+        self.triggered = True
+        raise AssertionError("custom leaf sizing must not run")
 
 
 @pytest.mark.parametrize(
@@ -157,8 +237,24 @@ def test_input_that_cannot_be_scanned_whole_is_invalid(conversation, limits, rea
     assert result.completion_issues == [f"invalid conversation: {result.validation_error}"]
 
 
-def test_total_size_counts_shared_python_objects_once_but_distinct_copies_separately() -> None:
-    """The documented budget measures live Python objects, not serialized occurrences."""
+def test_unsupported_top_level_branch_is_rejected_without_traversal(monkeypatch) -> None:
+    monkeypatch.setattr(validator_module, "_MAX_RAW_JSON_VISITS", 1)
+    branch = _ExpandingList([0] * 100_000)
+    conversation = {
+        "messages": [{"role": "user", "content": "ok"}],
+        "unsupported": branch,
+    }
+
+    result = _scanner().scan_data(conversation)
+
+    assert (result.rule_matches, result.completion_state) == ([], "invalid")
+    assert "unsupported top-level keys: ['unsupported']" in result.validation_error
+    assert "raw JSON validation work limit" not in result.validation_error
+    assert branch.triggered is False
+
+
+def test_total_size_counts_shared_scalars_once_but_distinct_copies_separately() -> None:
+    """Immutable scalars keep live-object accounting while containers are aggregate-charged."""
 
     scanner = _scanner(limits=SafetyLimits(max_total_size=10_000))
     content = "shared" * 500
@@ -172,6 +268,224 @@ def test_total_size_counts_shared_python_objects_once_but_distinct_copies_separa
     assert (shared_result.completion_state, shared_result.rule_matches) == ("complete", ["Always"])
     assert (copies_result.completion_state, copies_result.rule_matches) == ("invalid", [])
     assert "max_total_size" in copies_result.validation_error
+
+
+@pytest.mark.parametrize(
+    ("tool_count", "expected_state"),
+    [
+        pytest.param(2, "complete", id="shared-schema-within-aggregate-budget"),
+        pytest.param(4, "invalid", id="shared-schema-over-aggregate-budget"),
+    ],
+)
+def test_total_size_charges_a_shared_schema_container_for_every_tool(
+    tool_count: int, expected_state: str
+) -> None:
+    schema = {"enum": list(range(10_000))}
+    conversation = _shared_tool_schema_conversation(schema, tool_count)
+
+    result = _scanner(limits=SafetyLimits(max_total_size=500_000)).scan_data(conversation)
+
+    assert result.completion_state == expected_state
+    if expected_state == "complete":
+        assert result.rule_matches == ["Always"]
+    else:
+        assert result.rule_matches == []
+        assert "max_total_size" in result.validation_error
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        pytest.param(_ExpandingDict({"type": "object"}), id="dict-subclass"),
+        pytest.param({"enum": _ExpandingList([1, 2, 3])}, id="list-subclass"),
+    ],
+)
+def test_overridable_schema_containers_are_rejected_without_access(parameters: dict) -> None:
+    result = _scanner().scan_data(_tool_schema_conversation(parameters))
+
+    assert (result.rule_matches, result.completion_state) == ([], "invalid")
+    assert "use exact built-in dict and list containers" in result.validation_error
+    nested = parameters if isinstance(parameters, _ExpandingDict) else dict.get(parameters, "enum")
+    assert nested.triggered is False
+
+
+def test_overridable_top_level_container_is_rejected_without_access() -> None:
+    conversation = _ExpandingDict({"messages": [{"role": "user", "content": "ok"}]})
+
+    with pytest.raises(
+        ConversationValidationError,
+        match="use exact built-in dict and list containers",
+    ):
+        validate_conversation(conversation)
+
+    assert conversation.triggered is False
+
+
+def test_repeated_unsupported_leaves_never_run_custom_sizing() -> None:
+    leaf = _HostileLeaf()
+    conversation = _tool_schema_conversation({"enum": [leaf] * 1_000})
+
+    result = _scanner().scan_data(conversation)
+
+    assert (result.rule_matches, result.completion_state) == ([], "invalid")
+    assert "contains unsupported JSON value _HostileLeaf" in result.validation_error
+    assert leaf.triggered is False
+
+
+@pytest.mark.parametrize("enforce_limits", [True, False])
+@pytest.mark.parametrize("position", ["schema", "arguments", "content"])
+def test_unsupported_leaves_never_run_class_identity_hooks(enforce_limits, position) -> None:
+    class HostileIdentity:
+        triggered = False
+
+        @property
+        def __class__(self):
+            self.triggered = True
+            raise AssertionError("untrusted class identity hook must not run")
+
+        def __sizeof__(self):
+            self.triggered = True
+            raise AssertionError("untrusted sizing hook must not run")
+
+    leaf = HostileIdentity()
+    if position == "schema":
+        conversation = _tool_schema_conversation({"value": leaf})
+    elif position == "arguments":
+        call = _call("lookup", "call-1")
+        call["tool_calls"][0]["function"]["arguments"] = leaf
+        conversation = {"messages": [call]}
+    else:
+        conversation = {"messages": [{"role": "user", "content": leaf}]}
+
+    result = _scanner(
+        limits=SafetyLimits(rule_timeout=None, enforce_limits=enforce_limits)
+    ).scan_data(conversation)
+
+    assert result.completion_state == "invalid"
+    assert result.rule_matches == []
+    assert leaf.triggered is False
+
+
+def test_exact_builtin_containers_reuse_the_bounded_preflight(monkeypatch) -> None:
+    calls = 0
+    deep_size = context_module._bounded_deep_size
+
+    def counted_deep_size(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return deep_size(*args, **kwargs)
+
+    monkeypatch.setattr(context_module, "_bounded_deep_size", counted_deep_size)
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "array", "items": {"type": "string"}}},
+    }
+
+    result = _scanner().scan_data(_tool_schema_conversation(schema))
+
+    assert (result.rule_matches, result.completion_state) == (["Always"], "complete")
+    assert calls == 1
+
+
+@pytest.mark.parametrize("parse_arguments", [False, True])
+def test_tool_schema_depth_accepts_the_exact_boundary(parse_arguments: bool) -> None:
+    validate_conversation(
+        _tool_schema_conversation(_nested_schema(100)),
+        parse_arguments=parse_arguments,
+    )
+
+    with pytest.raises(
+        ConversationValidationError,
+        match=r"tools\[0\]\.function\.parameters exceeds max_nesting_depth 100",
+    ):
+        validate_conversation(
+            _tool_schema_conversation(_nested_schema(101)),
+            parse_arguments=parse_arguments,
+        )
+
+
+def test_tool_schema_depth_honors_a_custom_lower_limit() -> None:
+    validate_conversation(
+        _tool_schema_conversation(_nested_schema(3)),
+        max_nesting_depth=3,
+    )
+
+    with pytest.raises(ConversationValidationError, match="exceeds max_nesting_depth 3"):
+        validate_conversation(
+            _tool_schema_conversation(_nested_schema(4)),
+            max_nesting_depth=3,
+        )
+
+
+@pytest.mark.parametrize("parse_arguments", [False, True])
+def test_tool_schema_cycles_fail_closed(parse_arguments: bool) -> None:
+    schema: dict = {}
+    schema["self"] = schema
+
+    with pytest.raises(ConversationValidationError, match="contains a cyclic reference"):
+        validate_conversation(
+            _tool_schema_conversation(schema),
+            parse_arguments=parse_arguments,
+        )
+
+
+@pytest.mark.parametrize("parse_arguments", [False, True])
+@pytest.mark.parametrize(
+    ("schema", "reason"),
+    [
+        pytest.param({"value": object()}, "unsupported JSON value object", id="unsupported-value"),
+        pytest.param({1: "value"}, "non-string object key", id="non-string-key"),
+        pytest.param({"value": float("inf")}, "non-finite number", id="non-finite-number"),
+    ],
+)
+def test_tool_schema_non_json_values_fail_closed(
+    parse_arguments: bool, schema: dict, reason: str
+) -> None:
+    with pytest.raises(ConversationValidationError, match=reason):
+        validate_conversation(
+            _tool_schema_conversation(schema),
+            parse_arguments=parse_arguments,
+        )
+
+
+def test_direct_tool_schema_validation_has_a_work_budget(monkeypatch) -> None:
+    monkeypatch.setattr(validator_module, "_MAX_JSON_TREE_VISITS", 4)
+
+    with pytest.raises(ConversationValidationError, match="JSON validation work limit 4"):
+        validate_conversation(_tool_schema_conversation({"enum": [0, 1, 2, 3]}))
+
+
+def test_tool_schema_work_budget_is_aggregate_across_tools(monkeypatch) -> None:
+    monkeypatch.setattr(validator_module, "_MAX_JSON_TREE_VISITS", 6)
+    conversation = _shared_tool_schema_conversation({"enum": [0, 1]}, 2)
+
+    with pytest.raises(
+        ConversationValidationError,
+        match=r"tools\[1\]\.function\.parameters exceeds JSON validation work limit 6",
+    ):
+        validate_conversation(conversation)
+
+
+def test_total_size_preflight_precedes_wide_tool_schema_validation(monkeypatch) -> None:
+    calls = 0
+    deep_size = context_module._bounded_deep_size
+
+    def counted_deep_size(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return deep_size(*args, **kwargs)
+
+    monkeypatch.setattr(context_module, "_bounded_deep_size", counted_deep_size)
+    # If schema validation ran first, the unsupported leaf would win. The wide container's
+    # shallow footprint alone exceeds the budget, so preflight need not visit that leaf.
+    conversation = _tool_schema_conversation({"enum": [object()] * 1_000})
+
+    result = _scanner(limits=SafetyLimits(max_total_size=2_000)).scan_data(conversation)
+
+    assert (result.rule_matches, result.completion_state) == ([], "invalid")
+    assert "max_total_size" in result.validation_error
+    assert "unsupported JSON value" not in result.validation_error
+    assert calls == 1
 
 
 def test_malformed_tool_arguments_invalidate_the_whole_scan() -> None:
@@ -587,6 +901,39 @@ def test_argument_cache_does_not_require_hashable_string_subclasses() -> None:
     result = _scanner('rule "Name"\ncondition: called_tool("lookup")\n').scan_data(conversation)
 
     assert (result.rule_matches, result.completion_state) == (["Name"], "complete")
+
+
+def test_argument_string_subclass_never_runs_sizing_or_encoding_overrides() -> None:
+    calls: list[str] = []
+
+    class HookedString(str):
+        def __sizeof__(self):
+            calls.append("sizeof")
+            raise AssertionError("string sizing override must not run")
+
+        def encode(self, *args, **kwargs):
+            calls.append("encode")
+            raise AssertionError("string encoding override must not run")
+
+    conversation = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": HookedString("{}")},
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = _scanner('rule "Name"\ncondition: called_tool("lookup")\n').scan_data(conversation)
+
+    assert (result.rule_matches, result.completion_state) == (["Name"], "complete")
+    assert calls == []
 
 
 _COUNTS = 'rule "Test"\ncondition: len(messages) > 0\n'
