@@ -49,6 +49,10 @@ Set `logical_reads=True` on scanner or compiled-policy scans to attach optional 
 snapshots. See [logical reads](logical-reads.md) for exact coverage unions, requesting-reader
 attribution, host reference token maps, limits and collection-lifetime semantics.
 
+Request `window_observations=True` for a separate bounded snapshot of reached windowed
+classifiers and span readers. Use `observe_model_windows()` to collect across calls and
+`current_rule_name()` for live callback ownership. See [window observations](window-observations.md).
+
 ### Scan timing and model usage
 
 `ScanResult.scan_time` is the bounded, finite, nonnegative monotonic duration for the scan.

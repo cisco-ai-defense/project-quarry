@@ -1796,6 +1796,9 @@
             "additionalProperties": true,
             "title": "Visualization",
             "type": "object"
+          },
+          "window_observations": {
+            "$ref": "#/$defs/WindowObservationReport"
           }
         },
         "required": [
@@ -2011,6 +2014,308 @@
         },
         "title": "TimingSummary",
         "type": "object"
+      },
+      "WindowInputCoverage": {
+        "additionalProperties": true,
+        "description": "A scalar union over the selected input, with explicit unknown measurement.",
+        "properties": {
+          "state": {
+            "enum": [
+              "measured",
+              "partial",
+              "pending",
+              "unavailable",
+              "limit_exceeded",
+              "failed",
+              "cancelled",
+              "abandoned"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775808,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "state",
+          "value"
+        ],
+        "title": "WindowInputCoverage",
+        "type": "object"
+      },
+      "WindowObservationReport": {
+        "additionalProperties": true,
+        "description": "Optional bounded metadata; its completeness does not determine the verdict.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "finalized": {
+            "title": "Finalized",
+            "type": "boolean"
+          },
+          "omitted": {
+            "maximum": 9223372036854775808,
+            "minimum": 0,
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/$defs/WindowObservationRow"
+            },
+            "maxItems": 65536,
+            "title": "Rows",
+            "type": "array"
+          },
+          "scopes": {
+            "items": {
+              "maximum": 9223372036854775808,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 65536,
+            "title": "Scopes",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "collected",
+              "scope_unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "version": {
+            "const": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "enabled",
+          "finalized",
+          "rows",
+          "omitted",
+          "scopes",
+          "state"
+        ],
+        "title": "WindowObservationReport",
+        "type": "object"
+      },
+      "WindowObservationRow": {
+        "additionalProperties": true,
+        "description": "One logical reader's detached view of an actual window reply.",
+        "properties": {
+          "cached": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cached"
+          },
+          "covered_tokens": {
+            "$ref": "#/$defs/WindowInputCoverage"
+          },
+          "model": {
+            "maxLength": 512,
+            "title": "Model",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "classify",
+              "spans"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "pending",
+              "succeeded",
+              "not_sent",
+              "failed",
+              "refused",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "decision",
+              "evidence",
+              "measurement"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "probabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "maximum": 1,
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "maxItems": 1048576,
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "maxItems": 65536,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probabilities"
+          },
+          "probability_states": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "measured",
+                    "unavailable",
+                    "invalid_probability_vector",
+                    "conflicting_probability_vector",
+                    "limit_exceeded"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 65536,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probability States"
+          },
+          "provider_model": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Model"
+          },
+          "reads": {
+            "maximum": 9223372036854775808,
+            "minimum": 0,
+            "title": "Reads",
+            "type": "integer"
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule"
+          },
+          "scope": {
+            "maximum": 9223372036854775808,
+            "minimum": 0,
+            "title": "Scope",
+            "type": "integer"
+          },
+          "source_characters": {
+            "$ref": "#/$defs/WindowInputCoverage"
+          },
+          "state": {
+            "enum": [
+              "measured",
+              "partial",
+              "pending",
+              "not_sent",
+              "failed",
+              "refused",
+              "cancelled",
+              "unknown",
+              "unavailable",
+              "limit_exceeded"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "characters",
+              "tokens"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "window_count": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775808,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Count"
+          }
+        },
+        "required": [
+          "scope",
+          "rule",
+          "phase",
+          "model",
+          "provider_model",
+          "operation",
+          "outcome",
+          "unit",
+          "window_count",
+          "source_characters",
+          "covered_tokens",
+          "cached",
+          "state",
+          "probabilities",
+          "probability_states",
+          "reads"
+        ],
+        "title": "WindowObservationRow",
+        "type": "object"
       }
     },
     "additionalProperties": true,
@@ -2176,6 +2481,9 @@
         "additionalProperties": true,
         "title": "Visualization",
         "type": "object"
+      },
+      "window_observations": {
+        "$ref": "#/$defs/WindowObservationReport"
       }
     },
     "required": [

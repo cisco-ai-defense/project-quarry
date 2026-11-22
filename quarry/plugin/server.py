@@ -270,6 +270,7 @@ async def quarry_scan(
     config_version: Literal[1, 2] | None = None,
     explore_rate: Annotated[float, Field(ge=0, le=1)] = 0.0,
     logical_reads: StrictBool = False,
+    window_observations: StrictBool = False,
     verbosity: Literal["compact", "full"] | None = None,
 ) -> ScanResponse:
     """Compile one Quarry rule once and scan one conversation or an ordered batch.
@@ -294,6 +295,8 @@ async def quarry_scan(
     ``logical_reads`` adds a bounded scalar input-read report per result, separate from
     physical usage. It performs no extra model/tokenizer work; reference text tokens
     remain unavailable without explicit host-provided maps.
+    ``window_observations`` separately adds bounded text-free window probabilities,
+    selected-input coverage, and accepted-reply cache status without extra requests.
 
     Scans reuse the model results this server already has for the same model and input,
     so a rescan, or one that moves only a threshold, makes no new model call. A result
@@ -311,6 +314,7 @@ async def quarry_scan(
         config_version=config_version,
         explore_rate=explore_rate,
         **({"logical_reads": True} if logical_reads else {}),
+        **({"window_observations": True} if window_observations else {}),
         verbosity=verbosity,
     )
     return cast(ScanResponse, response)

@@ -362,10 +362,13 @@ class CompiledPolicy:
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Execute one conversation without parsing or compiling the rule again."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         return run_sync(
             self.scan_async(
                 conversation,
@@ -373,6 +376,7 @@ class CompiledPolicy:
                 explain=explain,
                 deadline_seconds=deadline_seconds,
                 **({"logical_reads": True} if logical_reads else {}),
+                **({"window_observations": True} if window_observations else {}),
             )
         )
 
@@ -384,10 +388,13 @@ class CompiledPolicy:
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Asynchronous form of :meth:`scan`."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         return (
             await self.scan_many_async(
                 (conversation,),
@@ -395,6 +402,7 @@ class CompiledPolicy:
                 explain=explain,
                 deadline_seconds=deadline_seconds,
                 **({"logical_reads": True} if logical_reads else {}),
+                **({"window_observations": True} if window_observations else {}),
             )
         )[0]
 
@@ -406,10 +414,13 @@ class CompiledPolicy:
         explain: ExplainLevel = False,
         deadline_seconds: float | None = None,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> list[ScanResult]:
         """Run an ordered batch through this already compiled policy."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         return run_sync(
             self.scan_many_async(
                 conversations,
@@ -417,6 +428,7 @@ class CompiledPolicy:
                 explain=explain,
                 deadline_seconds=deadline_seconds,
                 **({"logical_reads": True} if logical_reads else {}),
+                **({"window_observations": True} if window_observations else {}),
             )
         )
 
@@ -431,6 +443,7 @@ class CompiledPolicy:
         decision_paths: bool = False,
         explore_rate: float = 0.0,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> list[ScanResult]:
         """Run an ordered batch on one event loop under one optional wall-clock deadline.
 
@@ -445,9 +458,13 @@ class CompiledPolicy:
         after native evidence cleanup. This adds no model/tokenizer work. Reference token
         coverage requires explicit host-provided maps in a ``model_read_usage`` session;
         a borrowed session remains live and its snapshots say ``finalized=False``.
+        ``window_observations=True`` separately returns bounded window probabilities,
+        selected-input coverage, and accepted-reply cache status for each conversation.
         """
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         with scan_deadline(deadline_seconds, "Policy batch deadline exceeded") as deadline:
             batch_deadline = deadline
         # Carry the absolute verdict deadline through the queue, then release it before
@@ -463,6 +480,7 @@ class CompiledPolicy:
                 decision_paths=decision_paths,
                 explore_rate=explore_rate,
                 logical_reads=logical_reads,
+                window_observations=window_observations,
             )
         )
 
@@ -477,8 +495,9 @@ class CompiledPolicy:
         decision_paths: bool = False,
         explore_rate: float = 0.0,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> list[ScanResult]:
-        if not logical_reads:
+        if not (logical_reads or window_observations):
             return await self._scan_many_async(
                 conversations,
                 parameters,
@@ -488,7 +507,9 @@ class CompiledPolicy:
                 decision_paths=decision_paths,
                 explore_rate=explore_rate,
             )
-        with collect_read_reports() as reports:
+        with collect_read_reports(
+            logical_reads=logical_reads, window_observations=window_observations
+        ) as reports:
             results = await self._scan_many_async(
                 conversations,
                 parameters,

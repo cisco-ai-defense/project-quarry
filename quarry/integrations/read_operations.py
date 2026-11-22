@@ -112,16 +112,56 @@ class ModelRead:
         if session is not None and self._pid == os.getpid():
             self._add("tools", collect_tools(session, tools))
 
-    def window_input(self, source, windows, encoding, context="") -> None:
+    def window_pending(self, unit):
+        session = self._session()
+        if session is not None and not self._closed and self._pid == os.getpid():
+            try:
+                session._window_pending(self._ticket._identity, unit)
+            except Exception:
+                self._omit_window()
+
+    def window_input(self, source, windows, encoding, context="", *, unit=None) -> None:
         if self._limited:
             return
         session = self._session()
         if session is not None and self._pid == os.getpid():
             from quarry.integrations.read_windows import collect_window_input
 
-            self._add("input", collect_window_input(session, source, windows, encoding))
+            measurement = collect_window_input(session, source, windows, encoding)
+            self._add("input", measurement)
+            try:
+                session._window_input(
+                    self._ticket._identity, unit, windows, encoding, measurement.characters
+                )
+            except Exception:
+                self._omit_window()
             if context:
                 self.value("window-context", context, slot="context")
+
+    def _omit_window(self):
+        session = self._session()
+        if session is not None and session._pid == os.getpid():
+            with session._lock:
+                if not session._closed and session._windows is not None:
+                    session._windows.omitted = min(session._windows.omitted + 1, 1 << 63)
+
+    def window_reply(self, generation, provider_model, chunks, cached):
+        session = self._session()
+        if session is not None and not self._closed and self._pid == os.getpid():
+            try:
+                session._window_reply(
+                    self._ticket._identity, generation, provider_model, chunks, cached
+                )
+            except Exception:
+                self._omit_window()
+
+    def window_vector(self, generation, ordinal, probabilities):
+        session = self._session()
+        if session is not None and not self._closed and self._pid == os.getpid():
+            try:
+                session._window_vector(generation, ordinal, probabilities)
+            except Exception:
+                self._omit_window()
 
     def _measurement(self, session):
         ordered = sorted(self._inputs.items())

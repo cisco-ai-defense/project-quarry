@@ -869,3 +869,8 @@ are enforced by Quarry's configured safety limits before evaluation.
 `quarry_scan` accepts `logical_reads: true` to include bounded input-read snapshots in
 each scan result. See [logical reads](logical-reads.md) for coverage, failure states,
 reference-token availability and the report schema. The default response stays unchanged.
+
+Pass `window_observations: true` to `quarry_scan` for a separate bounded report on each
+result, including compact batches. It contains text-free window probabilities, selected-input
+coverage, and accepted-reply cache status. Defaults omit the field. See
+[window observations](window-observations.md) for bounds, unknown states, and ownership.

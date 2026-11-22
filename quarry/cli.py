@@ -191,6 +191,8 @@ def format_results(
                 ]
             if result.logical_reads is not None:
                 result_dict["logical_reads"] = result.logical_reads
+            if result.window_observations is not None:
+                result_dict["window_observations"] = result.window_observations
             output.append(result_dict)
 
         return orjson.dumps(output, option=orjson.OPT_INDENT_2).decode()
@@ -462,7 +464,14 @@ def scan_command(args):
     if logical_reads and args.output_format != "json":
         print("[ERROR] --logical-reads requires --output-format json", file=sys.stderr)
         return EXIT_INCOMPLETE
-    read_options = {"logical_reads": True} if logical_reads else {}
+    window_observations = getattr(args, "window_observations", False)
+    if window_observations and args.output_format != "json":
+        print("[ERROR] --window-observations requires --output-format json", file=sys.stderr)
+        return EXIT_INCOMPLETE
+    read_options = {
+        **({"logical_reads": True} if logical_reads else {}),
+        **({"window_observations": True} if window_observations else {}),
+    }
     # The human report prints while it is formatted, so it cannot be redirected to a file.
     if args.output and args.output_format == "human":
         print(
@@ -719,6 +728,11 @@ Examples:
         "--logical-reads",
         action="store_true",
         help="Include bounded logical input-read reports in JSON results",
+    )
+    scan_parser.add_argument(
+        "--window-observations",
+        action="store_true",
+        help="Include bounded text-free model-window observations in JSON results",
     )
     scan_parser.add_argument(
         "--no-limits", action="store_true", help="Disable safety limits (for testing)"
