@@ -28,13 +28,16 @@ import json
 import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 import quarry.policy as policy_module
 from quarry.config import QuarryConfig
+from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.policy import compile_policy
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner
@@ -541,12 +544,32 @@ async def test_batch_deadline_replacement_preserves_completed_item_telemetry(
     assert merge_model_usage([timed_out.model_usage]) == timed_out.model_usage
 
 
-async def test_a_batch_deadline_raises_when_timeouts_are_configured_to_fail(tmp_path) -> None:
+async def test_a_batch_deadline_raises_when_timeouts_are_configured_to_fail(
+    tmp_path, monkeypatch
+) -> None:
     config, backend, adapter, _ = _runtime(tmp_path, fail_on_timeout=True)
     policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    now = timer.time.monotonic()
+    score = adapter.score
+
+    def clock():
+        return now
+
+    async def score_and_expire(*args, **kwargs):
+        nonlocal now
+        result = await score(*args, **kwargs)
+        if adapter.calls == 2:
+            deadline = timer.current_evaluation_deadline()
+            assert deadline is not None
+            now = deadline.expires_at
+        return result
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(adapter, "score", score_and_expire)
 
     with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
-        await policy.scan_many_async([_user("fast"), _user("slow")], deadline_seconds=0.2)
+        await policy.scan_many_async([_user("first"), _user("second")], deadline_seconds=10)
 
     aggregate = exc_info.value.scan_result
     assert adapter.calls == aggregate.model_usage["calls"] == 2
