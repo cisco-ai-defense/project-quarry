@@ -5148,6 +5148,10 @@ _COMPOSITION_LIMIT_MESSAGE = (
 )
 
 
+class _MalformedFieldAccess(Exception):
+    """A Python-built condition contains an invalid field path."""
+
+
 class _CompositionLimit(Exception):
     """The optional composition diagnostic exhausted its bounded analysis."""
 
@@ -5302,6 +5306,8 @@ class _CompositionAnalysis:
                 if frame.height > _COMPOSITION_DIAGNOSTIC_DEPTH:
                     raise _CompositionLimit
                 node = frame.node
+                if isinstance(node, FieldAccess) and not isinstance(node.fields, list):
+                    raise _MalformedFieldAccess
                 identity = id(node)
                 self.classes[identity] = self._classify_node(node)
                 if (
@@ -5712,6 +5718,8 @@ def _composition_verdict_issue(
     try:
         analysis.classify(condition)
         return analysis.find_issue(condition)
+    except _MalformedFieldAccess:
+        return "field access requires a list of field names"
     except _CompositionLimit:
         return _COMPOSITION_LIMIT_MESSAGE
 

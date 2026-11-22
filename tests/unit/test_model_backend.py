@@ -1921,3 +1921,24 @@ def test_an_external_media_url_fails_each_model_call_under_its_alias(tmp_path) -
         "inline",
     }
     assert (adapter.score_calls, adapter.completions) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_rejected_local_score_payload_leaves_the_only_model_call_available(tmp_path):
+    adapter = ModelAdapter()
+    backend = _v2_backend(tmp_path, {"judge": model_entry(score=True)}, adapter)
+
+    def builder(constitution, messages, tools, boundary, config):
+        if constitution == "reject":
+            raise LLMError("local builder rejected the payload", {"code": "invalid_input"})
+        return passthrough_builder(constitution, messages, tools, boundary, config)
+
+    backend.message_builders["test"] = builder
+    messages = Messages.from_openai([{"role": "user", "content": "input"}])
+
+    with model_call_budget(1):
+        with pytest.raises(LLMError, match="local builder rejected the payload"):
+            await backend.model_score_messages("judge", "reject", messages)
+        assert adapter.score_messages == []
+        assert await backend.model_score_messages("judge", "accept", messages) == 0.99
+        assert len(adapter.score_messages) == 1
