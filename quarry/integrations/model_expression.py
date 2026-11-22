@@ -81,7 +81,7 @@ from quarry.types.adapter_transforms import (
 )
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
 from quarry.types.message_groups import MessageGroups
-from quarry.types.messages import Message, Messages, ToolCall, _synthetic_key
+from quarry.types.messages import Message, Messages, ToolCall, UnreadableToolCall, _synthetic_key
 from quarry.types.origins import (
     Place,
     SourceText,
@@ -1111,7 +1111,7 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
         ),
         len(filters),
     )
-    body_first = first_paid < len(filters) and not model_expression_requires_model(body)
+    can_check_body_first = first_paid < len(filters) and not model_expression_requires_model(body)
     output = []
     pacer = Pacer()
     for position, item in enumerate(items):
@@ -1149,6 +1149,9 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
                     break
             if not selected:
                 continue
+            # A guarded field on an opaque call can fault. Only read it if the
+            # paid filters include that call in the quantifier's input.
+            body_first = can_check_body_first and not isinstance(item, UnreadableToolCall)
             body_value = await predicate(body, variable) if body_first else None
             if body_first and (
                 (kind == "call_any" and not body_value) or (kind == "call_all" and body_value)

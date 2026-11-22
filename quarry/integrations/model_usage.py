@@ -125,6 +125,14 @@ def model_call_budget(
         _current_model_call_budget.reset(token)
 
 
+class ModelPreparationError(Exception):
+    """A local payload could not be prepared for dispatch."""
+
+    def __init__(self, error: Exception):
+        super().__init__(str(error))
+        self.error = error
+
+
 class ModelUsage:
     """Rate-limit and retry one logical model call within its time budget."""
 
@@ -134,11 +142,12 @@ class ModelUsage:
     async def run(
         self,
         model: str,
-        operation: Callable[[float | None], Awaitable[T]],
+        operation: Callable[[float | None], Awaitable[T]] | None,
         *,
         budget_alias: str | None = None,
         timeout: float | None = None,
         retry_history: ModelRetryHistory | None = None,
+        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
     ) -> T:
         """Run sequential attempts until success, a final error, or timeout.
 
@@ -156,6 +165,7 @@ class ModelUsage:
                 deadline=None,
                 budget_alias=budget_alias,
                 retry_history=history,
+                prepare_attempt=prepare_attempt,
             )
 
         active_evaluation = current_evaluation_deadline()
@@ -185,6 +195,7 @@ class ModelUsage:
                         budget_alias=budget_alias,
                         evaluation_timeout_message=evaluation_timeout_message,
                         retry_history=history,
+                        prepare_attempt=prepare_attempt,
                     )
             except TimeoutError as exc:
                 # Preserve the scanner's error type when this inner timer is
@@ -227,30 +238,44 @@ class ModelUsage:
     async def _attempt(
         self,
         model: str,
-        operation: Callable[[float | None], Awaitable[T]],
+        operation: Callable[[float | None], Awaitable[T]] | None,
         *,
         deadline: float | None,
         budget_alias: str | None,
         evaluation_timeout_message: str | None = None,
         retry_history: ModelRetryHistory | None = None,
+        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
     ) -> T:
         """Acquire one limiter ticket and invoke one physical attempt."""
 
+        def remaining_time() -> float | None:
+            if deadline is None:
+                return None
+            history = retry_history if retry_history is not None else ModelRetryHistory()
+            return self._remaining(
+                deadline,
+                budget_alias or model,
+                evaluation_timeout_message,
+                history.last_failure,
+                history.failed_attempts,
+            )
+
         async def invoke() -> T:
-            remaining = None
-            if deadline is not None:
-                history = retry_history if retry_history is not None else ModelRetryHistory()
-                remaining = self._remaining(
-                    deadline,
-                    budget_alias or model,
-                    evaluation_timeout_message,
-                    history.last_failure,
-                    history.failed_attempts,
-                )
+            remaining = remaining_time()
             budget = _current_model_call_budget.get()
+            attempt = operation
+            if prepare_attempt is not None:
+                if budget is not None:
+                    budget.check(budget_alias or model)
+                try:
+                    attempt = prepare_attempt()
+                except Exception as error:
+                    raise ModelPreparationError(error) from error
+                remaining = remaining_time()
             if budget is not None:
                 budget.consume(budget_alias or model)
-            return await operation(remaining)
+            assert attempt is not None
+            return await attempt(remaining)
 
         async def limited_attempt() -> T:
             if self.rate_limiter is None:
