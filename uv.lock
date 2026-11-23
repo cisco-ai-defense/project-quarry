@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -337,6 +337,10 @@ inference = [
     { name = "requests" },
     { name = "urllib3" },
 ]
+local-tokenizer = [
+    { name = "jinja2" },
+    { name = "tokenizers" },
+]
 plugin = [
     { name = "aiohttp" },
     { name = "anyio" },
@@ -386,6 +390,7 @@ requires-dist = [
     { name = "google-re2", specifier = "==1.1.20251105" },
     { name = "httpx", marker = "extra == 'inference'", specifier = "==0.28.1" },
     { name = "idna", marker = "extra == 'inference'", specifier = ">=3.15" },
+    { name = "jinja2", marker = "extra == 'local-tokenizer'", specifier = "==3.1.6" },
     { name = "jsonschema", marker = "extra == 'inference'", specifier = "==4.26.0" },
     { name = "lark", specifier = "==1.3.1" },
     { name = "litellm", marker = "extra == 'inference'", specifier = ">=1.109.1,<2.0.0" },
@@ -402,10 +407,11 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "requests", marker = "extra == 'inference'", specifier = ">=2.33.0" },
     { name = "rich", specifier = "==15.0.0" },
+    { name = "tokenizers", marker = "extra == 'local-tokenizer'", specifier = "==0.22.2" },
     { name = "urllib3", marker = "extra == 'inference'", specifier = ">=2.8.0" },
     { name = "z3-solver", marker = "extra == 'verification'", specifier = "==5.4.1.0" },
 ]
-provides-extras = ["verification", "inference", "plugin"]
+provides-extras = ["local-tokenizer", "verification", "inference", "plugin"]
 
 [package.metadata.requires-dev]
 dev = [

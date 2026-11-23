@@ -140,6 +140,9 @@ from quarry.types.exceptions import (
     ConversationValidationError,
     InvalidInputError,
     LLMError,
+    LocalTokenizerInvalidOutputError,
+    LocalTokenizerLimitError,
+    LocalTokenizerUnavailableError,
     ModelError,
     QuarryError,
 )
@@ -278,7 +281,17 @@ def _attributed_failure(
             cause = "provider request failed" if names_private_model(message) else message
             public_message = f"{prefix} failed: {cause}"
 
-    return LLMError(
+    kind = (
+        type(exc)
+        if type(exc)
+        in (
+            LocalTokenizerInvalidOutputError,
+            LocalTokenizerLimitError,
+            LocalTokenizerUnavailableError,
+        )
+        else LLMError
+    )
+    return kind(
         public_message,
         {**exc.details, "model": model_id},
     )
@@ -1955,7 +1968,20 @@ class ModelInferenceBackend:
             else LLMRateLimiter(self.config.llm_rate_limits)
         )
         self.model_usage = ModelUsage(self.rate_limiter)
-        self.adapters = {**_default_adapters(), **dict(adapters or {})}
+        self.adapters: dict[str, Any] = {**_default_adapters(), **dict(adapters or {})}
+        if any(
+            (tokens := self.models[name].tokens) is not None and tokens.local is not None
+            for name in models_to_load
+        ):
+            from quarry.integrations.local_tokenizer import LocalTokenizerAdapter
+
+            registered = self.adapters.get("local_tokenizer")
+            if registered is None:
+                self.adapters["local_tokenizer"] = LocalTokenizerAdapter()
+            elif type(registered) is not LocalTokenizerAdapter:
+                raise ConfigurationError(
+                    "local tokenizer configuration requires its native adapter"
+                )
         # Each configured model's settings digest per adapter method, with the model it names.
         self._settings_digests: dict[tuple[str, int], tuple[InferenceModelConfig, bytes]] = {}
         self._validated_head_adapter: Any = None
@@ -2603,6 +2629,7 @@ class ModelInferenceBackend:
         dispatch: Callable[..., Any] | None = None,
         refusals: bool = False,
         cache_category: str | None = None,
+        local: bool = False,
     ) -> Any:
         """Send one adapter request, ``adapter.<method>(model, *payload())``, or reuse the
         response to the same request, and return ``read(response)``. ``payload`` is built only
@@ -2649,15 +2676,27 @@ class ModelInferenceBackend:
                 return await prepare_attempt()(attempt_timeout)
 
             try:
-                response = await self._send(
-                    model_id,
-                    rate_limit_model,
-                    invoke_unprepared,
-                    operation_name=public_model_operation(method),
-                    timeout=timeout,
-                    retry_history=retry_history,
-                    attempt_factory=prepare_attempt,
-                )
+                if local:
+                    # Only the configured native tokenizer uses this path. Local
+                    # CPU work owns its finite worker allowance, without provider
+                    # requests, rate-limit tickets or billable-model call counts.
+                    try:
+                        response = await invoke_unprepared(timeout)
+                        raise_if_evaluation_expired()
+                    except LLMError as exc:
+                        raise _attributed_failure(
+                            exc.message, exc, model_id, private_model=rate_limit_model
+                        ) from exc
+                else:
+                    response = await self._send(
+                        model_id,
+                        rate_limit_model,
+                        invoke_unprepared,
+                        operation_name=public_model_operation(method),
+                        timeout=timeout,
+                        retry_history=retry_history,
+                        attempt_factory=prepare_attempt,
+                    )
                 if isinstance(response, ModelPreparationFailure):
                     # Preparation did not invoke an adapter. Preserve its original failure
                     # outside provider retry/normalization and release finished host frames.
@@ -2673,7 +2712,7 @@ class ModelInferenceBackend:
         # An adapter's configuration is not visible in its class, so each instance names its
         # own results.
         cache_key = input_key(
-            "model-request",
+            "local-model-request-v1" if local else "model-request",
             method,
             object_identity(adapter),
             self._settings_digest(method, model),
@@ -4316,6 +4355,7 @@ class ModelInferenceBackend:
             key=key,
             timeout=timeout,
             read=count,
+            local=tokens_config.local is not None,
         )
 
     async def model_trim_messages(

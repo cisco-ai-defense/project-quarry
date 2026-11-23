@@ -48,6 +48,11 @@ from quarry.types.adapter_transforms import (
 )
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.external_spans import ExternalSpanLimits
+from quarry.types.local_tokenizer import (
+    LocalTokenizerConfig,
+    LocalTokenizerLimits,
+    TokenFramingMargins,
+)
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
 from quarry.types.transforms import (
@@ -155,6 +160,7 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "endpoint": str,
         "extraction": {"count": str},
         "model": str,
+        "local": _ANY_MAPPING,
     },
     "score": {
         "max_input_tokens": int,
@@ -196,6 +202,20 @@ class InputTokensConfig:
     endpoint: str | None
     count_field: str
     model: str | None = None
+    local: LocalTokenizerConfig | None = field(default=None, metadata={"cache_omit_none": True})
+
+    def __post_init__(self) -> None:
+        if self.local is not None:
+            if (
+                type(self.local) is not LocalTokenizerConfig
+                or self.adapter != "local_tokenizer"
+                or self.endpoint is not None
+                or self.model is not None
+                or type(self.count_field) is not str
+                or not self.count_field
+            ):
+                raise ValueError("local tokenization requires its native adapter and configuration")
+            object.__setattr__(self, "local", replace(self.local))
 
 
 _MIN_EXPLANATION_TOKENS = 16
@@ -361,6 +381,14 @@ class InferenceModelConfig:
 
     def __post_init__(self) -> None:
         _model_revision(self.revision)
+        if (
+            type(self.tokens) is InputTokensConfig
+            and self.tokens.local is not None
+            and self.tokens.local.model_revision != self.revision
+        ):
+            raise ValueError(
+                "local tokenizer model revision must match the configured model revision"
+            )
         if self.windows is not None and not isinstance(self.windows, ModelWindowsConfig):
             raise ValueError("windows must be a ModelWindowsConfig or None")
         if isinstance(self.spans, ExternalSpanConfig) and self.windows is not None:
@@ -378,6 +406,11 @@ class InferenceModelConfig:
             document.pop("revision")
         if self.windows is None:
             document.pop("windows")
+        if self.tokens is not None:
+            if self.tokens.local is None:
+                document["tokens"].pop("local", None)
+            else:
+                document["tokens"]["local"] = self.tokens.local.identity_dict()
         for operation in ("score", "classify", "spans", "complete"):
             section = document[operation]
             if section is not None and section.get("max_input_tokens") is None:
@@ -856,6 +889,7 @@ class QuarryConfig:
                 model_name,
                 model_data,
                 resolve_environment=not environment_resolved,
+                config_dir=config_dir,
             )
             description = model_data.get("description")
             if description is not None:
@@ -1539,6 +1573,7 @@ def _parse_inference_model(
     data: dict,
     *,
     resolve_environment: bool = True,
+    config_dir: Path | None = None,
 ) -> InferenceModelConfig:
     """Parse one configured inference model."""
 
@@ -1549,6 +1584,7 @@ def _parse_inference_model(
             model_name,
             data["tokens"],
             resolve_environment=resolve_environment,
+            config_dir=config_dir,
         )
         if "tokens" in data
         else None
@@ -1764,6 +1800,7 @@ def _parse_input_tokens(
     *,
     owner: str | None = None,
     resolve_environment: bool = True,
+    config_dir: Path | None = None,
 ) -> InputTokensConfig:
     """Parse the tokenizer endpoint/model and response count field for one model."""
 
@@ -1771,7 +1808,7 @@ def _parse_input_tokens(
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
-    _reject_unknown_fields(fields, {"adapter", "endpoint", "extraction", "model"}, owner)
+    _reject_unknown_fields(fields, {"adapter", "endpoint", "extraction", "model", "local"}, owner)
     extraction = fields.get("extraction")
     if not isinstance(extraction, dict):
         raise ValueError(f"{owner} requires an 'extraction' mapping")
@@ -1789,7 +1826,39 @@ def _parse_input_tokens(
             owner,
             resolve_environment=resolve_environment,
         ),
+        local=_parse_local_tokenizer(fields["local"], config_dir=config_dir)
+        if "local" in fields
+        else None,
     )
+
+
+def _parse_local_tokenizer(value: object, *, config_dir: Path | None) -> LocalTokenizerConfig:
+    """Strict native local configuration. Parsing never opens the pinned artifact."""
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise ValueError("local tokenizer configuration must be a native mapping")
+    _reject_unknown_fields(value, set(LocalTokenizerConfig.__dataclass_fields__), "local tokenizer")
+    fields = dict(value)
+    for name, kind in (("limits", LocalTokenizerLimits), ("framing", TokenFramingMargins)):
+        if name in fields:
+            raw = fields[name]
+            if type(raw) is not dict or any(type(key) is not str for key in raw):
+                raise ValueError("local tokenizer limits/framing must be native mappings")
+            _reject_unknown_fields(raw, set(kind.__dataclass_fields__), "local tokenizer " + name)
+            fields[name] = kind(**raw)
+    if "template_variables" in fields:
+        variables = fields["template_variables"]
+        if type(variables) is not dict or len(variables) > 32:
+            raise ValueError("local tokenizer template variables must be a bounded native mapping")
+        fields["template_variables"] = tuple(variables.items())
+    try:
+        config = LocalTokenizerConfig(**fields)
+    except TypeError:
+        raise ValueError(
+            "local tokenizer requires artifact path/digest and model/tokenizer revisions"
+        ) from None
+    if config_dir is not None and not Path(config.artifact_path).is_absolute():
+        config = replace(config, artifact_path=str(config_dir / config.artifact_path))
+    return config
 
 
 def _parse_score_config(
