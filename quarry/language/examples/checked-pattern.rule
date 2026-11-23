@@ -1,0 +1,5 @@
+rule "Even marker"
+strings:
+    $marker = "[a-z]+" regex check("even_width")
+condition:
+    any msg in messages where $marker in msg.content

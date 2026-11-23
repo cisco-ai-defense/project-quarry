@@ -17,7 +17,7 @@ condition:
 | `$pattern in text` | Search using a declaration and its modifiers. |
 | `text ~ "pattern"` | Search with an inline case-insensitive RE2 pattern. |
 
-Declarations accept `nocase`, `fullword`, `base64`, and `regex` modifiers. `nocase` ignores case but preserves source casing in captured text. `fullword` matches a literal only when no ASCII letter, digit, or underscore touches either end, so `"--force" fullword` matches `git push --force` but not `x--forcey`. Word characters are ASCII only, as in RE2's `\b`, so `"café" fullword` also matches inside `caféñ`. `base64` encodes the declaration before matching. `regex` interprets the declaration as an RE2 pattern.
+Declarations accept `nocase`, `fullword`, `base64`, `regex`, and named `check("name")` modifiers. `nocase` ignores case but preserves source casing in captured text. `fullword` matches a literal only when no Unicode alphanumeric character or underscore touches either end, so `"--force" fullword` matches `git push --force` but not `x--forcey`, and `"café" fullword` does not match inside `caféñ`. Combining marks are not alphanumeric characters. `base64` encodes the declaration before matching. An explicit `regex` retains precedence over literal `fullword` handling and interprets the declaration as an RE2 pattern.
 
 ```text
 strings:
@@ -43,3 +43,27 @@ condition:
 ```
 
 The [generated language reference](../quarry/language/reference.md) has the current operator and helper signatures. The [rule-writing guide](rule-writing.md) covers how to combine text checks with event flow.
+
+Trusted Python hosts can filter candidate matches with named predicates:
+
+```python
+from quarry import compile_policy, load_compiled_policy
+
+source = """rule "Even marker"
+strings:
+    $marker = "[a-z]+" regex check("even_width")
+condition:
+    any msg in messages where $marker in msg.content
+"""
+checks = {"even_width": lambda text: len(text) % 2 == 0}
+policy = compile_policy(source, pattern_checks=checks)
+restored = load_compiled_policy(policy.to_bytes(), pattern_checks=checks)
+```
+
+`DSLScanner`, `QuarryGuard`, and the programmatic `QuarryPlugin` host accept the same `pattern_checks` keyword. Each backend copies the mapping and exposes it read-only. The default registry is empty; there are no built-in product checkers. Registry names contain 1–64 ASCII characters, start with a letter, and otherwise allow letters, digits, `_`, `-`, and `.`. A registry contains at most 64 names; a declaration can apply at most eight distinct checks, in written order. The first rejection stops that candidate's remaining checks.
+
+Checks receive only the matched substring with its original case and source characters. They apply to presence, regex predicates, counts and capped counts, positions, captures, span collections, extraction windows, and pattern-based selections. They do not change the existing extraction fallback: when no spans are selected, extraction retains the original text. A check must return exactly `True` or `False`. Exceptions or other replies become a typed `PatternCheckError` with the bounded check name; callback messages, returned objects and matched text are omitted. Cancellation remains cancellation.
+
+Host predicates are trusted synchronous code. Keep them deterministic, thread-safe, bounded, and free of I/O; Quarry does not sandbox arbitrary Python or preempt a blocking callback. Existing local-work measurement includes reached predicates, and evaluation deadlines are checked around each production callback. Rules and prepared data select names only: they never load Python modules, carry callables, or register capabilities. Every referenced name must be available at source or prepared load, even when its condition would not be reached. CLI and plugin hosts with no registry reject such rules explicitly.
+
+The Unicode literal-boundary change requires `compiler-31` and prepared format 12. Earlier prepared policies must be recompiled from source, then loaded with their explicit host registry. This prevents previously compiled ASCII boundary decisions from silently acquiring new behavior. Saved policies contain check names, not predicate implementations; the host remains responsible for binding each name to the intended trusted implementation.

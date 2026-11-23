@@ -58,6 +58,15 @@ from dataclasses import dataclass
 from itertools import groupby, repeat
 
 from quarry.engine.local_work import measured_local_work
+from quarry.engine.pattern_checks import (
+    PatternCheck,
+    PatternCheckError,
+    check_names,
+    copy_pattern_checks,
+    encode_pattern_flags,
+    parse_pattern_flags,
+    run_pattern_check,
+)
 
 
 @dataclass(frozen=True)
@@ -76,14 +85,25 @@ class Modifiers:
     fullword: bool = False
     base64: bool = False
     regex: bool = False
+    checks: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        check_names(self.checks)
+
+    def to_flags(self) -> str:
+        return encode_pattern_flags(
+            "".join(
+                "1" if bit else "0" for bit in (self.nocase, self.fullword, self.base64, self.regex)
+            ),
+            self.checks,
+        )
 
     @classmethod
     def from_flags(cls, flags: str) -> Modifiers:
         """Read the four modifier bits carried by a compiled string set."""
 
-        if len(flags) != 4 or any(bit not in "01" for bit in flags):
-            raise ValueError("invalid compiled string modifier flags")
-        return cls(*(bit == "1" for bit in flags))
+        bits, checks = parse_pattern_flags(flags)
+        return cls(*(bit == "1" for bit in bits), checks=checks)
 
 
 NO_MODS = Modifiers()
@@ -111,6 +131,24 @@ class RegexBackend:
     Injecting a subclass (see ``quarry.safety.regex_backend``) is how production swaps in RE2
     without the engine importing the cache or safety layer (engine-isolation invariant).
     """
+
+    def __init__(self, *, pattern_checks: Mapping[str, PatternCheck] | None = None):
+        self._pattern_checks = copy_pattern_checks(pattern_checks)
+
+    @property
+    def pattern_checks(self) -> Mapping[str, PatternCheck]:
+        return getattr(self, "_pattern_checks", {})
+
+    _pattern_check_control_errors: tuple[type[BaseException], ...] = ()
+
+    def check_match(self, name: str, text: str) -> bool:
+        predicates = self.pattern_checks
+        predicate = predicates.get(name)
+        if predicate is None:
+            raise PatternCheckError(f"Pattern check '{name}' is unavailable")
+        return run_pattern_check(
+            predicate, name, text, control_errors=self._pattern_check_control_errors
+        )
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -212,6 +250,8 @@ def match_contains(
     """
     if not text or not pattern:
         return False
+    if mods.checks or (mods.fullword and not mods.regex):
+        return next(accepted_match_spans(text, pattern, mods, regex=regex), None) is not None
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         return regex.search_match(effective, text, _regex_flags(mods)) is not None
@@ -255,6 +295,38 @@ def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int,
         found = haystack.find(needle, finish)
 
 
+@measured_local_work("match", iterator=True)
+def accepted_match_spans(
+    text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
+) -> Iterator[tuple[int, int]]:
+    """Apply boundaries and host predicates to the same source ranges in every reader.
+
+    As before, an explicit regex takes precedence over the literal-only fullword modifier.
+    Unicode word characters are alphanumerics and underscore; offsets stay in source text.
+    """
+    if not mods.regex and (not text or not pattern):
+        return
+    boundary = mods.fullword and not mods.regex
+    base = Modifiers(nocase=mods.nocase, base64=mods.base64, regex=mods.regex)
+    effective, use_regex = apply_modifiers(pattern, base)
+    spans = (
+        regex.iter_match_spans(effective, text, _regex_flags(mods))
+        if use_regex
+        else _literal_spans(text, effective, mods.nocase)
+    )
+    for start, stop in spans:
+        if boundary:
+            before = text[start - 1] if start else ""
+            after = text[stop] if stop < len(text) else ""
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+        if mods.checks:
+            matched = text[start:stop]
+            if not all(regex.check_match(name, matched) for name in mods.checks):
+                continue
+        yield start, stop
+
+
 @measured_local_work("prepare", iterator=True)
 def match_spans(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
@@ -263,6 +335,12 @@ def match_spans(
 
     if not text or not pattern:
         return iter(())
+    if mods.checks or (mods.fullword and not mods.regex):
+        return (
+            span
+            for span in accepted_match_spans(text, pattern, mods, regex=regex)
+            if span[1] > span[0]
+        )
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         spans = regex.iter_match_spans(effective, text, _regex_flags(mods))
@@ -289,7 +367,12 @@ def matching_patterns(
 
 @measured_local_work("match")
 def match_regex(
-    text: str, pattern: str, nocase: bool = False, *, regex: RegexBackend = PURE_REGEX
+    text: str,
+    pattern: str,
+    nocase: bool = False,
+    *,
+    regex: RegexBackend = PURE_REGEX,
+    checks: tuple[str, ...] = (),
 ) -> bool:
     """Boolean regex search — the ``~`` / ``matches`` operator semantics.
 
@@ -298,6 +381,19 @@ def match_regex(
     load time, so an invalid pattern never reaches a scan."""
     if text is None or pattern is None:
         return False
+    if checks:
+        return (
+            next(
+                accepted_match_spans(
+                    str(text),
+                    str(pattern),
+                    Modifiers(nocase=nocase, regex=True, checks=checks),
+                    regex=regex,
+                ),
+                None,
+            )
+            is not None
+        )
     return (
         regex.search_match(str(pattern), str(text), _regex_flags(Modifiers(nocase=nocase)))
         is not None
@@ -345,6 +441,9 @@ def find_position(
     """First match position (an index into ``text``), or ``None``."""
     if not text or not pattern:
         return None
+    if mods.checks or (mods.fullword and not mods.regex):
+        span = next(accepted_match_spans(text, pattern, mods, regex=regex), None)
+        return span[0] if span is not None else None
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))
@@ -369,6 +468,15 @@ def count_occurrences(
     """
     if not text or not pattern:
         return 0
+    if mods.checks or (mods.fullword and not mods.regex):
+        if limit is not None and limit <= 0:
+            return 0
+        found = 0
+        for _ in accepted_match_spans(text, pattern, mods, regex=regex):
+            found += 1
+            if limit is not None and found >= limit:
+                break
+        return found
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         if limit is not None:
@@ -390,6 +498,9 @@ def extract_match(
     """The matched substring, or ``None`` (original casing preserved on the literal path)."""
     if not text or not pattern:
         return None
+    if mods.checks or (mods.fullword and not mods.regex):
+        span = next(accepted_match_spans(text, pattern, mods, regex=regex), None)
+        return text[span[0] : span[1]] if span is not None else None
     effective, use_regex = apply_modifiers(pattern, mods)
     if use_regex:
         m = regex.search_match(effective, text, _regex_flags(mods))

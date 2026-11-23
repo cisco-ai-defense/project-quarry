@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from quarry.engine import matchers as _M
 from quarry.engine import temporal as T
 from quarry.engine.pacing import Pacer
+from quarry.engine.pattern_checks import check_names
 
 # Cost caps per trace. At most ``MAX_CAPTURE_VALUES`` candidates are instantiated (one DFA
 # run each), drawn from at most ``MAX_CAPTURE_CANDIDATES`` distinct enumerated values. When a
@@ -70,6 +71,10 @@ class CaptureBind:
     window_start: int | None = None
     window_stop: int | None = None
     name: str = ""
+    checks: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        check_names(self.checks)
 
 
 @dataclass(frozen=True)
@@ -215,7 +220,11 @@ def _iter_bind_values(
     ``None`` for each event visited (a unit of work that yields no value)."""
     b = plan.bind
     mods = _M.Modifiers(
-        nocase=b.case_insensitive, fullword=b.fullword, base64=b.base64, regex=b.is_regex
+        nocase=b.case_insensitive,
+        fullword=b.fullword,
+        base64=b.base64,
+        regex=b.is_regex,
+        checks=b.checks,
     )
     # Only events of the bind's collection: inside its window, with its accessor's name. An
     # event's ordinal counts the whole conversation, so the window resolves against the
@@ -259,6 +268,11 @@ def matches_for(pattern: str, text: str, mods, regex_backend) -> Iterable[str]:
     A regex/fullword/base64 pattern enumerates EVERY match (``iter_match_texts``, lazily); a
     plain literal yields the single matched substring (case/positionally faithful) when present.
     """
+    if mods.checks or (mods.fullword and not mods.regex):
+        return (
+            text[start:stop]
+            for start, stop in _M.accepted_match_spans(text, pattern, mods, regex=regex_backend)
+        )
     effective, use_regex = _M.apply_modifiers(pattern, mods)
     flags = _M.re.IGNORECASE if mods.nocase else 0
     if use_regex:

@@ -1266,6 +1266,7 @@ def _capture_plan(factory, formula: C.Formula):
             case_insensitive=sem.case_insensitive,
             fullword=sem.fullword,
             base64=sem.base64,
+            checks=sem.checks,
             window_start=start,
             window_stop=stop,
             name=name,
@@ -2197,6 +2198,16 @@ def _attempt(
             atom_id: check for atom_id, check in c.split_checks.items() if atom_id in retained_atoms
         },
         computed_conditions=c.computed_conditions,
+        declared_pattern_checks=tuple(
+            sorted(
+                {
+                    name
+                    for value in (getattr(rule, "strings", None) or {}).values()
+                    if isinstance(value, tuple) and len(value) == 2
+                    for name in getattr(value[1], "checks", ())
+                }
+            )
+        ),
         full_trace_proof=full_trace_proof,
         decision_tree=decision_tree,
     )

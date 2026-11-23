@@ -36,6 +36,19 @@ class ExampleRecord:
 
 EXAMPLE_RECORDS = (
     ExampleRecord(
+        id="example:checked-pattern",
+        rule_text="""rule "Even marker"
+strings:
+    $marker = "[a-z]+" regex check("even_width")
+condition:
+    any msg in messages where $marker in msg.content
+""",
+        covered_item_ids=("construct:pattern-check-modifier",),
+        backend_required=True,
+        matching={"messages": [{"role": "user", "content": "a bb"}]},
+        non_matching={"messages": [{"role": "user", "content": "a ccc"}]},
+    ),
+    ExampleRecord(
         id="example:public-rule-call",
         rule_text="""rule "Blocked request"
 condition:

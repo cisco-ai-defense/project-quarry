@@ -39,6 +39,8 @@ from __future__ import annotations
 
 from quarry.cache.regex_cache import regex_cache
 from quarry.engine.matchers import RegexBackend
+from quarry.safety.local_match_work import LocalMatchWorkError
+from quarry.safety.timer import QuarryTimeoutError, raise_if_evaluation_expired
 
 
 class Re2RegexBackend(RegexBackend):
@@ -50,6 +52,19 @@ class Re2RegexBackend(RegexBackend):
     checks the task-local rule deadline, so where one is installed a rule that has already
     overrun aborts here instead of starting more matching work.
     """
+
+    _pattern_check_control_errors = (QuarryTimeoutError, LocalMatchWorkError)
+
+    def check_match(self, name, text):
+        raise_if_evaluation_expired()
+        try:
+            result = super().check_match(name, text)
+        except QuarryTimeoutError:
+            raise QuarryTimeoutError(f"Pattern check '{name}' deadline exceeded") from None
+        except LocalMatchWorkError:
+            raise LocalMatchWorkError(f"Pattern check '{name}' work allowance exhausted") from None
+        raise_if_evaluation_expired()
+        return result
 
     def search_match(self, pattern, text, flags=0):
         return regex_cache.search_match(pattern, text, flags)

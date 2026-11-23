@@ -33,6 +33,7 @@ from quarry.async_runtime import run_engine, run_sync
 from quarry.config import QuarryConfig
 from quarry.decision_report import conversation_sha256, explores, scanner_digests, tree_report
 from quarry.engine.contracts import CompiledRuleArtifact
+from quarry.engine.pattern_checks import PatternCheck
 from quarry.input_registry import InputRegistry
 from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
@@ -721,6 +722,7 @@ def compile_policy(
     llm_rate_limiter=None,
     evidence_key: bytes | None = None,
     input_adapters: Mapping[str, InputAdapter] | None = None,
+    pattern_checks: Mapping[str, PatternCheck] | None = None,
 ) -> CompiledPolicy:
     """Compile one rule and bind its policy parameters into a reusable policy."""
 
@@ -743,6 +745,7 @@ def compile_policy(
         llm_rate_limiter=llm_rate_limiter,
         input_adapters=input_adapters,
         _allow_parameters=True,
+        pattern_checks=pattern_checks,
     )
     return CompiledPolicy._from_scanner(
         scanner,

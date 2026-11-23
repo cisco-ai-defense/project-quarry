@@ -77,6 +77,7 @@ from quarry.engine.local_work import (
 from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.oracle import Grounded
+from quarry.engine.pattern_checks import PatternCheck, required_pattern_checks
 from quarry.engine.witness import (
     MAX_JUDGE_REASONS,
     DeferredValueEvidence,
@@ -128,7 +129,7 @@ from quarry.rule_versioning import check_rule_compatibility
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.local_match_work import LocalMatchWorkError, LocalMatchWorkSession
 from quarry.safety.local_work_reporting import aggregate_local_match_work
-from quarry.safety.regex_backend import RE2_REGEX
+from quarry.safety.regex_backend import RE2_REGEX, Re2RegexBackend
 from quarry.safety.timer import (
     QuarryTimeoutError,
     current_evaluation_deadline,
@@ -461,6 +462,7 @@ class DSLScanner:
         _allow_parameters: bool = False,
         input_adapters: Mapping[str, InputAdapter] | None = None,
         model_adapters: Mapping[str, Any] | None = None,
+        pattern_checks: Mapping[str, PatternCheck] | None = None,
     ):
         """
         Initialize scanner with config.
@@ -476,6 +478,7 @@ class DSLScanner:
             llm_rate_limiter: Optional limiter shared across scanner instances.
             input_adapters: Named converters for native input formats.
             model_adapters: Trusted host model adapters, registered without loading modules.
+            pattern_checks: Trusted synchronous predicates selected by literal pattern names.
         """
         self._initialize_execution(
             config,
@@ -488,6 +491,7 @@ class DSLScanner:
             llm_rate_limiter=llm_rate_limiter,
             allow_parameters=_allow_parameters,
             model_adapters=model_adapters,
+            pattern_checks=pattern_checks,
         )
         self.parser = DSLParser()
         self.input_adapters, declarations = load_input_adapters(
@@ -520,10 +524,14 @@ class DSLScanner:
         llm_rate_limiter: LLMRateLimiter | None,
         allow_parameters: bool,
         model_adapters: Mapping[str, Any] | None = None,
+        pattern_checks: Mapping[str, PatternCheck] | None = None,
     ) -> None:
         """Initialize state shared by source compilation and compiled-policy loading."""
 
         self.recursive = recursive
+        self.pattern_backend = (
+            RE2_REGEX if pattern_checks is None else Re2RegexBackend(pattern_checks=pattern_checks)
+        )
         self.verbose = verbose
         self.batch_mode = batch_mode
         validated_call_types = Messages.validate_tool_call_types(tool_call_types)
@@ -567,6 +575,7 @@ class DSLScanner:
         model_inference_backend=None,
         llm_rate_limiter: LLMRateLimiter | None = None,
         input_adapters: Mapping[str, InputAdapter] | None = None,
+        pattern_checks: Mapping[str, PatternCheck] | None = None,
     ) -> "DSLScanner":
         """Build an execution-only scanner without constructing a parser or compiler."""
 
@@ -581,11 +590,15 @@ class DSLScanner:
             tool_call_types=None,
             llm_rate_limiter=llm_rate_limiter,
             allow_parameters=True,
+            pattern_checks=pattern_checks,
         )
         scanner.input_adapters, declarations = load_input_adapters(
             config.adapters, config.inputs, input_adapters
         )
         scanner.input_registry = InputRegistry(declarations)
+        scanner._require_pattern_checks(
+            required_pattern_checks(artifact), rule.name, "compiled-policy"
+        )
         if config.local_match_work is not None:
             config.local_match_work.validate_rules((rule.name,))
         resource_manager = ResourceManager(
@@ -620,6 +633,13 @@ class DSLScanner:
 
         for rule, _source in parsed_rules:
             self.input_registry.rewrite_rule(rule)
+            names = {
+                name
+                for value in (rule.strings or {}).values()
+                if isinstance(value, tuple) and len(value) == 2
+                for name in getattr(value[1], "checks", ())
+            }
+            self._require_pattern_checks(names, rule.name, _source)
 
         # Reject a duplicate rule name across files up front: silently overwriting would make
         # which rule "wins" depend on load order (fail closed for deterministic loading).
@@ -884,6 +904,20 @@ class DSLScanner:
             "and atomically replace the host reference"
         )
 
+    def _require_pattern_checks(self, names, rule_name: str, source: str) -> None:
+        missing = sorted(set(names) - self.pattern_backend.pattern_checks.keys())
+        if missing:
+            raise RuleValidationError(
+                f"Rule '{rule_name}' in {source} requires unavailable pattern checks: "
+                + ", ".join(missing),
+                {
+                    "rule_name": rule_name,
+                    "source": source,
+                    "error_type": "pattern_check",
+                    "checks": missing,
+                },
+            )
+
     def _validate_rule(self, rule: DSLRule, source: str) -> None:
         """Validate one candidate rule without registering it (fail closed on fatal errors)."""
         validation_result = self.validator.validate(rule)
@@ -1040,7 +1074,10 @@ class DSLScanner:
                 required
                 and child.ordered_timeline is None
                 and cross_source_flow_has_candidates(
-                    check, evaluation_input, regex_backend or RE2_REGEX, raise_if_evaluation_expired
+                    check,
+                    evaluation_input,
+                    regex_backend or self.pattern_backend,
+                    raise_if_evaluation_expired,
                 )
             ):
                 if rule_ctx.ordered_timeline is None:
@@ -1110,7 +1147,7 @@ class DSLScanner:
                         and cross_source_flow_has_candidates(
                             check,
                             nested_input,
-                            regex_backend or RE2_REGEX,
+                            regex_backend or self.pattern_backend,
                             raise_if_evaluation_expired,
                         )
                     ):
@@ -2360,7 +2397,7 @@ class DSLScanner:
                         and not flows_settled(
                             artifact,
                             scan_input(True, False),
-                            RE2_REGEX,
+                            self.pattern_backend,
                             raise_if_evaluation_expired,
                         )
                     ):
@@ -2371,7 +2408,7 @@ class DSLScanner:
                         and cross_source_flow_has_candidates(
                             artifact,
                             scan_input(True, False),
-                            RE2_REGEX,
+                            self.pattern_backend,
                             raise_if_evaluation_expired,
                         )
                     ):
@@ -2387,7 +2424,7 @@ class DSLScanner:
                     # A bad dynamic index cannot become a silent no-match or reach a provider.
                     self._reject_out_of_range_dynamic_indexes(artifact, rule_ctx.conversation)
                     warnings: list[str] = []
-                    regex_backend = RE2_REGEX
+                    regex_backend = self.pattern_backend
                     detector = self._make_async_detector(
                         rule_ctx,
                         artifact=artifact,
@@ -2504,7 +2541,7 @@ class DSLScanner:
                     artifact,
                     missing,
                     scan_input(True, False),
-                    RE2_REGEX,
+                    self.pattern_backend,
                     raise_if_evaluation_expired,
                 )
             ):

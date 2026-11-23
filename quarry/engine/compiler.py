@@ -67,6 +67,7 @@ from quarry.engine.diagnostics import (
     UnsupportedConstruct,
 )
 from quarry.engine.extension_surfaces import EVENT_SURFACES, INPUT_TEXTS, STATIC_SURFACES
+from quarry.engine.pattern_checks import encode_pattern_flags
 from quarry.language.metadata import TYPE_CONVERSIONS, DSLParameter, Use, dsl_compiler_form
 from quarry.language.runtime import (
     LanguageSpecError,
@@ -2176,14 +2177,17 @@ class _Compiler:
                 return (
                     ModelExpression(
                         "string_patterns",
-                        "".join(
-                            "1" if enabled else "0"
-                            for enabled in (
-                                semantics.case_insensitive,
-                                semantics.fullword,
-                                semantics.base64,
-                                semantics.is_regex,
-                            )
+                        encode_pattern_flags(
+                            "".join(
+                                "1" if enabled else "0"
+                                for enabled in (
+                                    semantics.case_insensitive,
+                                    semantics.fullword,
+                                    semantics.base64,
+                                    semantics.is_regex,
+                                )
+                            ),
+                            semantics.checks,
                         ),
                         tuple(ModelExpression("literal", pattern) for pattern in patterns),
                     ),
@@ -4761,6 +4765,7 @@ class _Compiler:
                 fullword=bool(getattr(mods, "fullword", False)),
                 base64=bool(getattr(mods, "base64", False)),
                 is_regex=force_regex or bool(getattr(mods, "regex", False)),
+                checks=getattr(mods, "checks", ()),
             )
             val = inner
         if isinstance(val, str):

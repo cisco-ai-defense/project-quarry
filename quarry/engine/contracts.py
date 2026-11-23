@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Bump when compilation or admission changes invalidate earlier artifacts.
 # Compiler-30 adds message-owned call values, scoped aggregate conditions and their
 # prepared graph checks. Format 11 remains; older artifacts require source recompilation.
-COMPILER_VERSION = "compiler-30"
+COMPILER_VERSION = "compiler-31"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64
@@ -239,6 +239,7 @@ class CompiledRuleArtifact:
     # Source declarations survive constant folding so prepared-policy reload preserves
     # load-time resource admission without adding runtime work.
     declared_resources: dict[str, frozenset] = field(default_factory=dict)
+    declared_pattern_checks: tuple[str, ...] = ()
     # A universal/absence claim must be explained over the original complete input.
     full_trace_proof: bool = False
     decision_tree: DecisionTree | None = None

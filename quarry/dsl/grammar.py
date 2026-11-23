@@ -34,7 +34,8 @@ DSL_GRAMMAR = r"""
     metadata_item: METADATA_KEY "=" STRING
     strings_block: "strings:" string_def+
     string_def: STRING_VAR "=" (STRING | array) string_modifiers?
-    string_modifiers: MODIFIER+
+    string_modifiers: (MODIFIER | pattern_check_modifier)+
+    pattern_check_modifier: "check" "(" STRING ")"
     MODIFIER.2: "nocase" | "fullword" | "base64" | "regex"
     // Named boolean sub-expressions, referenced by name in `condition:`. Pure authoring
     // sugar: the transformer inlines each reference before compilation (the DFA engine

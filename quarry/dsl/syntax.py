@@ -99,7 +99,7 @@ _CATEGORY_SPELLINGS: dict[TokenCategory, tuple[str, ...]] = {
         "#",
         "*",
     ),
-    "modifier": ("nocase", "fullword", "base64", "regex"),
+    "modifier": ("nocase", "fullword", "base64", "regex", "check"),
     "punctuation": ("(", ")", "[", "]", "{", "}", ".", ",", ":", "$", "//"),
     "literal": ("true", "false", "null"),
 }

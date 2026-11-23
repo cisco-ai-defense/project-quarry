@@ -18,6 +18,7 @@
 
 from quarry._version import __version__
 from quarry.core.conversation import Conversation
+from quarry.engine.pattern_checks import PatternCheck, PatternCheckError
 from quarry.inputs import InputAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.read_tokens import TextTokenBasis
@@ -77,6 +78,8 @@ __all__ = [
     "WindowObservationLimits",
     "observe_model_windows",
     "QuarryError",
+    "PatternCheck",
+    "PatternCheckError",
     "QuarryGuard",
     "AssistantMessage",
     "AudioPart",

@@ -33,3 +33,11 @@ class StringModifiers:
     fullword: bool = False
     base64: bool = False
     regex: bool = False
+    checks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PatternCheckModifier:
+    """A literal trusted-host capability name, never a Python module reference."""
+
+    name: str

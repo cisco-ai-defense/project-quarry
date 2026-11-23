@@ -25,6 +25,7 @@ from typing import Annotated, cast
 from lark import Transformer, v_args
 
 from quarry.cache.constants import MAX_CONTAINS_ANY_SIZE, MAX_STRING_ARRAY_SIZE
+from quarry.engine.pattern_checks import check_name, check_names
 from quarry.language.metadata import DSLParameter, dsl_compiler_form, dsl_construct
 from quarry.language.runtime import reserved_variable_names
 from quarry.types.dsl import (
@@ -54,6 +55,7 @@ from quarry.types.dsl import (
     condition_child_fields,
     walk_condition_nodes,
 )
+from quarry.types.dsl.string_ops import PatternCheckModifier
 from quarry.types.parameters import ParameterSpec, ParameterType
 from quarry.types.rules import DSLRule, ImportGroup
 
@@ -1278,17 +1280,31 @@ class DSLTransformer(Transformer):
         """Refer to a pattern declared in the ``strings:`` block by its ``$name``."""
         return Identifier(str(var_name))
 
+    @dsl_construct(name="pattern-check-modifier")
+    def pattern_check_modifier(self, name):
+        """Keep only matches accepted by an explicitly registered trusted host predicate.
+
+        Write ``check("name")`` after a pattern. It never imports or serializes Python.
+        Checks receive the matched source substring and must return a strict Boolean.
+        """
+        return PatternCheckModifier(check_name(self._decode_string_token(str(name))))
+
     @dsl_construct(name="string-modifiers")
     def string_modifiers(self, *modifiers):
-        """Change a declared pattern with ``nocase``, ``fullword``, ``base64``, or ``regex``.
+        """Change a pattern with ``nocase``, ``fullword``, ``base64``, ``regex``, or ``check``.
 
         ``nocase`` matches the pattern regardless of letter case. Text matching is otherwise
         case-sensitive, so ``nocase`` is the mechanism for case-insensitive `contains` and
         `contains_any` checks. Modifiers apply to a single pattern or an array of patterns,
         and to every use of the pattern, including ``#name`` counts and ``@name`` positions.
+        ``fullword`` literal boundaries use Unicode alphanumerics and underscore.
+        ``check("name")`` applies a bounded explicit host predicate to matched source text.
         """
         mods = StringModifiers()
         for mod in modifiers:
+            if isinstance(mod, PatternCheckModifier):
+                mods.checks = check_names((*mods.checks, mod.name))
+                continue
             mod_str = str(mod)
             if mod_str == "nocase":
                 mods.nocase = True

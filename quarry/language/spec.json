@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-30",
+  "compiler_version": "compiler-31",
   "examples": [
     {
       "checks": [],
@@ -56,6 +56,24 @@
       "id": "example:case-insensitive-match",
       "requires_backend": false,
       "rule_path": "examples/case-insensitive-match.rule"
+    },
+    {
+      "checks": [
+        {
+          "expected_match": true,
+          "input_path": "examples/checked-pattern.matching.json"
+        },
+        {
+          "expected_match": false,
+          "input_path": "examples/checked-pattern.non_matching.json"
+        }
+      ],
+      "covered_item_ids": [
+        "construct:pattern-check-modifier"
+      ],
+      "id": "example:checked-pattern",
+      "requires_backend": true,
+      "rule_path": "examples/checked-pattern.rule"
     },
     {
       "checks": [],
@@ -1929,6 +1947,16 @@
       "syntax": "pattern_block: \"{\" pattern_expr (\"or\" pattern_expr)* \"}\""
     },
     {
+      "description": "Keep only matches accepted by an explicitly registered trusted host predicate.\n\nWrite `check(\"name\")` after a pattern. It never imports or serializes Python.\nChecks receive the matched source substring and must return a strict Boolean.",
+      "handler": "pattern_check_modifier",
+      "id": "construct:pattern-check-modifier",
+      "kind": "construct",
+      "name": "pattern-check-modifier",
+      "source": "quarry.dsl.transformer.DSLTransformer.pattern_check_modifier",
+      "summary": "Keep only matches accepted by an explicitly registered trusted host predicate.",
+      "syntax": "pattern_check_modifier: \"check\" \"(\" STRING \")\""
+    },
+    {
       "description": "Test one value against a block containing alternative field predicates.",
       "handler": "matches_op",
       "id": "construct:pattern-match",
@@ -2029,14 +2057,14 @@
       "syntax": "string_count: \"#\" IDENTIFIER WILDCARD?"
     },
     {
-      "description": "Change a declared pattern with `nocase`, `fullword`, `base64`, or `regex`.\n\n`nocase` matches the pattern regardless of letter case. Text matching is otherwise\ncase-sensitive, so `nocase` is the mechanism for case-insensitive `contains` and\n`contains_any` checks. Modifiers apply to a single pattern or an array of patterns,\nand to every use of the pattern, including `#name` counts and `@name` positions.",
+      "description": "Change a pattern with `nocase`, `fullword`, `base64`, `regex`, or `check`.\n\n`nocase` matches the pattern regardless of letter case. Text matching is otherwise\ncase-sensitive, so `nocase` is the mechanism for case-insensitive `contains` and\n`contains_any` checks. Modifiers apply to a single pattern or an array of patterns,\nand to every use of the pattern, including `#name` counts and `@name` positions.\n`fullword` literal boundaries use Unicode alphanumerics and underscore.\n`check(\"name\")` applies a bounded explicit host predicate to matched source text.",
       "handler": "string_modifiers",
       "id": "construct:string-modifiers",
       "kind": "construct",
       "name": "string-modifiers",
       "source": "quarry.dsl.transformer.DSLTransformer.string_modifiers",
-      "summary": "Change a declared pattern with `nocase`, `fullword`, `base64`, or `regex`.",
-      "syntax": "string_modifiers: MODIFIER+"
+      "summary": "Change a pattern with `nocase`, `fullword`, `base64`, `regex`, or `check`.",
+      "syntax": "string_modifiers: (MODIFIER | pattern_check_modifier)+"
     },
     {
       "description": "Return the position of a declared string pattern in the inspected text.\n\nWrite `@name` for a pattern declared as `$name`. Add `*` to include every\ndeclared pattern whose name starts with the supplied prefix. The pattern's modifiers\napply. Positions of patterns with different modifiers cannot be compared; such a rule\nfails to load.",
@@ -3592,6 +3620,15 @@
       "source": "quarry.dsl.syntax.TOKEN_RECORDS",
       "spelling": "before",
       "summary": "Quarry flow word `before`."
+    },
+    {
+      "category": "modifier",
+      "id": "token:check",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "check",
+      "summary": "Quarry modifier `check`."
     },
     {
       "category": "block_keyword",
