@@ -94,6 +94,11 @@ def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
 
         def timeout(self, seconds):
             owner = timer.current_evaluation_deadline()
+            if owner is None:
+                # A cache-owned provider attempt clears the starter's rule
+                # context while retaining the supplied finite timeout budget.
+                assert self.kind == "provider" and len(armed) == 1
+                owner = armed[0][3]
             assert owner is not None and seconds == owner.expires_at - now
             # Arm a real timer only after admission, so scheduler delay before
             # provider dispatch cannot invalidate the reached-provider assertion.
