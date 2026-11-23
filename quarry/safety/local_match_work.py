@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from time import thread_time_ns
 from typing import Any, TypeVar
 
+from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.exceptions import EvaluationError
 
 _MAX = (1 << 63) - 1
@@ -170,15 +171,27 @@ class LocalMatchWorkSession:
 
     def snapshot(self) -> dict[str, Any]:
         """One bounded result view, finalized when deferred value ownership closes."""
+        if self._pid != os.getpid():
+            return self.report()
         if self._snapshot is None:
             self._snapshot = self.report()
         return self._snapshot
 
     def report(self) -> dict[str, Any]:
         if self._pid != os.getpid():
-            return {"state": "owner_unavailable", "complete": False, "groups": []}
+            return {
+                "version": 1,
+                "state": "owner_unavailable",
+                "complete": False,
+                "scope": "conversation",
+                "conversations": 1,
+                "groups": [],
+            }
         groups = [owner.report() for owner in self._owners]
         return {
+            "version": 1,
+            "scope": "conversation",
+            "conversations": 1,
             "state": "collected",
             "complete": self._closed and all(row["complete"] for row in groups),
             "groups": groups,
@@ -232,6 +245,7 @@ class LocalMatchWorkOwner:
         Original exceptions (including timeout/cancellation) keep their precedence.
         """
         self._check_process()
+        raise_if_evaluation_expired()
         if type(phase) is not str or phase not in _PHASES:
             raise ValueError("unknown local work phase")
         identity = (self, threading.get_ident())
@@ -247,6 +261,7 @@ class LocalMatchWorkOwner:
             if self._group.mode == "enforce" and (
                 self._used >= self._group.allowance_cpu_ns or self._unmetered
             ):
+                self._saturated |= self._denied >= _MAX
                 self._denied = min(_MAX, self._denied + 1)
                 if self._cut_phase is None:
                     self._cut_phase = phase
@@ -264,12 +279,14 @@ class LocalMatchWorkOwner:
             measured = start is not None and finish is not None and finish >= start
             with self._lock:
                 self._active -= 1
+                self._saturated |= self._segments >= _MAX
                 self._segments = min(_MAX, self._segments + 1)
                 if measured:
                     total = self._used + (finish - start)
                     self._saturated |= total > _MAX
                     self._used = min(_MAX, total)
                 else:
+                    self._saturated |= self._unmetered >= _MAX
                     self._unmetered = min(_MAX, self._unmetered + 1)
                 exhausted = (
                     self._used > self._group.allowance_cpu_ns
@@ -279,6 +296,8 @@ class LocalMatchWorkOwner:
                 if exhausted and self._cut_phase is None:
                     self._cut_phase = phase
                 closed = self._closed
+            if not failed:
+                raise_if_evaluation_expired()
             if not failed and (closed or self._group.mode == "enforce" and exhausted):
                 raise self._error("local_work_owner_unavailable" if closed else "local_work_limit")
         return result
@@ -286,6 +305,7 @@ class LocalMatchWorkOwner:
     def ensure_authoritative(self) -> None:
         """A caught denial cannot turn into a negative result or reusable value."""
         self._check_process()
+        raise_if_evaluation_expired()
         with self._lock:
             if self._closed:
                 raise self._error("local_work_owner_unavailable")
@@ -326,6 +346,10 @@ class LocalMatchWorkOwner:
                 "label": self._group.label,
                 "mode": self._group.mode,
                 "allowance_cpu_ns": self._group.allowance_cpu_ns,
+                "conversations": 1,
+                "exhausted_conversations": int(
+                    self._used >= self._group.allowance_cpu_ns or bool(self._unmetered)
+                ),
                 "state": "unmetered" if self._unmetered else "measured",
                 "known_cpu_ns": self._used,
                 "value_cpu_ns": self._used if complete else None,

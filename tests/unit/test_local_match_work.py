@@ -7,11 +7,45 @@ import asyncio
 import contextvars
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 import re2
 
 from quarry.safety import local_match_work as work
+from quarry.safety import timer
+
+
+@pytest.mark.parametrize("point", ["before_work", "after_native_return", "authority"])
+def test_expired_evaluation_deadline_keeps_priority_over_local_work_cut(monkeypatch, point):
+    now = 1024.0
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
+    measured = owner(allowance=1)
+    clock(monkeypatch, 0, 10)
+    reached = []
+
+    def operation():
+        nonlocal now
+        reached.append(True)
+        now += 10
+        return True
+
+    with (
+        pytest.raises(timer.QuarryTimeoutError, match="selected rule"),
+        timer.evaluation_deadline(10, "selected rule"),
+    ):
+        if point == "before_work":
+            now += 10
+            measured.call("match", operation)
+        elif point == "authority":
+            now += 10
+            measured.ensure_authoritative()
+        else:
+            measured.call("match", operation)
+    measured.close()
+    report = measured.report()
+    assert report["segments"] == (1 if point == "after_native_return" else 0)
+    assert bool(reached) is (point == "after_native_return")
 
 
 def owner(*, allowance=100, mode="enforce"):

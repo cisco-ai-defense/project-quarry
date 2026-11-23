@@ -46,6 +46,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from quarry.engine.local_work import measured_local_work
 from quarry.language.runtime import surface_names
 from quarry.types.exceptions import InvalidInputError
 from quarry.types.messages import Message, ToolCall, ToolMessage
@@ -425,6 +426,7 @@ def build_static_environment(context: ScanContext) -> StaticEnvironment:
     )
 
 
+@measured_local_work("prepare")
 def build_evaluation_input(context: ScanContext) -> EvaluationInput:
     """Assemble the conversation and registered facts into one event word."""
     static = build_static_environment(context)

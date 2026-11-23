@@ -39,6 +39,7 @@ from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.read_results import collect_read_reports, transfer_result_scope
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
+from quarry.safety.local_work_reporting import aggregate_local_match_work
 from quarry.safety.timer import (
     EvaluationDeadline,
     QuarryTimeoutError,
@@ -645,6 +646,7 @@ class CompiledPolicy:
                 if result is not None
                 else empty_model_usage()
             ),
+            local_match_work=result.local_match_work if result is not None else None,
         )
 
     def _aggregate_timeout_result(
@@ -670,6 +672,9 @@ class CompiledPolicy:
             timed_out_rules=[self._rule_name],
             rule_timings=averaged_timings or None,
             model_usage=merge_model_usage([result.model_usage for result in observed]),
+            local_match_work=aggregate_local_match_work(
+                result.local_match_work for result in observed
+            ),
         )
 
     def _attach_provenance(

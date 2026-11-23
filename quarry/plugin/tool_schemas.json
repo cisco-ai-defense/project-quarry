@@ -1401,6 +1401,224 @@
         "title": "FailureRecord",
         "type": "object"
       },
+      "LocalMatchWorkGroupReport": {
+        "additionalProperties": true,
+        "description": "Native CPU segments only; allowance and overshoot are per conversation.",
+        "properties": {
+          "active_segments": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Active Segments",
+            "type": "integer"
+          },
+          "allowance_cpu_ns": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Allowance Cpu Ns",
+            "type": "integer"
+          },
+          "closed": {
+            "title": "Closed",
+            "type": "boolean"
+          },
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "conversations": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "counter_saturated": {
+            "title": "Counter Saturated",
+            "type": "boolean"
+          },
+          "cut_phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prepare",
+                  "match",
+                  "iterate"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cut Phase"
+          },
+          "denied_segments": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Denied Segments",
+            "type": "integer"
+          },
+          "exhausted": {
+            "title": "Exhausted",
+            "type": "boolean"
+          },
+          "exhausted_conversations": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Exhausted Conversations",
+            "type": "integer"
+          },
+          "known_cpu_ns": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Known Cpu Ns",
+            "type": "integer"
+          },
+          "known_overshoot_cpu_ns": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Known Overshoot Cpu Ns",
+            "type": "integer"
+          },
+          "label": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "shadow",
+              "enforce"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "overshoot_cpu_ns": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775807,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overshoot Cpu Ns"
+          },
+          "segments": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Segments",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "measured",
+              "unmetered"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unmetered_segments": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Unmetered Segments",
+            "type": "integer"
+          },
+          "value_cpu_ns": {
+            "anyOf": [
+              {
+                "maximum": 9223372036854775807,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Cpu Ns"
+          }
+        },
+        "required": [
+          "label",
+          "mode",
+          "allowance_cpu_ns",
+          "conversations",
+          "exhausted_conversations",
+          "state",
+          "known_cpu_ns",
+          "value_cpu_ns",
+          "known_overshoot_cpu_ns",
+          "overshoot_cpu_ns",
+          "exhausted",
+          "segments",
+          "denied_segments",
+          "active_segments",
+          "unmetered_segments",
+          "counter_saturated",
+          "cut_phase",
+          "closed",
+          "complete"
+        ],
+        "title": "LocalMatchWorkGroupReport",
+        "type": "object"
+      },
+      "LocalMatchWorkReport": {
+        "additionalProperties": true,
+        "description": "Bounded local work evidence; completion is distinct from scan completion.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "conversations": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/$defs/LocalMatchWorkGroupReport"
+            },
+            "maxItems": 64,
+            "title": "Groups",
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "conversation",
+              "batch"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "collected",
+              "owner_unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "version": {
+            "const": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "state",
+          "scope",
+          "conversations",
+          "complete",
+          "groups"
+        ],
+        "title": "LocalMatchWorkReport",
+        "type": "object"
+      },
       "MatchRecord": {
         "additionalProperties": true,
         "description": "One authoritative rule match.",
@@ -1761,6 +1979,9 @@
             },
             "title": "Failures",
             "type": "array"
+          },
+          "local_match_work": {
+            "$ref": "#/$defs/LocalMatchWorkReport"
           },
           "matched": {
             "title": "Matched",
@@ -2394,6 +2615,9 @@
       "language_version": {
         "title": "Language Version",
         "type": "string"
+      },
+      "local_match_work": {
+        "$ref": "#/$defs/LocalMatchWorkReport"
       },
       "matched": {
         "title": "Matched",

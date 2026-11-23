@@ -234,6 +234,14 @@ not change provider requests, model-result cache keys, or compiled-policy model 
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
 
+## Local matching work allowances
+
+The optional `local_match_work` block selects bounded, nonoverlapping rule groups
+with finite native thread-CPU allowances. `shadow` preserves outcomes; `enforce`
+leaves an exhausted rule incomplete. Absent configuration preserves the default
+response shape. See [local matching work](local-match-work.md) for configuration,
+native-operation overshoot, measurement ownership and SDK/CLI/MCP reports.
+
 ## Process result cache
 
 Long-lived plugin servers can bound the process-wide cache of completed model, regex, and prober

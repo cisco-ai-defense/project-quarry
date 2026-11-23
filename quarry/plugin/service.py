@@ -64,6 +64,7 @@ from quarry.plugin.visualization import (
 from quarry.policy import _validated_sample, bind_prepared_policy
 from quarry.prepared import PreparedRuleCache
 from quarry.safety.limits import json_size
+from quarry.safety.local_work_reporting import aggregate_local_match_work
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import (
     Complexity,
@@ -780,6 +781,9 @@ class QuarryPlugin:
 
         provenance = results[0]
         aggregate_usage = merge_model_usage([result.model_usage for result in results])
+        work_report = aggregate_local_match_work(result.local_match_work for result in results)
+        if work_report is not None:
+            response["local_match_work"] = work_report
         response.update(
             {
                 "policy_digest": policy.policy_digest,
@@ -885,6 +889,8 @@ class QuarryPlugin:
             payload["logical_reads"] = result.logical_reads
         if result.window_observations is not None:
             payload["window_observations"] = result.window_observations
+        if result.local_match_work is not None:
+            payload["local_match_work"] = result.local_match_work
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,
