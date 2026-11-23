@@ -1528,21 +1528,22 @@ async def test_a_server_keeps_no_model_output_quarry_rejected(tmp_path, monkeypa
     assert adapter.calls == 2
 
 
-class _FirstCallFailsScoreAdapter:
-    """Time out the first score request once released, as its scan's deadline would, and
-    score every later one high."""
+class _FirstCallExpiresScoreAdapter:
+    """Expire the first request's actual native timer after provider admission."""
 
     def __init__(self) -> None:
         self.calls = 0
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.expire_first = None
 
     async def score(self, _config, _messages, *, timeout=None):
         self.calls += 1
         if self.calls == 1:
             self.started.set()
-            await self.release.wait()
-            raise TimeoutError("the first scan's deadline passed")
+            assert self.expire_first is not None
+            self.expire_first()
+            await asyncio.Future()
         return 0.9
 
 
@@ -1557,7 +1558,10 @@ async def test_a_scan_retries_a_shared_call_another_scan_started(tmp_path, monke
     """Without model-call limits, a scan that joined another scan's call and sees it fail
     for that scan's deadline asks the model once more under its own, through either call
     form."""
-    adapter = _FirstCallFailsScoreAdapter()
+    from quarry.async_runtime import call_host
+    from quarry.integrations import model_usage as usage_module
+
+    adapter = _FirstCallExpiresScoreAdapter()
     plugin = _plugin(
         tmp_path,
         monkeypatch,
@@ -1566,20 +1570,75 @@ async def test_a_scan_retries_a_shared_call_another_scan_started(tmp_path, monke
         enforce_limits=False,
     )
     rule = _rule(condition)
+    request_started = asyncio.Event()
+    both_joined = asyncio.Event()
+    host_loop = asyncio.get_running_loop()
+    first_pending_id = None
+    armed = []
+    runs = 0
+    original_run = usage_module.ModelUsage.run
+    cache_type = type(model_inference.result_cache)
+    original_wait = cache_type._wait
+
+    async def shared_wait(pending):
+        nonlocal first_pending_id
+        if first_pending_id is None:
+            first_pending_id = id(pending)
+        if id(pending) == first_pending_id and pending.waiters >= 2:
+            host_loop.call_soon_threadsafe(both_joined.set)
+        return await original_wait(pending)
+
+    async def await_release():
+        request_started.set()
+        await adapter.release.wait()
+
+    async def first_request_deadline(self, *args, **kwargs):
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            # Gate on the submitting host loop until both scans share the request.
+            await call_host(await_release)
+            assert kwargs["timeout"] >= 10.0
+            kwargs["timeout"] = 10.0
+        return await original_run(self, *args, **kwargs)
+
+    class RequestTimers:
+        def timeout(self, seconds):
+            native = asyncio.timeout(seconds)
+            armed.append((asyncio.get_running_loop(), native))
+            return native
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    def expire_first():
+        assert len(armed) == 1
+        loop, native = armed[0]
+        assert native.when() is not None
+        loop.call_soon_threadsafe(native.reschedule, loop.time())
+
+    adapter.expire_first = expire_first
+    monkeypatch.setattr(usage_module.ModelUsage, "run", first_request_deadline)
+    monkeypatch.setattr(usage_module, "asyncio", RequestTimers())
+    monkeypatch.setattr(cache_type, "_wait", staticmethod(shared_wait))
 
     def scan() -> asyncio.Task[dict[str, Any]]:
         return asyncio.create_task(plugin.scan(rule_text=rule, conversation=CLEAN_CONVERSATION))
 
     first = scan()
-    await adapter.started.wait()
+    await request_started.wait()
     second = scan()
-    await asyncio.sleep(0.2)
+
+    await asyncio.wait_for(both_joined.wait(), 5)
     adapter.release.set()
     results = await asyncio.gather(first, second)
 
     assert [result["completion_state"] for result in results] == ["incomplete", "complete"]
     assert adapter.calls == 2
     assert [result["model_usage"]["calls"] for result in results] == [1, 1]
+    assert adapter.started.is_set() and len(armed) == 2
+    assert armed[0][1].expired() and not armed[1][1].expired()
+    assert runs == 2
 
 
 async def test_compatibility_model_calls_share_the_servers_results(tmp_path, monkeypatch):
