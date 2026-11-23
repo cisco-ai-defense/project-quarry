@@ -498,7 +498,7 @@ class _Renderer:
                     }
                     self.body(node.body, child)
                 if not selected:
-                    self.body(node.else_, context)
+                    self.body(node.else_, dict(context))
             else:
                 _unsupported()
 
