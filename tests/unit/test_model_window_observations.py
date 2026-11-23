@@ -542,3 +542,53 @@ async def test_mutating_host_storage_never_publishes_a_vector_conflicting_with_s
     assert row["state"] == "partial" and row["probabilities"] == [None] * 3
     assert row["probability_states"] == ["conflicting_probability_vector"] * 3
     assert accesses == [1] * 3 and len(adapter.requests) == 1
+
+
+@pytest.mark.parametrize("unit", ["characters", "tokens"])
+@pytest.mark.parametrize("failed_first", [False, True])
+@pytest.mark.parametrize("failure", ["failed", "cancelled"])
+async def test_same_cut_and_reply_keep_distinct_read_outcomes(
+    tmp_path, unit, failed_first, failure
+):
+    class Adapter(MappedAdapter):
+        async def decode_window_spans(self, config, raw, source, windows, threshold, **kwargs):
+            if threshold == 0.9:
+                if failure == "cancelled":
+                    raise asyncio.CancelledError
+                raise LLMError("synthetic decoder failure", {"code": "invalid_output"})
+            return await super().decode_window_spans(
+                config, raw, source, windows, threshold, **kwargs
+            )
+
+    adapter = Adapter()
+    service = backend(
+        tmp_path,
+        {
+            "segments": {
+                **model_entry(spans=0, category="SYNTHETIC"),
+                "windows": {"unit": unit, "size": 3, "step": 2, "scope": "last_turn"},
+            }
+        },
+        adapter,
+    )
+    messages = Messages.from_openai(DATA["messages"])
+    result_cache.clear()
+    with observe_model_windows() as observations, scan_scope(), read_usage_scope("R"):
+        for threshold in (0.9, 0.5) if failed_first else (0.5, 0.9):
+            if threshold == 0.9:
+                with pytest.raises(asyncio.CancelledError if failure == "cancelled" else LLMError):
+                    await service.model_span_messages("segments", messages, threshold)
+            else:
+                spans = await service.model_span_messages("segments", messages, threshold)
+                assert len(spans.items) == 3
+    report = observations.report()
+    Draft202012Validator(window_observation_report_schema()).validate(report)
+    assert report["omitted"] == 0 and len(report["rows"]) == 2
+    rows = {row["outcome"]: row for row in report["rows"]}
+    assert set(rows) == {"succeeded", failure}
+    assert all(row["reads"] == 1 for row in rows.values())
+    assert rows["succeeded"]["state"] == "measured"
+    assert rows["succeeded"]["probabilities"] is not None
+    assert rows[failure]["state"] == failure
+    assert rows[failure]["probabilities"] is None
+    assert len(adapter.requests) == (2 if failed_first and failure == "failed" else 1)
