@@ -7,6 +7,7 @@ import asyncio
 import itertools
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +107,21 @@ def test_unselected_rules_and_distinct_scans_keep_their_own_work(deterministic_c
         assert set(result.evaluation_errors) == {"Selected"}
         assert result.local_match_work["groups"][0]["value_cpu_ns"] == 10
     assert first.local_match_work is not second.local_match_work
+
+
+def test_caught_work_denial_cannot_become_a_completed_nonmatch(monkeypatch, deterministic_cpu):
+    async def returns_fallback(*args, **kwargs):
+        try:
+            current_local_work().call("match", lambda: False)
+        except work.LocalMatchWorkError:
+            return SimpleNamespace(matched=False, output=None, refine=None, explore=None)
+        raise AssertionError("synthetic engine failed to reach its budget cut")
+
+    monkeypatch.setattr(scanner_module, "evaluate_async", returns_fallback)
+    runtime = config(mode="enforce", allowance=25, texts=('rule "Selected" condition: true',))
+    result = DSLScanner(runtime).scan_data(DATA)
+    assert not result.is_complete, "caught work denial became a completed nonmatch"
+    assert result.evaluation_error_categories == {"Selected": "evaluation_limit"}
 
 
 def test_default_nested_scan_clears_and_restores_the_outer_allowance(deterministic_cpu):
