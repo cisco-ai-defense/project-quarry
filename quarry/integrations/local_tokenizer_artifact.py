@@ -398,19 +398,7 @@ class _LoadedTokenizer:
     def encode(
         self, text: object, config: LocalTokenizerConfig, job: _Job
     ) -> LocalTokenizerEncoding:
-        job.checkpoint()
-        if type(text) is not str:
-            raise LocalTokenizerInvalidInputError("Local tokenizer text must be a native string")
-        if len(text) > config.limits.max_input_characters:
-            _limit()
-        try:
-            size = len(text.encode("utf-8"))
-        except UnicodeError:
-            raise LocalTokenizerInvalidInputError(
-                "Local tokenizer text has invalid Unicode"
-            ) from None
-        if size > config.limits.max_input_bytes:
-            _limit()
+        text = validate_local_text(text, config, job)
         self.bounds.admit(text, job)
         job.checkpoint()
         try:
@@ -436,6 +424,22 @@ class _LoadedTokenizer:
             tuple(bool(mask) for mask in masks),
             len(text),
         )
+
+
+def validate_local_text(text: object, config: LocalTokenizerConfig, job: _Job) -> str:
+    """Reject raw invalid input before optional imports or artifact I/O are needed."""
+    job.checkpoint()
+    if type(text) is not str:
+        raise LocalTokenizerInvalidInputError("Local tokenizer text must be a native string")
+    if len(text) > config.limits.max_input_characters:
+        _limit()
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeError:
+        raise LocalTokenizerInvalidInputError("Local tokenizer text has invalid Unicode") from None
+    if size > config.limits.max_input_bytes:
+        _limit()
+    return text
 
 
 def load_local_tokenizer(config: LocalTokenizerConfig, job: _Job) -> _LoadedTokenizer:

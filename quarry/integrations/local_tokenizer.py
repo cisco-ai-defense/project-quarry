@@ -11,7 +11,11 @@ from dataclasses import replace
 from math import isfinite
 from typing import TYPE_CHECKING
 
-from quarry.integrations.local_tokenizer_artifact import _LoadedTokenizer, load_local_tokenizer
+from quarry.integrations.local_tokenizer_artifact import (
+    _LoadedTokenizer,
+    load_local_tokenizer,
+    validate_local_text,
+)
 from quarry.integrations.local_tokenizer_input import snapshot_request
 from quarry.integrations.local_tokenizer_template import render_local_request
 from quarry.integrations.local_tokenizer_worker import _Job, _LocalWorkerOwner
@@ -89,7 +93,8 @@ class LocalTokenizerAdapter:
         config, seconds = self._config(config, timeout)
 
         def encode(job: _Job):
-            return self._loaded(config, job).encode(text, config, job)
+            validated = validate_local_text(text, config, job)
+            return self._loaded(config, job).encode(validated, config, job)
 
         return await self._owner.run(encode, timeout=seconds)
 

@@ -217,6 +217,33 @@ async def test_huge_integer_timeout_is_clipped_without_float_overflow(tmp_path):
         adapter.close()
 
 
+@pytest.mark.parametrize(
+    "text,limits,kind",
+    [
+        (object(), LocalTokenizerLimits(), LocalTokenizerInvalidInputError),
+        ("\ud800", LocalTokenizerLimits(), LocalTokenizerInvalidInputError),
+        ("hello", LocalTokenizerLimits(max_input_characters=4), LocalTokenizerLimitError),
+        ("ééé", LocalTokenizerLimits(max_input_bytes=4), LocalTokenizerLimitError),
+    ],
+)
+async def test_raw_input_rejection_precedes_artifact_loading(
+    tmp_path, monkeypatch, text, limits, kind
+):
+    cfg = replace(artifact(tmp_path), limits=limits)
+    (tmp_path / "synthetic-tokenizer.json").unlink()
+
+    def forbidden(*args):
+        pytest.fail("invalid raw text loaded an artifact")
+
+    monkeypatch.setattr(local, "load_local_tokenizer", forbidden)
+    adapter = local.LocalTokenizerAdapter()
+    try:
+        with pytest.raises(kind):
+            await adapter.encode_text(cfg, text)
+    finally:
+        adapter.close()
+
+
 async def test_no_template_and_unsupported_media_cannot_fall_back_to_partial_counts(
     tmp_path, monkeypatch
 ):
