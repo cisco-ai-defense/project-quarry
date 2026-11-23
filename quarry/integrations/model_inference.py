@@ -4381,6 +4381,7 @@ class ModelInferenceBackend:
         adapter = self.adapters[tokens.adapter]
         if type(adapter) is not LocalTokenizerAdapter or tokens.local is None:
             raise LocalTokenizerInvalidOutputError("Capped token count requires its native adapter")
+        local_config = tokens.local
         expected = adapter.capped_fingerprint(model, alias=model_id, cap=cap)
 
         def payload():
@@ -4399,7 +4400,7 @@ class ModelInferenceBackend:
             # Only a fully validated native request can produce this response.
             # In particular, computing framing before dispatch would mask the
             # canonical invalid-input failure for an oversized message list.
-            maximum = tokens.local.limits.max_tokens + tokens.local.framing.total(len(messages))
+            maximum = local_config.limits.max_tokens + local_config.framing.total(len(messages))
             if (
                 checked.cap != cap
                 or checked.lower_bound > maximum
