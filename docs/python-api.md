@@ -88,6 +88,10 @@ Adapter execution and limiter cleanup also consume the logical budget. A success
 that finishes after the deadline is rejected before cache admission, while its physical attempt
 remains counted.
 
+Whole-message rewrites preserve the active rule or scan deadline as the owner of
+their evaluation timer. Expiry raises `QuarryTimeoutError`; an adapter's independent
+timeout remains a transform error while the evaluation timer is still active.
+
 When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
 `error.result`) carries the safe partial timing and model-usage snapshot recorded before the
 exception escaped. File and batch wrappers retain that telemetry in their returned incomplete

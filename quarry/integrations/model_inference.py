@@ -122,6 +122,7 @@ from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import (
     QuarryTimeoutError,
     clamp_to_evaluation_deadline,
+    current_evaluation_deadline,
     raise_if_evaluation_expired,
 )
 from quarry.telemetry import ModelOperation, public_model_operation
@@ -2378,8 +2379,10 @@ class ModelInferenceBackend:
         if not positions:
             return messages
         await require_readable_media(messages, rewritable_only=True)
+        deadline = current_evaluation_deadline()
+        operation_timeout = asyncio.timeout(clamp_to_evaluation_deadline(None))
         try:
-            async with asyncio.timeout(clamp_to_evaluation_deadline(None)):
+            async with operation_timeout:
                 raw = await _invoke_transform_adapter(
                     name,
                     lambda: adapter.transform_messages(
@@ -2395,6 +2398,10 @@ class ModelInferenceBackend:
         except DecodeLimitError as exc:
             raise transform_error(name, "decode_limit", "decoder limit reached") from exc
         except TimeoutError as exc:
+            # An asyncio timer may fire before a coarse monotonic clock reaches
+            # the same deadline. Its expired state still identifies its owner.
+            if operation_timeout.expired() and deadline is not None:
+                raise QuarryTimeoutError(deadline.error_message) from exc
             raise_if_evaluation_expired()
             raise transform_error(name, "timeout", "message adapter timed out") from exc
         except LLMError as exc:
