@@ -195,6 +195,7 @@ class LocalMatchWorkOwner:
         self._lock = threading.Lock()
         self._used = 0
         self._segments = 0
+        self._denied = 0
         self._active = 0
         self._unmetered = 0
         self._saturated = False
@@ -234,7 +235,9 @@ class LocalMatchWorkOwner:
             if self._group.mode == "enforce" and (
                 self._used >= self._group.allowance_cpu_ns or self._unmetered
             ):
-                self._cut_phase = phase
+                self._denied = min(_MAX, self._denied + 1)
+                if self._cut_phase is None:
+                    self._cut_phase = phase
                 raise self._error("local_work_limit")
             self._active += 1
         token = _ACTIVE.set(identity)
@@ -256,13 +259,28 @@ class LocalMatchWorkOwner:
                     self._used = min(_MAX, total)
                 else:
                     self._unmetered = min(_MAX, self._unmetered + 1)
-                exhausted = self._used > self._group.allowance_cpu_ns or self._unmetered > 0
+                exhausted = (
+                    self._used > self._group.allowance_cpu_ns
+                    or self._unmetered > 0
+                    or self._denied > 0
+                )
                 if exhausted and self._cut_phase is None:
                     self._cut_phase = phase
                 closed = self._closed
             if not failed and (closed or self._group.mode == "enforce" and exhausted):
                 raise self._error("local_work_owner_unavailable" if closed else "local_work_limit")
         return result
+
+    def ensure_authoritative(self) -> None:
+        """A caught denial cannot turn into a negative result or reusable value."""
+        self._check_process()
+        with self._lock:
+            if self._closed:
+                raise self._error("local_work_owner_unavailable")
+            if self._group.mode == "enforce" and (
+                self._used > self._group.allowance_cpu_ns or self._unmetered or self._denied
+            ):
+                raise self._error("local_work_limit")
 
     def iterate(self, iterator: Iterator[_T]) -> Iterator[_T]:
         """Charge each actual iterator step, preserving laziness and owned work."""
@@ -305,6 +323,7 @@ class LocalMatchWorkOwner:
                 else None,
                 "exhausted": self._used >= self._group.allowance_cpu_ns or bool(self._unmetered),
                 "segments": self._segments,
+                "denied_segments": self._denied,
                 "active_segments": self._active,
                 "unmetered_segments": self._unmetered,
                 "counter_saturated": self._saturated,

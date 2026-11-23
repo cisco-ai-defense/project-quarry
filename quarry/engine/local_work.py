@@ -29,12 +29,22 @@ class LocalWorkObserver(Protocol):
         """Account for actual lazy steps, rather than generator construction alone."""
         ...
 
+    def ensure_authoritative(self) -> None:
+        """Reject caught work denials before a value becomes authoritative or cached."""
+        ...
+
 
 _CURRENT: ContextVar[LocalWorkObserver | None] = ContextVar("quarry_local_match_work", default=None)
 
 
 def current_local_work() -> LocalWorkObserver | None:
     return _CURRENT.get()
+
+
+def ensure_local_work_authoritative() -> None:
+    observer = _CURRENT.get()
+    if observer is not None:
+        observer.ensure_authoritative()
 
 
 @contextmanager

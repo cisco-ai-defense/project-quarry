@@ -34,6 +34,7 @@ from quarry.cache.async_cache import _SAFE_SHALLOW_TYPES, _shallow_bytes
 from quarry.cache.constants import RESULT_CACHE_MAX_BYTES
 from quarry.engine.contracts import AtomEvaluation, ExecutionAttempt, ScanRecord, WitnessTrace
 from quarry.engine.events import ConversationEvent, EvaluationInput, StaticEnvironment
+from quarry.engine.local_work import ensure_local_work_authoritative
 from quarry.engine.pacing import Pacer
 from quarry.engine.witness import ModelResultEvidence
 from quarry.input_registry import InputObject
@@ -239,6 +240,7 @@ class MessageValueMemo:
         scope: tuple = (),
     ) -> _Value:
         raise_if_evaluation_expired()
+        ensure_local_work_authoritative()
         entry = self._entries.get(key)
         if entry is None:
             if self.budget.entries >= MAX_MESSAGE_VALUES:
@@ -247,6 +249,7 @@ class MessageValueMemo:
             self.budget.entries += 1
         async with entry.lock:
             raise_if_evaluation_expired()
+            ensure_local_work_authoritative()
             if entry.value is not None:
                 if reads is not None:
                     reads.extend(entry.reads)
@@ -257,10 +260,17 @@ class MessageValueMemo:
             try:
                 with capture_read_usage() as logical_reads:
                     value = await compute()
+                    ensure_local_work_authoritative()
                     if not isinstance(value, Messages | MessageGroups):
                         raise TypeError("transformed message value must be Messages")
                     kept_reads = tuple(reads or ())
-                    entry.lease = await self.budget.retain((key, value, kept_reads))
+                    lease = await self.budget.retain((key, value, kept_reads))
+                    try:
+                        ensure_local_work_authoritative()
+                    except BaseException:
+                        lease.close()
+                        raise
+                    entry.lease = lease
                     entry.size = entry.lease.size
                     self._bytes += entry.size
                     entry.reads = kept_reads
