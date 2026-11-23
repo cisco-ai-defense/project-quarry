@@ -43,7 +43,6 @@ import yaml
 from quarry import __version__ as QUARRY_VERSION
 from quarry.cache.async_cache import result_cache
 from quarry.config import QuarryConfig
-from quarry.core.logging import get_app_logger
 from quarry.decision_report import (
     decision_scores,
     path_report,
@@ -52,7 +51,6 @@ from quarry.decision_report import (
     tree_report,
 )
 from quarry.engine.pattern_checks import PatternCheck, copy_pattern_checks
-from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.resources import ResourcePreparationError
 from quarry.language import get_language_spec
@@ -108,8 +106,6 @@ def _reportable_conversation(value: dict[str, Any], scanner: DSLScanner) -> dict
         return None
     return value
 
-
-_logger = get_app_logger()
 
 PLUGIN_VERSION = "0.3.0"
 MAX_REFERENCE_QUERY_CHARS = 4_096
@@ -375,25 +371,8 @@ class QuarryPlugin:
         self._model_adapters = (
             None if model_adapters is None else MappingProxyType(dict(model_adapters))
         )
-        if runtime_config is not None:
-            # Report at startup each configured model that cannot get credentials, so the host
-            # learns it before the first scan. Only a rule that uses that model fails to load,
-            # and the other tools keep working.
-            for model_id in sorted(runtime_config.models):
-                try:
-                    adapter_kwargs: dict[str, Any] = (
-                        {"adapters": self._model_adapters}
-                        if self._model_adapters is not None
-                        else {}
-                    )
-                    backend = ModelInferenceBackend(
-                        runtime_config,
-                        models_to_load=[model_id],
-                        **adapter_kwargs,
-                    )
-                    backend.require_credentials([model_id])
-                except ConfigurationError as exc:
-                    _logger.warning(f"{exc}. A rule that uses this model will fail to load.")
+        # Resolve backends and credentials only for aliases required by a rule.
+        # Unused configuration must not trigger credential discovery or provider setup.
         self._runtime_config = runtime_config
         # Use one unpredictable key for this server's tree IDs and policy evidence. A scan
         # must name the same tree returned by quarry_decision_tree for this server instance.

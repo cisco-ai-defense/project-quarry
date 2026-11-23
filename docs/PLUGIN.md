@@ -771,6 +771,11 @@ LiteLLM, which routes the request using the provider prefix and its normal provi
 Set `adapter` only for a specialized backend. If a rule names a missing model alias, compilation
 fails instead of choosing another model.
 
+Startup, reference tools, and local-only rule preparation leave unused model backends unloaded.
+Quarry checks credentials when preparing a rule that requires a model alias. A missing credential
+then produces a bounded configuration diagnostic and prevents that rule from running; unrelated
+local rules continue to work. Startup does not enumerate missing credentials for unused aliases.
+
 Model aliases, backend endpoints, named `text_ref` resources, safety limits, and credentials are
 server settings. Declared text parameters are tool inputs by design; they are bound into the ad hoc
 policy for that scan and represented only by a redacted marker in parameter evidence.

@@ -269,8 +269,19 @@ def match_contains_any(
     return any(match_contains(text, p, mods, regex=regex) for p in patterns)
 
 
+@measured_local_work("match")
+def _literal_word_boundary(text: str, start: int, stop: int) -> bool:
+    """Observe each candidate, including long runs of rejected overlapping literals."""
+
+    before = text[start - 1] if start else ""
+    after = text[stop] if stop < len(text) else ""
+    return not (before.isalnum() or before == "_" or after.isalnum() or after == "_")
+
+
 @measured_local_work("prepare", iterator=True)
-def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int, int]]:
+def _literal_spans(
+    text: str, pattern: str, nocase: bool, *, fullword: bool = False
+) -> Iterator[tuple[int, int]]:
     """Yield literal matches in source offsets, including Unicode case folding."""
 
     haystack, needle = (text.lower(), pattern.lower()) if nocase else (text, pattern)
@@ -287,11 +298,17 @@ def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int,
 
     while found != -1:
         finish = found + len(needle)
-        yield (
+        start, stop = (
             (point(found, end=False), point(finish, end=True))
             if len(haystack) != len(text)
             else (found, finish)
         )
+        if fullword and not _literal_word_boundary(text, start, stop):
+            # A rejected candidate consumes no match. Its overlap may be the
+            # first literal with valid boundaries ("--" in "x---").
+            found = haystack.find(needle, found + 1)
+            continue
+        yield start, stop
         found = haystack.find(needle, finish)
 
 
@@ -312,14 +329,9 @@ def accepted_match_spans(
     spans = (
         regex.iter_match_spans(effective, text, _regex_flags(mods))
         if use_regex
-        else _literal_spans(text, effective, mods.nocase)
+        else _literal_spans(text, effective, mods.nocase, fullword=boundary)
     )
     for start, stop in spans:
-        if boundary:
-            before = text[start - 1] if start else ""
-            after = text[stop] if stop < len(text) else ""
-            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
-                continue
         if mods.checks:
             matched = text[start:stop]
             if not all(regex.check_match(name, matched) for name in mods.checks):
