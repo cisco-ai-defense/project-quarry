@@ -109,7 +109,11 @@ from quarry.integrations.read_operations import (
     transform_model_read,
     transform_part_read,
 )
-from quarry.integrations.request_limits import is_owned_request_limit, owned_request_limit
+from quarry.integrations.request_limits import (
+    is_owned_request_limit,
+    owned_request_limit,
+    raise_if_owned_evaluation_expired,
+)
 from quarry.integrations.shared_transforms import (
     TRANSFORM_BATCH_SIZE,
     InvalidSharedTransform,
@@ -2749,7 +2753,7 @@ class ModelInferenceBackend:
                     # requests, rate-limit tickets or billable-model call counts.
                     try:
                         response = await invoke_unprepared(timeout)
-                        raise_if_evaluation_expired()
+                        raise_if_owned_evaluation_expired()
                     except LLMError as exc:
                         raise _attributed_failure(
                             exc.message, exc, model_id, private_model=rate_limit_model

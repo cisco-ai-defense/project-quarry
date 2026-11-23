@@ -15,7 +15,7 @@ from math import isfinite
 from time import monotonic
 from typing import Any
 
-from quarry.safety.timer import raise_if_evaluation_expired
+from quarry.integrations.request_limits import raise_if_owned_evaluation_expired
 from quarry.types.exceptions import (
     LocalTokenizerInvalidInputError,
     LocalTokenizerInvalidOutputError,
@@ -34,7 +34,7 @@ class _Expired(Exception):
 
 
 def _raise(code: str) -> None:
-    raise_if_evaluation_expired()
+    raise_if_owned_evaluation_expired()
     kind, message = {
         "input": (
             LocalTokenizerInvalidInputError,
@@ -156,7 +156,7 @@ class _LocalWorkerOwner:
         self._process()
         if type(timeout) not in (int, float) or not 0 < timeout <= 30 or not isfinite(timeout):
             _raise("input")
-        raise_if_evaluation_expired()
+        raise_if_owned_evaluation_expired()
         job = _Job(monotonic() + timeout)
         native = self._submit(function, job)
         observed = asyncio.wrap_future(native)
@@ -170,7 +170,7 @@ class _LocalWorkerOwner:
             del function, native, observed
         if outcome.error is not None:
             _raise(outcome.error)
-        raise_if_evaluation_expired()
+        raise_if_owned_evaluation_expired()
         if monotonic() >= job.deadline:
             _raise("limit")
         return outcome.value
