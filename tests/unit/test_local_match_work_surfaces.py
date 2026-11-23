@@ -22,6 +22,8 @@ from quarry.scanner import DSLScanner
 from tests.unit.test_local_match_work_scanner import DATA, RULE, config
 from tests.unit.test_local_match_work_scanner import deterministic_cpu as deterministic_cpu
 
+pytestmark = pytest.mark.usefixtures("deterministic_cpu")
+
 
 @pytest.mark.parametrize(
     "entry", ["scan_data", "scan_data_async", "scan_file", "scan_directory", "scan_batch_data"]
@@ -98,8 +100,14 @@ def test_actual_cli_configuration_reports_work_without_changing_disabled_shape(
         cfg.write_text(json.dumps(document), encoding="utf-8")
         argv = [
             sys.executable,
-            "-m",
-            "quarry.cli",
+            "-c",
+            # Run the actual CLI module in a fresh process with a deterministic
+            # CPU clock, just as the in-process scanner/compiled/MCP fixtures do.
+            # A1ns allowance cannot assume every platform records a positive tick
+            # for a tiny real matcher. No production entry point is replaced.
+            "import itertools, runpy; import quarry.safety.local_match_work as work; "
+            "work.thread_time_ns = itertools.count(step=10).__next__; "
+            "runpy.run_module('quarry.cli', run_name='__main__')",
             "scan",
             "--config",
             str(cfg),

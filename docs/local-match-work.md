@@ -25,6 +25,12 @@ The default mode is `shadow`. Explicit null/false/empty blocks are invalid.
 The scanner resolves selected rule names before constructing its resource
 providers. A compiled policy therefore requires groups that select its rule.
 
+Nanosecond units do not guarantee nanosecond clock resolution. A short segment
+can have equal start/end ticks, particularly on Windows, and records zero native
+CPU ticks without becoming unmetered. A later clock increment is charged in full
+and can overshoot a small allowance. Keep wall deadlines and other work limits:
+this counter does not provide sub-tick enforcement or native-call preemption.
+
 ## Ownership and outcomes
 
 The owner measures synchronous matching and its required preparations: copying

@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import json
 import threading
+from time import monotonic, thread_time_ns
 from types import SimpleNamespace
 
 import pytest
@@ -138,6 +139,28 @@ def test_exact_boundary_keeps_completed_work_but_denies_the_next_segment(monkeyp
     assert measured.report()["cut_phase"] == "prepare"
 
 
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_equal_coarse_cpu_ticks_are_valid_and_a_later_tick_charges_full_overshoot(
+    monkeypatch, mode
+):
+    measured = owner(allowance=1, mode=mode)
+    clock(monkeypatch, 15_625_000, 15_625_000, 15_625_000, 31_250_000)
+    assert measured.call("match", lambda: True)
+    assert measured.report()["known_cpu_ns"] == 0
+    assert measured.report()["value_cpu_ns"] is None  # Still-open owner has no final value.
+    assert measured.report()["unmetered_segments"] == 0
+    if mode == "enforce":
+        with pytest.raises(work.LocalMatchWorkError):
+            measured.call("match", lambda: True)
+    else:
+        assert measured.call("match", lambda: True)
+    measured.close()
+    report = measured.report()
+    assert report["complete"] and report["segments"] == 2 and report["exhausted"]
+    assert report["value_cpu_ns"] == 15_625_000
+    assert report["overshoot_cpu_ns"] == 15_624_999
+
+
 @pytest.mark.parametrize(
     "error", [TimeoutError("synthetic"), ValueError("synthetic"), asyncio.CancelledError()]
 )
@@ -224,8 +247,12 @@ def test_actual_native_matching_on_a_copied_worker_context_has_one_owner():
 
     def native():
         compiled = re2.compile(r"synthetic-[0-9]+")
-        for _ in range(1000):
+        started, deadline = thread_time_ns(), monotonic() + 3
+        # Exercise real RE2 until this worker's native CPU clock advances. The
+        # observation, rather than a fixed small iteration count, owns the bound.
+        while thread_time_ns() == started:
             assert compiled.search("synthetic-12345") is not None
+            assert monotonic() < deadline, "native worker CPU clock did not advance"
 
     def parent():
         context = contextvars.copy_context()
