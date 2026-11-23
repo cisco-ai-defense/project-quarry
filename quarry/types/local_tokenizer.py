@@ -200,6 +200,8 @@ class LocalTokenizerConfig:
             "limits": asdict(self.limits),
             "padding": False,
             "truncation": False,
+            "post_processor": False,
+            "add_special_tokens": False,
             "offset_unit": "unicode_code_points",
         }
 
