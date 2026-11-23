@@ -25,6 +25,7 @@ async def trim_messages(
     direction: str,
     cut_keep: str,
     count: Callable[[Messages], Awaitable[int]],
+    confirm: Callable[[Messages], Awaitable[int]] | None = None,
 ) -> TrimmedInput:
     if type(size) is not int or size <= 0:
         raise ValueError("trim() size must be a positive integer")
@@ -103,7 +104,7 @@ async def trim_messages(
     result = await view(selected)
     # Always confirm the complete selected request; summed individual token counts are
     # not a request-fit proof when framing or tools have nonlinear costs.
-    if result and await count(result) > size:
+    if result and await (confirm or count)(result) > size:
         raise ValueError("trim() selected request exceeds the input budget")
     await budget.checkpoint(finish=True)
     return TrimmedInput(result, len(body) - len(selected), omitted_characters)
