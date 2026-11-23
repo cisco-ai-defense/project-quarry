@@ -40,6 +40,7 @@ from quarry.inputs import (
     parse_inputs,
 )
 from quarry.safety.limits import SafetyLimits
+from quarry.safety.local_match_work import LocalMatchWorkConfig
 from quarry.types.adapter_transforms import (
     LocalTransformConfig,
     ModelTransformConfig,
@@ -115,6 +116,7 @@ _CONFIG_FIELDS = frozenset(
         "enforce_limits",
         "fail_on_timeout",
         "fail_on_limit",
+        "local_match_work",
     }
 )
 
@@ -649,9 +651,17 @@ class QuarryConfig:
     allow_stub_probers: bool = False
     # Named reviewed transform definitions; adapters are supplied by the trusted host.
     transforms: Mapping[str, TransformConfig] = field(default_factory=dict)
+    local_match_work: LocalMatchWorkConfig | None = None
 
     def __post_init__(self) -> None:
         """Detach caller-provided containers into immutable form and pick timeout defaults."""
+
+        if self.local_match_work is not None:
+            if type(self.local_match_work) is not LocalMatchWorkConfig:
+                raise ConfigurationError("local_match_work must be a native configuration value")
+            object.__setattr__(
+                self, "local_match_work", LocalMatchWorkConfig(self.local_match_work.groups)
+            )
 
         if (
             isinstance(self.config_version, bool)
@@ -940,6 +950,11 @@ class QuarryConfig:
             model_cache=_parse_model_cache(document),
             allow_stub_probers=allow_stub_probers,
             transforms=_parse_content_transforms(document.get("transforms")),
+            local_match_work=(
+                LocalMatchWorkConfig.from_mapping(document["local_match_work"])
+                if "local_match_work" in document
+                else None
+            ),
         )
 
     def get_safety_limits(self) -> SafetyLimits:

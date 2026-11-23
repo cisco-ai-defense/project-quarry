@@ -3,7 +3,6 @@
 
 """Scan-owned CPU accounting for explicitly selected local matching groups.
 
-This is a work-in-progress primitive; scanner and matcher integration is separate.
 Only synchronous matching segments belong inside ``call``. Thread CPU, rather than
 wall time or process CPU, includes native work on the executing worker and excludes
 time spent waiting for another thread. A native call cannot be preempted by this
@@ -120,6 +119,16 @@ class LocalMatchWorkConfig:
             )
         return cls(tuple(groups))
 
+    def validate_rules(self, known_rules: tuple[str, ...]) -> None:
+        """Reject unresolved selections before any runtime provider is constructed."""
+        if type(known_rules) not in (tuple, list) or any(
+            type(rule) is not str for rule in known_rules
+        ):
+            raise ValueError("known rule names must be native strings")
+        known = frozenset(known_rules)
+        if any(rule not in known for group in self.groups for rule in group.rules):
+            raise ValueError("local work group selects an unknown rule")
+
 
 class LocalMatchWorkSession:
     """Allocate one owner per group for exactly one scan; bind rules explicitly."""
@@ -128,13 +137,7 @@ class LocalMatchWorkSession:
         if type(config) is not LocalMatchWorkConfig:
             raise ValueError("local work configuration must be a native value")
         config = LocalMatchWorkConfig(config.groups)
-        if type(known_rules) not in (tuple, list) or any(
-            type(rule) is not str for rule in known_rules
-        ):
-            raise ValueError("known rule names must be native strings")
-        known = frozenset(known_rules)
-        if any(rule not in known for group in config.groups for rule in group.rules):
-            raise ValueError("local work group selects an unknown rule")
+        config.validate_rules(known_rules)
         self._owners = tuple(LocalMatchWorkOwner(group) for group in config.groups)
         self._by_rule = {
             rule: owner
@@ -143,6 +146,7 @@ class LocalMatchWorkSession:
         }
         self._pid = os.getpid()
         self._closed = False
+        self._snapshot: dict[str, Any] | None = None
 
     def owner_for(self, rule: str) -> LocalMatchWorkOwner | None:
         if self._pid != os.getpid() or self._closed:
@@ -161,6 +165,14 @@ class LocalMatchWorkSession:
         self._closed = True
         for owner in self._owners:
             owner.close()
+        if self._snapshot is not None:
+            self._snapshot.update(self.report())
+
+    def snapshot(self) -> dict[str, Any]:
+        """One bounded result view, finalized when deferred value ownership closes."""
+        if self._snapshot is None:
+            self._snapshot = self.report()
+        return self._snapshot
 
     def report(self) -> dict[str, Any]:
         if self._pid != os.getpid():
