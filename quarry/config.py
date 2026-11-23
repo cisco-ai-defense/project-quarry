@@ -307,10 +307,11 @@ class ScoreConfig:
     def __post_init__(self) -> None:
         _input_token_limit(self.max_input_tokens)
         if self.reasoning_max_tokens is not None and (
-            type(self.reasoning_max_tokens) is not int
-            or not 16 <= self.reasoning_max_tokens <= 4096
+            type(self.reasoning_max_tokens) is not int or self.reasoning_max_tokens < 16
         ):
-            raise ValueError("score reasoning max_tokens must be an integer from 16 through 4096")
+            raise ValueError("score reasoning max_tokens must be an integer of at least 16")
+        if self.reasoning_max_tokens is not None and self.reasoning_max_tokens > 4096:
+            raise ValueError("score reasoning max_tokens must not exceed 4096")
         object.__setattr__(self, "negative_token", score_labels(self.negative_token))
         object.__setattr__(self, "positive_token", score_labels(self.positive_token))
         validate_score_sides(self.negative_token, self.positive_token)
@@ -1305,12 +1306,16 @@ def _validate_model_template_fragment_semantics(owner: str, data: dict) -> None:
 
         reasoning = score.get("reasoning")
         reasoning_max_tokens = reasoning.get("max_tokens") if isinstance(reasoning, dict) else None
-        if reasoning_max_tokens is not None and not (
-            _MIN_EXPLANATION_TOKENS <= reasoning_max_tokens <= _MAX_EXPLANATION_TOKENS
+        if reasoning_max_tokens is not None and (
+            type(reasoning_max_tokens) is not int or reasoning_max_tokens < _MIN_EXPLANATION_TOKENS
         ):
             raise ConfigurationError(
-                f"{owner} score reasoning max_tokens must be an integer from "
-                f"{_MIN_EXPLANATION_TOKENS} through {_MAX_EXPLANATION_TOKENS} or null"
+                f"{owner} score reasoning max_tokens must be an integer of at least "
+                f"{_MIN_EXPLANATION_TOKENS} or null"
+            )
+        if reasoning_max_tokens is not None and reasoning_max_tokens > _MAX_EXPLANATION_TOKENS:
+            raise ConfigurationError(
+                f"{owner} score reasoning max_tokens must not exceed {_MAX_EXPLANATION_TOKENS}"
             )
 
         explanation = score.get("explanation")
@@ -1995,6 +2000,11 @@ def _parse_score_config(
         if not isinstance(score_tokens, dict):
             raise ValueError(f"{owner} tokens must be a mapping")
         _reject_unknown_fields(score_tokens, {"negative", "positive"}, f"{owner} tokens")
+        if any(
+            type(token) is str and len(token) <= 256 and not token.strip()
+            for token in (score_tokens.get("negative"), score_tokens.get("positive"))
+        ):
+            raise ValueError(f"{owner} positive and negative tokens must be non-empty")
         negative_token = score_labels(score_tokens.get("negative"))
         positive_token = score_labels(score_tokens.get("positive"))
         if negative_token is None or positive_token is None:
@@ -2033,11 +2043,10 @@ def _parse_score_config(
             isinstance(reasoning_max_tokens, bool)
             or not isinstance(reasoning_max_tokens, int)
             or reasoning_max_tokens < 16
-            or reasoning_max_tokens > 4096
         ):
-            raise ValueError(
-                f"{owner} reasoning max_tokens must be an integer from 16 through 4096"
-            )
+            raise ValueError(f"{owner} reasoning max_tokens must be an integer of at least 16")
+        if reasoning_max_tokens > 4096:
+            raise ValueError(f"{owner} reasoning max_tokens must not exceed 4096")
 
     explanation_max_tokens = None
     if "explanation" in fields:
