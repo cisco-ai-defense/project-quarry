@@ -55,6 +55,15 @@ from quarry.types.local_tokenizer import (
 )
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
+from quarry.types.score_verdicts import (
+    ScoreArguments,
+    ScoreLabels,
+    ScoreVerdictConfig,
+    score_arguments,
+    score_labels,
+    score_path,
+    validate_score_sides,
+)
 from quarry.types.tokenizer_width import TokenizerWidthClaim
 from quarry.types.transforms import (
     MAX_TRANSFORM_DEFINITIONS,
@@ -147,6 +156,8 @@ _INFERENCE_MODEL_FIELDS = frozenset(
 
 _ANY_MAPPING = object()
 _LIST_OR_MAPPING = object()
+_SCORE_LABELS = object()
+_SCORE_PATH = object()
 _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
     "adapter": str,
     "model": str,
@@ -168,8 +179,14 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "max_input_tokens": int,
         "message_builder": str,
         "boundary_seed": int,
-        "tokens": {"negative": str, "positive": str},
-        "extraction": {"probabilities": str},
+        "tokens": {"negative": _SCORE_LABELS, "positive": _SCORE_LABELS},
+        "arguments": _ANY_MAPPING,
+        "extraction": {
+            "probabilities": str,
+            "label": _SCORE_PATH,
+            "confidence": _SCORE_PATH,
+            "max_chars": int,
+        },
         "calibration": str,
         "reasoning": {"max_tokens": int},
         "explanation": {"max_tokens": int},
@@ -274,8 +291,8 @@ class ScoreConfig:
 
     message_builder: str
     boundary_seed: int
-    negative_token: str | None = None
-    positive_token: str | None = None
+    negative_token: ScoreLabels | None = None
+    positive_token: ScoreLabels | None = None
     probabilities_field: str | None = None
     calibration: str | None = None
     # With a budget, the model reasons before it answers, ending on ``ANSWER: <token>``,
@@ -284,9 +301,36 @@ class ScoreConfig:
     # A short user-facing explanation, separately opted into from private reasoning.
     explanation_max_tokens: int | None = None
     max_input_tokens: int | None = None
+    arguments: ScoreArguments | None = field(default=None, metadata={"cache_omit_none": True})
+    verdict: ScoreVerdictConfig | None = field(default=None, metadata={"cache_omit_none": True})
 
     def __post_init__(self) -> None:
         _input_token_limit(self.max_input_tokens)
+        if self.reasoning_max_tokens is not None and (
+            type(self.reasoning_max_tokens) is not int
+            or not 16 <= self.reasoning_max_tokens <= 4096
+        ):
+            raise ValueError("score reasoning max_tokens must be an integer from 16 through 4096")
+        object.__setattr__(self, "negative_token", score_labels(self.negative_token))
+        object.__setattr__(self, "positive_token", score_labels(self.positive_token))
+        validate_score_sides(self.negative_token, self.positive_token)
+        object.__setattr__(self, "arguments", score_arguments(self.arguments))
+        if self.verdict is not None:
+            if type(self.verdict) is not ScoreVerdictConfig:
+                raise ValueError("score verdict must be a validated ScoreVerdictConfig")
+            if self.negative_token is None or self.positive_token is None:
+                raise ValueError("score JSON extraction requires positive and negative labels")
+            if self.reasoning_max_tokens is not None or self.explanation_max_tokens is not None:
+                raise ValueError(
+                    "score JSON extraction cannot be combined with reasoning or explanation"
+                )
+            if self.probabilities_field is not None:
+                raise ValueError("score JSON extraction cannot also extract token probabilities")
+        budget = self.explanation_max_tokens or self.reasoning_max_tokens
+        if budget is not None and dict(self.arguments or ()).get("max_tokens", budget) > budget:
+            raise ValueError(
+                "score arguments max_tokens must not exceed its reasoning or explanation budget"
+            )
         if self.explanation_max_tokens is not None:
             _explanation_token_budget(
                 self.explanation_max_tokens, self.reasoning_max_tokens, "score"
@@ -436,6 +480,10 @@ class InferenceModelConfig:
                 section.pop("max_input_tokens", None)
         if self.score is not None and self.score.explanation_max_tokens is None:
             document["score"].pop("explanation_max_tokens")
+        if self.score is not None:
+            for name in ("arguments", "verdict"):
+                if getattr(self.score, name) is None:
+                    document["score"].pop(name)
         return document
 
 
@@ -1146,6 +1194,12 @@ def _validate_template_value(value: object, schema: object, owner: str) -> None:
 
     if value is None:
         return
+    if schema is _SCORE_LABELS or schema is _SCORE_PATH:
+        try:
+            (score_labels if schema is _SCORE_LABELS else score_path)(value)
+        except ValueError as exc:
+            raise ConfigurationError(f"{owner}: {exc}") from exc
+        return
     if schema is _ANY_MAPPING:
         if not isinstance(value, dict):
             raise ConfigurationError(f"{owner} must be a mapping or null")
@@ -1232,29 +1286,31 @@ def _validate_model_template_fragment_semantics(owner: str, data: dict) -> None:
 
     score = data.get("score")
     if isinstance(score, dict):
+        arguments = score.get("arguments")
+        if isinstance(arguments, dict):
+            try:
+                score_arguments(
+                    {key: value for key, value in arguments.items() if value is not None}
+                )
+            except ValueError as exc:
+                raise ConfigurationError(f"{owner} score: {exc}") from exc
         score_tokens = score.get("tokens")
         if isinstance(score_tokens, dict):
             negative = score_tokens.get("negative")
             positive = score_tokens.get("positive")
-            stripped_negative = negative.strip() if isinstance(negative, str) else None
-            stripped_positive = positive.strip() if isinstance(positive, str) else None
-            if negative is not None and not stripped_negative:
-                raise ConfigurationError(f"{owner} score negative token must be non-empty")
-            if positive is not None and not stripped_positive:
-                raise ConfigurationError(f"{owner} score positive token must be non-empty")
-            if (
-                stripped_negative is not None
-                and stripped_positive is not None
-                and stripped_negative == stripped_positive
-            ):
-                raise ConfigurationError(f"{owner} score positive and negative tokens must differ")
+            try:
+                validate_score_sides(score_labels(negative), score_labels(positive))
+            except ValueError as exc:
+                raise ConfigurationError(f"{owner} score: {exc}") from exc
 
         reasoning = score.get("reasoning")
         reasoning_max_tokens = reasoning.get("max_tokens") if isinstance(reasoning, dict) else None
-        if reasoning_max_tokens is not None and reasoning_max_tokens < _MIN_EXPLANATION_TOKENS:
+        if reasoning_max_tokens is not None and not (
+            _MIN_EXPLANATION_TOKENS <= reasoning_max_tokens <= _MAX_EXPLANATION_TOKENS
+        ):
             raise ConfigurationError(
-                f"{owner} score reasoning max_tokens must be an integer of at least "
-                f"{_MIN_EXPLANATION_TOKENS} or null"
+                f"{owner} score reasoning max_tokens must be an integer from "
+                f"{_MIN_EXPLANATION_TOKENS} through {_MAX_EXPLANATION_TOKENS} or null"
             )
 
         explanation = score.get("explanation")
@@ -1923,6 +1979,7 @@ def _parse_score_config(
             "reasoning",
             "explanation",
             "max_input_tokens",
+            "arguments",
         },
         owner,
     )
@@ -1938,20 +1995,32 @@ def _parse_score_config(
         if not isinstance(score_tokens, dict):
             raise ValueError(f"{owner} tokens must be a mapping")
         _reject_unknown_fields(score_tokens, {"negative", "positive"}, f"{owner} tokens")
-        negative_token = _required_string(score_tokens, "negative", f"{owner} tokens").strip()
-        positive_token = _required_string(score_tokens, "positive", f"{owner} tokens").strip()
-        if not negative_token or not positive_token:
+        negative_token = score_labels(score_tokens.get("negative"))
+        positive_token = score_labels(score_tokens.get("positive"))
+        if negative_token is None or positive_token is None:
             raise ValueError(f"{owner} positive and negative tokens must be non-empty")
-        if negative_token == positive_token:
-            raise ValueError(f"{owner} positive and negative tokens must differ")
+        validate_score_sides(negative_token, positive_token)
 
     probabilities_field = None
+    verdict = None
     if "extraction" in fields:
         extraction = fields["extraction"]
         if not isinstance(extraction, dict):
             raise ValueError(f"{owner} extraction must be a mapping")
-        _reject_unknown_fields(extraction, {"probabilities"}, f"{owner} extraction")
+        _reject_unknown_fields(
+            extraction, {"probabilities", "label", "confidence", "max_chars"}, f"{owner} extraction"
+        )
         probabilities_field = _optional_string(extraction, "probabilities", f"{owner} extraction")
+        if "label" in extraction:
+            verdict = ScoreVerdictConfig(
+                label_path=score_path(extraction["label"]),
+                confidence_path=(
+                    score_path(extraction["confidence"]) if "confidence" in extraction else None
+                ),
+                max_chars=extraction.get("max_chars", 16_384),
+            )
+        elif "confidence" in extraction or "max_chars" in extraction:
+            raise ValueError(f"{owner} JSON confidence and limits require a label path")
 
     reasoning_max_tokens = None
     if "reasoning" in fields:
@@ -1964,8 +2033,11 @@ def _parse_score_config(
             isinstance(reasoning_max_tokens, bool)
             or not isinstance(reasoning_max_tokens, int)
             or reasoning_max_tokens < 16
+            or reasoning_max_tokens > 4096
         ):
-            raise ValueError(f"{owner} reasoning max_tokens must be an integer of at least 16")
+            raise ValueError(
+                f"{owner} reasoning max_tokens must be an integer from 16 through 4096"
+            )
 
     explanation_max_tokens = None
     if "explanation" in fields:
@@ -1991,6 +2063,8 @@ def _parse_score_config(
         reasoning_max_tokens=reasoning_max_tokens,
         explanation_max_tokens=explanation_max_tokens,
         max_input_tokens=_input_token_limit(fields.get("max_input_tokens")),
+        arguments=score_arguments(fields.get("arguments")),
+        verdict=verdict,
     )
 
 

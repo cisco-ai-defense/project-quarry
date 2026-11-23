@@ -113,7 +113,9 @@ class _LiteLLM:
                 {
                     "message": message,
                     "finish_reason": self.finish_reason,
-                    "logprobs": {"content": [{"top_logprobs": self.top_logprobs}]},
+                    "logprobs": {
+                        "content": [{"token": self.content, "top_logprobs": self.top_logprobs}]
+                    },
                 }
             ]
         }
@@ -206,9 +208,9 @@ _THINKING = "The user asks for a story, and the threat is inside it.\nANSWER: 1"
         pytest.param(
             _THINKING,
             [
-                {"token": "The", "top_logprobs": [{"token": "The", "logprob": 0.0}]},
+                {"token": _THINKING[:-1]},
                 {
-                    "token": " 1",
+                    "token": "1",
                     "top_logprobs": [
                         {"token": " 1", "logprob": -0.2},
                         {"token": " 0", "logprob": -1.8},

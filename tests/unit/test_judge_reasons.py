@@ -391,6 +391,8 @@ def test_disabled_explanations_preserve_preexisting_compiled_policy_identity(tmp
     for setting in ("revision", "windows"):
         assert old.pop(setting) is None
     old["score"].pop("explanation_max_tokens")
+    for setting in ("arguments", "verdict"):
+        assert old["score"].pop(setting) is None
     # These later optional limits also did not exist in the historical mapping.
     for operation in ("score", "classify", "spans", "complete"):
         if old[operation] is not None:
@@ -447,8 +449,8 @@ def test_explanation_uses_only_aligned_final_answer_logprobs(tmp_path, monkeypat
             {
                 "token": "0",
                 "top_logprobs": [
-                    {"token": "1", "logprob": -2},
-                    {"token": "0", "logprob": -0.1},
+                    {"token": "1", "logprob": -2.1},
+                    {"token": "0", "logprob": -0.2},
                 ],
             },
             {"token": '"\n'},
