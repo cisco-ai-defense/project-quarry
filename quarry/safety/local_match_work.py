@@ -59,6 +59,120 @@ class LocalMatchWorkError(EvaluationError):
     """Selected work lacks an available, unexhausted accounting owner."""
 
 
+@dataclass(frozen=True, slots=True)
+class LocalMatchWorkConfig:
+    """Bounded, nonoverlapping rule groups; absent configuration needs no session."""
+
+    groups: tuple[LocalMatchWorkGroup, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.groups) not in (tuple, list) or not 1 <= len(self.groups) <= 64:
+            raise ValueError("local work configuration must contain 1 to 64 groups")
+        groups = []
+        labels: set[str] = set()
+        rules: set[str] = set()
+        for group in self.groups:
+            if type(group) is not LocalMatchWorkGroup:
+                raise ValueError("local work groups must be native configuration values")
+            copied = LocalMatchWorkGroup(
+                group.label, group.rules, group.allowance_cpu_ns, group.mode
+            )
+            if copied.label in labels:
+                raise ValueError("local work group labels must be unique")
+            if any(rule in rules for rule in copied.rules):
+                raise ValueError("a rule cannot belong to multiple local work groups")
+            labels.add(copied.label)
+            rules.update(copied.rules)
+            if len(rules) > 1024:
+                raise ValueError("local work groups must select at most 1024 rules")
+            groups.append(copied)
+        object.__setattr__(self, "groups", tuple(groups))
+
+    @classmethod
+    def from_mapping(cls, raw: object) -> LocalMatchWorkConfig:
+        if type(raw) is not dict or len(raw) != 1 or any(type(key) is not str for key in raw):
+            raise ValueError("local work configuration requires only a groups field")
+        values = raw.get("groups")
+        if not isinstance(values, (tuple, list)) or type(values) not in (tuple, list):
+            raise ValueError("local work configuration must contain 1 to 64 groups")
+        if not 1 <= len(values) <= 64:
+            raise ValueError("local work configuration must contain 1 to 64 groups")
+        groups = []
+        for item in values:
+            if type(item) is not dict or not 3 <= len(item) <= 4:
+                raise ValueError("invalid local work group fields")
+            if any(type(key) is not str for key in item) or not set(item) <= {
+                "label",
+                "rules",
+                "allowance_cpu_ns",
+                "mode",
+            }:
+                raise ValueError("unknown local work group fields")
+            if not {"label", "rules", "allowance_cpu_ns"} <= set(item):
+                raise ValueError("missing local work group fields")
+            groups.append(
+                LocalMatchWorkGroup(
+                    item["label"],
+                    item["rules"],
+                    item["allowance_cpu_ns"],
+                    item.get("mode", "shadow"),
+                )
+            )
+        return cls(tuple(groups))
+
+
+class LocalMatchWorkSession:
+    """Allocate one owner per group for exactly one scan; bind rules explicitly."""
+
+    def __init__(self, config: LocalMatchWorkConfig, *, known_rules: tuple[str, ...]):
+        if type(config) is not LocalMatchWorkConfig:
+            raise ValueError("local work configuration must be a native value")
+        config = LocalMatchWorkConfig(config.groups)
+        if type(known_rules) not in (tuple, list) or any(
+            type(rule) is not str for rule in known_rules
+        ):
+            raise ValueError("known rule names must be native strings")
+        known = frozenset(known_rules)
+        if any(rule not in known for group in config.groups for rule in group.rules):
+            raise ValueError("local work group selects an unknown rule")
+        self._owners = tuple(LocalMatchWorkOwner(group) for group in config.groups)
+        self._by_rule = {
+            rule: owner
+            for group, owner in zip(config.groups, self._owners, strict=True)
+            for rule in group.rules
+        }
+        self._pid = os.getpid()
+        self._closed = False
+
+    def owner_for(self, rule: str) -> LocalMatchWorkOwner | None:
+        if self._pid != os.getpid() or self._closed:
+            raise LocalMatchWorkError(
+                "Local matching work owner is unavailable", {"code": "local_work_owner_unavailable"}
+            )
+        if type(rule) is not str:
+            raise ValueError("rule name must be a native string")
+        return self._by_rule.get(rule)
+
+    def close(self) -> None:
+        if self._pid != os.getpid():
+            raise LocalMatchWorkError(
+                "Local matching work owner is unavailable", {"code": "local_work_owner_unavailable"}
+            )
+        self._closed = True
+        for owner in self._owners:
+            owner.close()
+
+    def report(self) -> dict[str, Any]:
+        if self._pid != os.getpid():
+            return {"state": "owner_unavailable", "complete": False, "groups": []}
+        groups = [owner.report() for owner in self._owners]
+        return {
+            "state": "collected",
+            "complete": self._closed and all(row["complete"] for row in groups),
+            "groups": groups,
+        }
+
+
 def _clock() -> int | None:
     try:
         value = thread_time_ns()
@@ -185,7 +299,10 @@ class LocalMatchWorkOwner:
                 "state": "unmetered" if self._unmetered else "measured",
                 "known_cpu_ns": self._used,
                 "value_cpu_ns": self._used if complete else None,
-                "overshoot_cpu_ns": max(0, self._used - self._group.allowance_cpu_ns),
+                "known_overshoot_cpu_ns": max(0, self._used - self._group.allowance_cpu_ns),
+                "overshoot_cpu_ns": max(0, self._used - self._group.allowance_cpu_ns)
+                if complete
+                else None,
                 "exhausted": self._used >= self._group.allowance_cpu_ns or bool(self._unmetered),
                 "segments": self._segments,
                 "active_segments": self._active,

@@ -147,6 +147,17 @@ def test_nested_same_thread_work_is_not_double_charged(monkeypatch):
     assert measured.report()["segments"] == 1
 
 
+def test_saturated_counters_remain_bounded_and_do_not_claim_an_exact_total(monkeypatch):
+    measured = owner(allowance=work._MAX, mode="shadow")
+    clock(monkeypatch, 0, work._MAX + 10)
+    assert measured.call("match", lambda: True)
+    measured.close()
+    report = measured.report()
+    assert report["known_cpu_ns"] == work._MAX
+    assert report["counter_saturated"] and not report["complete"]
+    assert report["value_cpu_ns"] is report["overshoot_cpu_ns"] is None
+
+
 def test_closing_inside_an_active_segment_rejects_new_nested_work(monkeypatch):
     measured = owner()
     clock(monkeypatch, 0, 9)
