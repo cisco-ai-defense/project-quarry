@@ -205,6 +205,15 @@ class LocalTokenizerConfig:
             "offset_unit": "unicode_code_points",
         }
 
+    @property
+    def count_settings_sha256(self) -> str:
+        """Stable complete count semantics, with no path or template plaintext."""
+        return sha256(
+            json.dumps(
+                self.identity_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class LocalTokenizerEncoding:
