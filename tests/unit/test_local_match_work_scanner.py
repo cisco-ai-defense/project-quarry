@@ -15,7 +15,10 @@ import quarry.scanner as scanner_module
 from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
 from quarry.engine.local_work import current_local_work, local_work_scope
+from quarry.integrations import model_usage
+from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.safety import local_match_work as work
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError, evidence_deadline
 from quarry.scanner import DSLScanner
@@ -187,27 +190,18 @@ async def test_deferred_evidence_keeps_the_owner_until_actual_finish(determinist
 async def test_provider_waits_preserve_deadline_cancellation_and_owner_cleanup(
     tmp_path, monkeypatch, cancel
 ):
-    sessions = []
+    await _assert_provider_wait_cleanup(tmp_path, monkeypatch, cancel, 1024.0)
 
-    class Recorded(work.LocalMatchWorkSession):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            sessions.append(self)
 
-    entered = asyncio.Event()
-    stopped = asyncio.Event()
+@pytest.mark.parametrize("clock_start", [1024.0, 1023.9999999999999])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_provider_waits_preserve_cleanup_across_clock_origins(
+    tmp_path, monkeypatch, cancel, clock_start
+):
+    await _assert_provider_wait_cleanup(tmp_path, monkeypatch, cancel, clock_start)
 
-    class Waiting:
-        async def classify_messages(self, _config, _messages, _tools, *, timeout=None):
-            assert current_local_work() is None
-            entered.set()
-            try:
-                await asyncio.Future()
-            finally:
-                stopped.set()
-            return classification(0.02, 0.98)
 
-    monkeypatch.setattr(scanner_module, "LocalMatchWorkSession", Recorded)
+def _provider_wait_scanner(tmp_path, adapter, limits):
     model_rule = 'rule "Selected" condition: model("judge").classify(messages) > 0.5'
     runtime = replace(
         config(allowance=1_000_000_000, texts=(model_rule,)),
@@ -226,21 +220,140 @@ async def test_provider_waits_preserve_deadline_cancellation_and_owner_cleanup(
             require_rules=False,
         ).models,
     )
-    scanner = DSLScanner(
-        runtime,
-        model_adapters={"fake": Waiting()},
-        limits=SafetyLimits(rule_timeout=10 if cancel else 0.05, fail_on_timeout=True),
+    return DSLScanner(runtime, model_adapters={"fake": adapter}, limits=limits)
+
+
+async def _assert_provider_wait_cleanup(tmp_path, monkeypatch, cancel, clock_start):
+    now = clock_start
+    sessions, armed = [], []
+
+    def clock():
+        return now
+
+    class Recorded(work.LocalMatchWorkSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sessions.append(self)
+
+    class AdmittedAsyncio:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def timeout(self, seconds):
+            owner = timer.current_evaluation_deadline()
+            if owner is None:
+                assert self.kind == "provider" and len(armed) == 1
+                owner = armed[0][3]
+            assert owner is not None and owner.error_message == "Rule Selected timeout"
+            assert seconds == owner.expires_at - now and seconds > 0
+            # This fixture exercises an admitted provider. Preserve its finite
+            # configured budget, then expire a real timer after physical admission.
+            native = asyncio.timeout(None)
+            armed.append((self.kind, asyncio.get_running_loop(), native, owner))
+            return native
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", AdmittedAsyncio("rule"))
+    monkeypatch.setattr(model_usage, "asyncio", AdmittedAsyncio("provider"))
+    monkeypatch.setattr(scanner_module, "LocalMatchWorkSession", Recorded)
+    entered, stopped = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    class Waiting:
+        async def classify_messages(self, _config, _messages, _tools, *, timeout=None):
+            nonlocal calls
+            calls += 1
+            assert current_local_work() is None
+            assert len(armed) == 2 and {item[0] for item in armed} == {"rule", "provider"}
+            assert timeout == armed[0][3].expires_at - now
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                stopped.set()
+            return classification(0.02, 0.98)
+
+    scanner = _provider_wait_scanner(
+        tmp_path,
+        Waiting(),
+        SafetyLimits(rule_timeout=10 if cancel else 0.05, fail_on_timeout=True),
     )
     task = asyncio.create_task(scanner.scan_data_async(DATA))
-    await asyncio.wait_for(entered.wait(), 10)
-    if cancel:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    else:
-        with pytest.raises(QuarryTimeoutError) as caught:
-            await task
-        assert caught.value.scan_result.local_match_work["complete"]
-    await asyncio.wait_for(stopped.wait(), 10)
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        _, loop, native, owner = next(item for item in armed if item[0] == "rule")
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not native.expired()
+        else:
+            now = owner.expires_at
+            loop.call_soon(native.reschedule, loop.time())
+            with pytest.raises(QuarryTimeoutError, match="Rule Selected timeout") as caught:
+                await task
+            assert native.expired()
+            assert caught.value.scan_result.local_match_work["complete"]
+        await asyncio.wait_for(stopped.wait(), 10)
+        assert calls == 1 and len(sessions) == 1 and sessions[0].report()["complete"]
+        assert sessions[0].report()["groups"][0]["active_segments"] == 0
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("clock_start", [1024.0, 1023.9999999999999])
+async def test_expired_provider_admission_finalizes_local_work_without_dispatch(
+    tmp_path, monkeypatch, clock_start
+):
+    now = clock_start
+    sessions, reached = [], []
+
+    class Recorded(work.LocalMatchWorkSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sessions.append(self)
+
+    class Forbidden:
+        async def classify_messages(self, *args, **kwargs):
+            pytest.fail("expired local-work evaluation dispatched a provider")
+
+    def arm(seconds):
+        owner = timer.current_evaluation_deadline()
+        assert owner is not None and seconds == owner.expires_at - now
+        return asyncio.timeout(None)
+
+    class ScannerAsyncio:
+        timeout = staticmethod(arm)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    original = ModelInferenceBackend.model_classify_messages
+
+    async def expire_before_admission(self, *args, **kwargs):
+        nonlocal now
+        owner = timer.current_evaluation_deadline()
+        assert owner is not None and owner.error_message == "Rule Selected timeout"
+        now = owner.expires_at
+        reached.append(True)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(model_usage, "monotonic", lambda: now)
+    monkeypatch.setattr(scanner_module, "asyncio", ScannerAsyncio())
+    monkeypatch.setattr(scanner_module, "LocalMatchWorkSession", Recorded)
+    monkeypatch.setattr(ModelInferenceBackend, "model_classify_messages", expire_before_admission)
+    scanner = _provider_wait_scanner(
+        tmp_path, Forbidden(), SafetyLimits(rule_timeout=0.05, fail_on_timeout=True)
+    )
+    with pytest.raises(QuarryTimeoutError, match="Rule Selected timeout") as caught:
+        await scanner.scan_data_async(DATA)
+    assert reached == [True] and caught.value.scan_result.local_match_work["complete"]
     assert len(sessions) == 1 and sessions[0].report()["complete"]
     assert sessions[0].report()["groups"][0]["active_segments"] == 0
