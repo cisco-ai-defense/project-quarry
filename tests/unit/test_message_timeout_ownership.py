@@ -17,10 +17,18 @@ from tests.unit.test_message_rewrites import RewriteAdapter, service
 
 
 @pytest.mark.parametrize("owner", ["rule", "scan", "rule_inside_scan", "scan_inside_rule"])
-@pytest.mark.parametrize("clock_start", [1024.0, 1015.0000000000001])
 async def test_expired_native_message_timer_preserves_its_evaluation_owner(
-    tmp_path, monkeypatch, owner, clock_start
+    tmp_path, monkeypatch, owner
 ):
+    await _assert_native_message_timer_owner(tmp_path, monkeypatch, owner, 1024.0)
+
+
+@pytest.mark.parametrize("owner", ["rule", "scan", "rule_inside_scan", "scan_inside_rule"])
+async def test_rounded_deadline_preserves_native_message_timer_owner(tmp_path, monkeypatch, owner):
+    await _assert_native_message_timer_owner(tmp_path, monkeypatch, owner, 1015.0000000000001)
+
+
+async def _assert_native_message_timer_owner(tmp_path, monkeypatch, owner, clock_start):
     # Exercise exact subtraction and rounding across a binary exponent boundary.
     now = clock_start
     expected_remaining = (clock_start + 10) - clock_start
