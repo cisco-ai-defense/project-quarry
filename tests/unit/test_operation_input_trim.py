@@ -5,14 +5,18 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import quarry.scanner as scanner_module
 from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
+from quarry.integrations import model_usage
 from quarry.integrations.model_expression import ModelExpressionTrace, _evaluate_model_call
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.resources import ResourcePreparationError
+from quarry.safety import timer
 from quarry.types.context import ScanContext
 from quarry.types.results import Score, Span
 from tests.unit.model_fakes import ModelAdapter, NoWaitLimiter, model_entry, passthrough_builder
@@ -530,22 +534,52 @@ async def test_empty_trim_does_not_leak_omission_evidence_to_a_later_spans_call(
     ]
 
 
-async def test_trim_wait_respects_the_inspection_deadline(tmp_path):
+async def test_trim_wait_respects_the_inspection_deadline(tmp_path, monkeypatch):
     released = asyncio.Event()
+    now = timer.time.monotonic()
+    rule_timeouts = []
+
+    def clock():
+        return now
+
+    def arm_timeout(seconds):
+        # Keep the real cancellation path, but expire it only after tokenization starts.
+        assert seconds == 10
+        deadline = timer.current_evaluation_deadline()
+        assert deadline is not None and deadline.error_message == "Policy batch deadline exceeded"
+        timeout = asyncio.timeout(seconds)
+        rule_timeouts.append((asyncio.get_running_loop(), timeout, deadline))
+        return timeout
+
+    class ScannerAsyncio:
+        timeout = staticmethod(arm_timeout)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", ScannerAsyncio())
 
     class Waiting(TrimAdapter):
         async def tokenize(self, config, messages, tools, *, timeout=None):
+            nonlocal now
             self.tokenizations += 1
             try:
+                assert len(rule_timeouts) == 1
+                loop, rule_timeout, deadline = rule_timeouts[0]
+                now = deadline.expires_at
+                loop.call_soon_threadsafe(rule_timeout.reschedule, loop.time())
                 await asyncio.Future()
             finally:
                 released.set()
 
     policy, adapter, _ = trim_policy(tmp_path, "classify", "trim(messages, 6)", adapter=Waiting())
-    result = await asyncio.wait_for(policy.scan_async(DATA, deadline_seconds=0.02), timeout=2)
+    result = await asyncio.wait_for(policy.scan_async(DATA, deadline_seconds=10), timeout=2)
     assert not result.is_complete
     assert result.timed_out_rules == ["Read"]
     await asyncio.wait_for(released.wait(), timeout=2)
+    assert adapter.tokenizations == 1
     assert adapter.classifications == 0
 
 

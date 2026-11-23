@@ -988,8 +988,9 @@ def _judge(**fields) -> dict:
             id="text-mapping-without-file",
         ),
         pytest.param(
-            {"texts": {"policy": {"file": "/nonexistent/quarry/policy.md"}}},
-            f"Text resource 'policy' file not found: {Path('/nonexistent/quarry/policy.md')}",
+            {"texts": {"policy": {"file": str(Path("/nonexistent/quarry/policy.md").absolute())}}},
+            "Text resource 'policy' file not found: "
+            f"{Path('/nonexistent/quarry/policy.md').absolute()}",
             id="absolute-text-file-missing",
         ),
         pytest.param(
