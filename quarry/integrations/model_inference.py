@@ -1643,7 +1643,7 @@ class LiteLLMAdapter:
                     INVALID_OUTPUT, "Inference model reasoned without a final ANSWER line"
                 )
             token = answer.group(1)
-            if explanation is not None or token not in negative + positive:
+            if explanation is not None or token not in negative + positive or token.startswith('"'):
                 # The prompt quotes verdicts as JSON. Prefer that canonical spelling when
                 # one verdict's quoted form also equals another verdict's raw text.
                 try:

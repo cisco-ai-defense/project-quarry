@@ -403,6 +403,35 @@ def test_reasoning_logprobs_must_reconstruct_the_actual_final_verdict_span(monke
     assert answer(model) == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize("mode", ["reasoning", "explanation", "plain"])
+@pytest.mark.parametrize("as_sets", [False, True])
+@pytest.mark.parametrize("probabilities", [False, True])
+@pytest.mark.parametrize(
+    "negative,positive,wire,canonical_score",
+    [('"YES"', "YES", '"YES"', 1.0), ("NO", '"NO"', '"NO"', 0.0)],
+)
+def test_reasoned_json_labels_take_precedence_over_an_opposing_raw_label(
+    monkeypatch, mode, as_sets, probabilities, negative, positive, wire, canonical_score
+):
+    tokens = {
+        "negative": [negative, "OTHER_NEGATIVE"] if as_sets else negative,
+        "positive": [positive, "OTHER_POSITIVE"] if as_sets else positive,
+    }
+    options = {"tokens": tokens}
+    if mode != "plain":
+        options[mode] = {"max_tokens": 32}
+    if probabilities:
+        options["extraction"] = {"probabilities": "logprobs"}
+    content = wire if mode == "plain" else "ANSWER: " + wire
+    provider(monkeypatch, content)
+    result = answer(configured(**options))
+    score = result.score if hasattr(result, "score") else result
+    # Plain replies retain literal token matching; only the final ANSWER line
+    # follows the prompt's canonical JSON spelling in both reasoning modes.
+    expected = (0.0 if wire == negative else 1.0) if mode == "plain" else canonical_score
+    assert score == expected
+
+
 def test_compound_labels_do_not_borrow_single_token_odds(monkeypatch):
     text = "SAFE CHOICE"
     provider(
