@@ -126,10 +126,16 @@ def test_concurrent_scans_have_isolated_timeouts(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("api", ["sync", "async"])
-@pytest.mark.parametrize("clock_start", [1024.0, 1015.0000000000001])
-def test_fail_on_timeout_raises_with_partial_telemetry(
-    tmp_path, api, monkeypatch, clock_start
-) -> None:
+def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api, monkeypatch) -> None:
+    _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, 1024.0)
+
+
+@pytest.mark.parametrize("api", ["sync", "async"])
+def test_rounded_deadline_raises_with_partial_telemetry(tmp_path, api, monkeypatch) -> None:
+    _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, 1015.0000000000001)
+
+
+def _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, clock_start) -> None:
     # Crossing a binary exponent boundary can round the absolute deadline by
     # one ULP. Keep that case deterministic, independent of host uptime.
     now = clock_start
