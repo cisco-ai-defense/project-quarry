@@ -79,6 +79,8 @@ provider when the host has finished using its registration.
 
 A shorter request timeout is owned by its initiating caller. Eligible waiters
 can retry a group ended by that actual timeout under their own remaining budget.
+An explicit caller cap belongs to each invocation, including two calls to the
+same alias with equal durations.
 The registered provider's work and candidate caps apply to every compatible
 reader; reaching those caps remains a shared failure.
 

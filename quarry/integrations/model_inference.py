@@ -2813,6 +2813,15 @@ class ModelInferenceBackend:
             if wait_timeout <= 0:
                 wait_timeout = None
         provider_timeout = timeout if timeout is not None else clamp_to_evaluation_deadline(None)
+        # An explicit candidate caller cap belongs to this invocation, even if
+        # another call uses the same alias and duration. This affects retry
+        # ownership only; request sharing and billable alias attribution stay
+        # unchanged. A provider's shared work cap still cannot authorize retry.
+        request_owner = (
+            (model_id, object())
+            if method == "candidate_batch" and wait_timeout is not None
+            else model_id
+        )
         reader = result_cache.response_reader(cache_key)
         try:
             try:
@@ -2820,7 +2829,7 @@ class ModelInferenceBackend:
                     # A shared request is bounded by its owning provider call.
                     response = await reader.call(
                         request,
-                        budget=model_id,
+                        budget=request_owner,
                         retry_on=_starters_limit,
                         retention=cache_retention(
                             cache_category

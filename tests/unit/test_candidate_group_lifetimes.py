@@ -477,8 +477,9 @@ async def test_rejected_foreign_packet_is_not_inspected_or_retained(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["caller", "configured"])
+@pytest.mark.parametrize("waiter", ["other_alias", "same_alias", "same_alias_equal_cap"])
 async def test_native_request_timeout_retries_only_when_starter_owns_the_shorter_cap(
-    tmp_path, monkeypatch, boundary
+    tmp_path, monkeypatch, boundary, waiter
 ):
     from quarry.integrations import candidate_worker
     from quarry.types.candidates import CandidateLimitError
@@ -501,6 +502,8 @@ async def test_native_request_timeout_retries_only_when_starter_owns_the_shorter
     provider = local_provider(check)  # A real, finite registered ten-second work cap.
     service = backend(tmp_path, provider)
     messages = Messages.from_openai(DATA["messages"])
+    waiter_alias = "right" if waiter == "other_alias" else "left"
+    caller_waiter_timeout = 1 if waiter == "same_alias_equal_cap" else 5
     tasks = []
     try:
         with scan_scope(), model_call_budget(1) as budget:
@@ -515,7 +518,10 @@ async def test_native_request_timeout_retries_only_when_starter_owns_the_shorter
             tasks.append(
                 asyncio.create_task(
                     service.model_span_messages(
-                        "right", messages, 0.5, timeout=5 if boundary == "caller" else 20
+                        waiter_alias,
+                        messages,
+                        0.5,
+                        timeout=caller_waiter_timeout if boundary == "caller" else 20,
                     )
                 )
             )
@@ -526,7 +532,8 @@ async def test_native_request_timeout_retries_only_when_starter_owns_the_shorter
             if boundary == "caller":
                 assert isinstance(results[0], LLMError) and results[0].details["code"] == "timeout"
                 assert is_owned_request_limit(results[0])
-                assert results[1].items[0].value.start == 2 and len(calls) == 2
+                expected_start = 2 if waiter_alias == "right" else 0
+                assert results[1].items[0].value.start == expected_start and len(calls) == 2
             else:
                 assert all(
                     type(result) is CandidateLimitError and not is_owned_request_limit(result)
