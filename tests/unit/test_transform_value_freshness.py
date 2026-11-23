@@ -21,6 +21,7 @@ from quarry.integrations.model_expression import (
     _message_value_key,
     evaluate_model_expression,
 )
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError, scan_deadline
 from quarry.types.context import ScanContext
@@ -224,7 +225,7 @@ async def test_failed_or_cancelled_computation_does_not_become_a_value():
 
 
 @pytest.mark.asyncio
-async def test_expired_deadline_prevents_a_memoized_read():
+async def test_expired_deadline_prevents_a_memoized_read(monkeypatch):
     memo = MessageValueMemo()
     value = Messages.from_openai(PAYLOAD["messages"])
 
@@ -232,8 +233,11 @@ async def test_expired_deadline_prevents_a_memoized_read():
         return value
 
     assert await memo.evaluate(("one",), compute) is value
-    with scan_deadline(0.001):
-        await asyncio.sleep(0.01)
+    now = timer.time.monotonic()
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
+    with scan_deadline(10) as deadline:
+        assert deadline is not None
+        now = deadline.expires_at
         with pytest.raises(QuarryTimeoutError):
             await memo.evaluate(("one",), compute)
 
