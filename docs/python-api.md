@@ -208,6 +208,11 @@ result = restored.scan({"messages": [{"role": "user", "content": "hello"}]})
 result.raise_for_status()
 ```
 
+Temporal rules with nested tool quantifiers retain their verdicts through this
+round trip, including captured message values and conditions shared across a
+tool quantifier's body. Prepared policies retain the executable quantifier
+plans read by the compiled rule.
+
 Authenticate stored compiled bytes before passing them to the loader. The loader checks the wire version, compiler version, rule requirement, and runtime resource identity; it does not prove arbitrary bytes came from your build. Recompile source after an incompatible version change. Policies with bound text parameters also require the host to manage their evidence key and follow the loader's key requirements.
 
 See [parameters](parameters.md) for binding and digest behavior. Public result, exception, conversation, and message types are exported from `quarry`; configuration classes live in `quarry.config`.

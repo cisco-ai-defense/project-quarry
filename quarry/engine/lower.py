@@ -2129,9 +2129,16 @@ def _attempt(
         notes.append(f"candidate element `{bound.var}` (run DFA per candidate event)")
     elif capture_plan is not None:
         notes.append(f"value capture `{capture_plan.var}` (run DFA per candidate value)")
-    tool_body_atoms = {a for plan in c.tool_quantifiers.values() for a in T.atoms_of(plan.body)}
     closed_atoms = {a for plan in closed_conditions.values() for a in plan.dfa.atoms}
-    retained_atoms = set(dfa.atoms) | tool_body_atoms | closed_atoms
+    automaton_atoms = set(dfa.atoms) | closed_atoms
+    # Temporal rewrites can hoist a quantifier's independent condition and
+    # replace its original plan. Keep only plans an actual automaton reads;
+    # stale speculative plans cannot be executed or reloaded as DFA atoms.
+    tool_quantifiers = {
+        atom_id: plan for atom_id, plan in c.tool_quantifiers.items() if atom_id in automaton_atoms
+    }
+    tool_body_atoms = {a for plan in tool_quantifiers.values() for a in T.atoms_of(plan.body)}
+    retained_atoms = automaton_atoms | tool_body_atoms
     # A candidate or captured value is run once per binding, so its proof keeps the whole
     # domain of a negated event check.
     full_trace_proof = _needs_full_trace_proof(
@@ -2139,7 +2146,7 @@ def _attempt(
         specs,
         keep_negated_event_domain=capture_plan is not None,
         derived={
-            **{atom_id: plan.body for atom_id, plan in c.tool_quantifiers.items()},
+            **{atom_id: plan.body for atom_id, plan in tool_quantifiers.items()},
             **{
                 atom_id: _for_domain_analysis(formula, {d.token: d for d in past})
                 for atom_id, (formula, past) in lowerer.closed.items()
@@ -2165,9 +2172,7 @@ def _attempt(
         root=dfa,
         decomposed=decomposed,
         closed={atom_id: plan.dfa for atom_id, plan in closed_conditions.items()},
-        tool_bodies={
-            atom_id: T.atoms_of(plan.body) for atom_id, plan in c.tool_quantifiers.items()
-        },
+        tool_bodies={atom_id: T.atoms_of(plan.body) for atom_id, plan in tool_quantifiers.items()},
         node_atom_ids=node_atom_ids,
     )
     artifact = CompiledRuleArtifact(
@@ -2186,7 +2191,7 @@ def _attempt(
             if not nested or spec.name in c.used_parameters
         ),
         collect_plan=collect_plan,
-        tool_quantifiers=c.tool_quantifiers,
+        tool_quantifiers=tool_quantifiers,
         closed_conditions=closed_conditions,
         split_checks={
             atom_id: check for atom_id, check in c.split_checks.items() if atom_id in retained_atoms
