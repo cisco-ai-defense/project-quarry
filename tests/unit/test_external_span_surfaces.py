@@ -9,7 +9,6 @@ import pytest
 from pydantic import TypeAdapter
 
 from quarry.cli import format_results
-from quarry.integrations import model_inference
 from quarry.plugin import server
 from quarry.plugin.contracts import ScanResponse
 from quarry.plugin.service import QuarryPlugin
@@ -38,13 +37,9 @@ async def test_cli_and_real_mcp_preserve_typed_failures_without_host_payloads(
     }[kind]
     cli = json.loads(format_results([native], format_type="json"))[0]
     assert {f["category"] for f in cli["failures"]} == {expected}
-    # This replaces the host registration boundary only. All service, scan,
-    # schema validation, MCP framing and serialization code below is real.
-    defaults = model_inference._default_adapters()
-    monkeypatch.setattr(
-        model_inference, "_default_adapters", lambda: {**defaults, "external": adapter}
+    plugin = QuarryPlugin(
+        runtime_config=compiled._scanner.config, model_adapters={"external": adapter}
     )
-    plugin = QuarryPlugin(runtime_config=compiled._scanner.config)
     monkeypatch.setattr(server, "_service", plugin)
     packet = await server.mcp.call_tool(
         "quarry_scan",

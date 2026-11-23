@@ -35,6 +35,7 @@ from dataclasses import replace
 from importlib import resources
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, Literal
 
 import yaml
@@ -359,14 +360,31 @@ def _brief_report(report: dict[str, Any], *, visualize: bool) -> dict[str, Any]:
 class QuarryPlugin:
     """Implement the five read-only Quarry tools against one installed Quarry version."""
 
-    def __init__(self, runtime_config: QuarryConfig | None = None):
+    def __init__(
+        self,
+        runtime_config: QuarryConfig | None = None,
+        *,
+        model_adapters: Mapping[str, Any] | None = None,
+    ):
+        self._model_adapters = (
+            None if model_adapters is None else MappingProxyType(dict(model_adapters))
+        )
         if runtime_config is not None:
             # Report at startup each configured model that cannot get credentials, so the host
             # learns it before the first scan. Only a rule that uses that model fails to load,
             # and the other tools keep working.
             for model_id in sorted(runtime_config.models):
                 try:
-                    backend = ModelInferenceBackend(runtime_config, models_to_load=[model_id])
+                    adapter_kwargs: dict[str, Any] = (
+                        {"adapters": self._model_adapters}
+                        if self._model_adapters is not None
+                        else {}
+                    )
+                    backend = ModelInferenceBackend(
+                        runtime_config,
+                        models_to_load=[model_id],
+                        **adapter_kwargs,
+                    )
                     backend.require_credentials([model_id])
                 except ConfigurationError as exc:
                     _logger.warning(f"{exc}. A rule that uses this model will fail to load.")
@@ -931,11 +949,15 @@ class QuarryPlugin:
             config = self._rule_config(rule_text, config_version)
             # A batch reports every timeout per conversation, with its partial result, so the
             # re-raise that fail_on_timeout selects is turned off, as for QuarryGuard.
+            adapter_kwargs: dict[str, Any] = (
+                {"model_adapters": self._model_adapters} if self._model_adapters is not None else {}
+            )
             scanner = DSLScanner(
                 config,
                 llm_rate_limiter=self._rate_limiter,
                 limits=replace(config.get_safety_limits(), fail_on_timeout=False),
                 _allow_parameters=True,
+                **adapter_kwargs,
             )
             requirements = scanner.resource_requirements
             validation_warnings = []

@@ -56,11 +56,38 @@ class SyntheticAdapter:
         )
 ```
 
-Pass the adapter as `adapters={"my_external_adapter": SyntheticAdapter()}` when
-constructing the backend and supply that backend through the existing scanner or
-compiled-policy API. Adapter registration is trusted host code; this configuration
-does not import arbitrary modules or create a transport. A standalone installation
-cannot resolve an arbitrary custom adapter name using only its configuration file.
+Register the adapter in trusted host startup code. A scanner creates its backend lazily
+for the models used by its rules:
+
+```python
+from quarry.scanner import DSLScanner
+
+scanner = DSLScanner(config, model_adapters={"my_external_adapter": SyntheticAdapter()})
+```
+
+An embedded CLI or MCP service accepts the same registry at startup:
+
+```python
+from quarry.cli import main
+from quarry.plugin.service import QuarryPlugin
+
+registry = {"my_external_adapter": SyntheticAdapter()}
+exit_code = main(
+    ["scan", "--config", "synthetic.yaml", "--target", "synthetic.json"],
+    model_adapters=registry,
+)
+service = QuarryPlugin(runtime_config=config, model_adapters=registry)
+```
+
+Each scanner or service copies the registry, retaining the host adapter instances.
+Changing the caller's dictionary later does not replace its registrations. Alternatively,
+pass `adapters=registry` when constructing `ModelInferenceBackend` and supply that backend
+through the existing scanner or compiled-policy API. A scanner cannot receive both a
+prebuilt backend and `model_adapters`.
+
+Registration does not import arbitrary modules or create a transport. Standalone CLI
+configuration and MCP tool inputs cannot register callbacks or resolve arbitrary custom
+adapter names. The host chooses which callbacks receive the rendered input.
 
 Ranges use half-open Python string character offsets, including Unicode characters,
 and scores must be finite native numbers in `[0, 1]`. Detections must be nonempty and

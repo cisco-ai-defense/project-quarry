@@ -18,7 +18,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from quarry.config import ExternalSpanConfig, QuarryConfig
@@ -237,11 +238,17 @@ class ResourceManager:
         *,
         model_inference_backend: ModelInferenceBackend | None = None,
         llm_rate_limiter: LLMRateLimiter | None = None,
+        model_adapters: Mapping[str, Any] | None = None,
     ):
         """Initialize resources for the configured model backend and rate limiter."""
         self.config = config
         self.llm_rate_limiter = llm_rate_limiter
         self.model_inference_backend = model_inference_backend
+        if model_inference_backend is not None and model_adapters is not None:
+            raise ValueError("model_adapters and model_inference_backend are mutually exclusive")
+        self.model_adapters = (
+            None if model_adapters is None else MappingProxyType(dict(model_adapters))
+        )
 
         # Prober backends for semantic agent-drift predicates. These default to None so a
         # rule using a prober FAILS CLOSED at load unless a real backend is registered (see
@@ -603,6 +610,9 @@ class ResourceManager:
 
         if self.llm_rate_limiter is None:
             self.llm_rate_limiter = LLMRateLimiter(self.config.llm_rate_limits)
+        adapter_kwargs: dict[str, Any] = (
+            {"adapters": self.model_adapters} if self.model_adapters is not None else {}
+        )
         self.model_inference_backend = ModelInferenceBackend(
             self.config,
             models_to_load=list(requirements.get("llm_models", set())),
@@ -610,6 +620,7 @@ class ResourceManager:
             classification_models_to_load=self._required_classifiers(requirements),
             span_models_to_load=requirements.get("model_span_models", set()),
             rate_limiter=self.llm_rate_limiter,
+            **adapter_kwargs,
         )
         self._require_transforms(requirements)
         self.model_inference_backend.require_credentials(requirements.get("llm_models", set()))
