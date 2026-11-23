@@ -9,11 +9,15 @@ import asyncio
 import math
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+import quarry.scanner as scanner_module
 from quarry.config import QuarryConfig
+from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner
@@ -122,13 +126,48 @@ def test_concurrent_scans_have_isolated_timeouts(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("api", ["sync", "async"])
-def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api) -> None:
-    adapter = _SlowAdapter(0.5)
+def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api, monkeypatch) -> None:
+    now = timer.time.monotonic()
+    armed = []
+
+    def clock():
+        return now
+
+    def arm_timeout(seconds):
+        assert seconds == 10
+        deadline = timer.current_evaluation_deadline()
+        assert deadline is not None and deadline.error_message == "Rule m timeout"
+        timeout = asyncio.timeout(seconds)
+        armed.append((asyncio.get_running_loop(), timeout, deadline))
+        return timeout
+
+    class ScannerAsyncio:
+        timeout = staticmethod(arm_timeout)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", ScannerAsyncio())
+
+    class Admitted(_SlowAdapter):
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            nonlocal now
+            self.calls += 1
+            # Expire the real rule timeout after admission, independent of scheduler load.
+            assert len(armed) == 1
+            loop, rule_timeout, deadline = armed[0]
+            now = deadline.expires_at
+            loop.call_soon_threadsafe(rule_timeout.reschedule, loop.time())
+            await asyncio.Future()
+
+    adapter = Admitted(0.5)
     scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
         adapter=adapter,
-        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+        limits=SafetyLimits(rule_timeout=10.0, fail_on_timeout=True),
     )
 
     with pytest.raises(QuarryTimeoutError, match="Rule m timeout") as exc_info:
