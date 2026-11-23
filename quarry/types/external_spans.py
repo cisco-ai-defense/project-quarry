@@ -3,17 +3,17 @@
 
 """Bounded native range replies for an explicit external-span adapter contract.
 
-This module is an unpublished building block. It does not dispatch a callback or
-authorize a policy result. Adapter integration must preserve incomplete-result failure
-semantics and perform validation outside cache and observation locks.
-Length and range validation establish geometry; request/cache identity and native
-source provenance remain responsibilities of that integration.
+These native values describe reply geometry and exact request identity. They do not
+authorize a policy result. Adapter integration preserves incomplete-result failure
+semantics, validates outside cache/observation locks, and binds each reader's native
+source provenance independently.
 """
 
 from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from math import isfinite
 
 _MAX_CHARACTERS = 4_000_000
@@ -26,6 +26,13 @@ class ExternalSpanReplyError(ValueError):
 
 class ExternalSpanLimitError(ExternalSpanReplyError):
     """External reply inspection exceeded the reader's explicit resource budget."""
+
+
+def external_span_input_digest(text: str) -> str:
+    """Identify the exact immutable request, including unpaired Unicode surrogates."""
+    if type(text) is not str or len(text) > _MAX_CHARACTERS:
+        raise ExternalSpanLimitError("invalid external span request text")
+    return sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def _interval(start, end, *, empty):
@@ -125,6 +132,7 @@ class ExternalSpanReply:
     spans: tuple[ExternalSpanRange, ...]
     coverage: tuple[ExternalReadRange, ...]
     complete: bool
+    input_digest: str | None = None
     _coverage_union: tuple[tuple[int, int], ...] = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -135,6 +143,12 @@ class ExternalSpanReply:
             raise ExternalSpanReplyError("invalid external span input length")
         if type(self.complete) is not bool:
             raise ExternalSpanReplyError("external span completeness must be a boolean")
+        if self.input_digest is not None and (
+            type(self.input_digest) is not str
+            or len(self.input_digest) != 64
+            or any(c not in "0123456789abcdef" for c in self.input_digest)
+        ):
+            raise ExternalSpanReplyError("invalid external span request digest")
         spans, coverage = [], []
         for value in _native_sequence(self.spans, _MAX_RANGES):
             if type(value) is not ExternalSpanRange:
@@ -173,6 +187,16 @@ class ExternalSpanReply:
         """The exact interval union, independent from detection count or overlaps."""
         return sum(end - start for start, end in self._coverage_union)
 
+    @classmethod
+    def for_input(cls, text, spans, coverage, *, complete):
+        """Construct a reply bound to the exact text the host actually inspected.
+
+        The digest detects stale replies for a different, equally sized request. It
+        cannot prove that a provider's declared inspection actually took place.
+        """
+        digest = external_span_input_digest(text)
+        return cls(len(text), spans, coverage, complete, digest)
+
 
 def validate_external_span_reply(
     reply: object, input_characters: int, limits: ExternalSpanLimits | None = None
@@ -198,6 +222,7 @@ def validate_external_span_reply(
     try:
         declared = reply.input_characters
         span_values, coverage_values, complete = reply.spans, reply.coverage, reply.complete
+        digest = reply.input_digest
     except AttributeError:
         raise ExternalSpanReplyError("invalid external span reply fields") from None
     if type(declared) is not int or declared != input_characters:
@@ -214,4 +239,4 @@ def validate_external_span_reply(
     span_snapshot, coverage_snapshot = span_values[:spans], coverage_values[:coverage]
     if len(span_snapshot) != spans or len(coverage_snapshot) != coverage:
         raise ExternalSpanReplyError("external span ranges changed during inspection")
-    return ExternalSpanReply(input_characters, span_snapshot, coverage_snapshot, complete)
+    return ExternalSpanReply(input_characters, span_snapshot, coverage_snapshot, complete, digest)

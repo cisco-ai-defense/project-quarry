@@ -48,7 +48,13 @@ from quarry.cache.async_cache import cache_retention, current_scan, result_cache
 from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.scan_responses import ScanResponses
-from quarry.config import InferenceModelConfig, QuarryConfig, ScoreConfig
+from quarry.config import (
+    ExternalSpanConfig,
+    InferenceModelConfig,
+    QuarryConfig,
+    ScoreConfig,
+    SpanConfig,
+)
 from quarry.core.conversation import Conversation
 from quarry.integrations.adapter_transforms import (
     keep_transform,
@@ -2134,10 +2140,22 @@ class ModelInferenceBackend:
     def require_span_models(self, model_ids: Collection[str]) -> None:
         """Fail before scanning when a required model cannot produce spans."""
 
-        plain = [model_id for model_id in model_ids if self._model(model_id).windows is None]
+        external = [
+            model_id
+            for model_id in model_ids
+            if isinstance(self._model(model_id).spans, ExternalSpanConfig)
+        ]
+        self._require_capability(external, "external_spans", "produce external spans")
+        plain = [
+            model_id
+            for model_id in model_ids
+            if model_id not in external and self._model(model_id).windows is None
+        ]
         self._require_capability(plain, "classify_messages", "classify messages")
         self._require_capability(plain, "decode_spans", "decode spans")
         for model_id in model_ids:
+            if model_id in external:
+                continue
             model = self._model(model_id)
             if model.windows is not None:
                 self._require_window_adapter(model_id, spans=True)
@@ -2724,7 +2742,7 @@ class ModelInferenceBackend:
         # A request is shaped by the provider settings and its own operation's section; a
         # category, class index, span head or score calibration only reads the response, and
         # a score's builder and boundary only shape the messages its key names.
-        if method == "transform":
+        if method in {"transform", "external_spans"}:
             # A host transform receives the whole model configuration and may read every
             # field, so none of its operation sections can be omitted from request identity.
             return model
@@ -3450,7 +3468,7 @@ class ModelInferenceBackend:
 
     async def _model_window_spans(self, model_id, messages, threshold, *, timeout):
         model = self._model(model_id)
-        assert model.spans is not None
+        assert isinstance(model.spans, SpanConfig)
         class_index = model.spans.class_index
         await require_model_messages(messages)
 
@@ -3651,7 +3669,10 @@ class ModelInferenceBackend:
             if node.kind == "model_call" and str(node.value).endswith("\x1fspans"):
                 alias = str(node.value).split("\x1f", 1)[0]
                 model = self._model(alias)
-                if getattr(self.adapters[model.adapter], "supports_token_head", False) is True:
+                if (
+                    not isinstance(model.spans, ExternalSpanConfig)
+                    and getattr(self.adapters[model.adapter], "supports_token_head", False) is True
+                ):
                     self._require_head_adapter(alias)
                     requests.add(
                         (
@@ -3670,6 +3691,8 @@ class ModelInferenceBackend:
     def _token_head_for(self, model_id: str, *, producer: bool = False, candidates=None) -> bool:
         """Use a typed input plan, or compatible loaded aliases for direct native calls."""
         model = self._model(model_id)
+        if producer and isinstance(model.spans, ExternalSpanConfig):
+            return False
         adapter = self.adapters[model.adapter]
         planned = head_requests(self)
         if candidates is None:
@@ -3685,6 +3708,7 @@ class ModelInferenceBackend:
         else:
             compatible = any(
                 self.models[alias].spans is not None
+                and not isinstance(self.models[alias].spans, ExternalSpanConfig)
                 and self.models[alias].adapter == model.adapter
                 and self._settings_digest(method, self.models[alias]) == settings
                 for alias in self._loaded_model_ids
@@ -3846,6 +3870,12 @@ class ModelInferenceBackend:
                 raise ConfigurationError(f"Inference model '{model_id}' has no spans configuration")
             if model.category is None:
                 raise ConfigurationError(f"Inference model '{model_id}' has no category")
+            if isinstance(model.spans, ExternalSpanConfig):
+                from quarry.integrations.external_span_adapter import read_external_spans
+
+                return await read_external_spans(
+                    self, model_id, messages, threshold, timeout=timeout
+                )
             if model.windows is not None:
                 return await self._model_window_spans(
                     model_id, messages, threshold, timeout=timeout

@@ -63,6 +63,9 @@ FailureCategory = Literal[
     "truncated_input",
     "evaluation_limit",
     "unknown",
+    "model_provider",
+    "model_invalid_output",
+    "model_partial_read",
 ]
 DurationSeconds = Annotated[
     StrictFloat,
@@ -74,7 +77,7 @@ TelemetryModelAlias = Annotated[
     Field(min_length=1, max_length=MAX_MODEL_ALIAS_CHARS),
 ]
 TelemetryOperation = Annotated[
-    Literal["score", "classify", "complete", "input_tokens"],
+    Literal["score", "classify", "complete", "input_tokens", "spans"],
     Field(max_length=MAX_MODEL_OPERATION_CHARS),
 ]
 

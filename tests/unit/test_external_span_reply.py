@@ -1,13 +1,13 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fresh synthetic native-protocol controls; adapter/frontends remain unimplemented."""
+"""Fresh synthetic native-protocol controls, independent of provider transports."""
 
 from dataclasses import replace
 
 import pytest
 
-from quarry.integrations.external_span_reply import (
+from quarry.types.external_spans import (
     ExternalReadRange,
     ExternalSpanLimitError,
     ExternalSpanLimits,
@@ -25,6 +25,31 @@ def reply(*, complete=True):
         (ExternalReadRange(3, 6), ExternalReadRange(0, 2), ExternalReadRange(2, 4)),
         complete,
     )
+
+
+def test_request_digest_has_a_stable_native_protocol_vector():
+    native = ExternalSpanReply.for_input("abc", (), (ExternalReadRange(0, 3),), complete=True)
+    assert native.input_digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert validate_external_span_reply(native, 3).input_digest == native.input_digest
+    assert (
+        ExternalSpanReply.for_input(
+            "xyz", (), (ExternalReadRange(0, 3),), complete=True
+        ).input_digest
+        != native.input_digest
+    )
+
+
+@pytest.mark.parametrize("digest", [False, b"0" * 64, "0" * 63, "g" * 64])
+def test_malformed_native_request_digests_are_rejected(digest):
+    with pytest.raises(ExternalSpanReplyError):
+        ExternalSpanReply(0, (), (), True, digest)
+
+
+def test_request_digest_handles_unicode_character_offsets_without_byte_coercion():
+    text = "🙂\ud800a"
+    native = ExternalSpanReply.for_input(text, (), (ExternalReadRange(0, 3),), complete=True)
+    assert native.input_characters == 3 and len(native.input_digest) == 64
+    assert validate_external_span_reply(native, 3).covered_characters == 3
 
 
 def test_complete_ranges_are_detached_and_overlapping_coverage_is_a_union():

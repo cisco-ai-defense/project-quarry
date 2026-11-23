@@ -48,6 +48,9 @@ from quarry.scanner import DSLScanner, _failure_category
 from quarry.types.exceptions import (
     EvaluationError,
     EvaluationTimeoutError,
+    ExternalSpanInvalidOutputError,
+    ExternalSpanPartialReadError,
+    ExternalSpanProviderError,
     LLMError,
     ModelError,
     ResourceError,
@@ -84,6 +87,9 @@ def test_failure_category_wire_values_remain_stable():
         "truncated_input",
         "evaluation_limit",
         "unknown",
+        "model_provider",
+        "model_invalid_output",
+        "model_partial_read",
     ]
 
 
@@ -127,6 +133,9 @@ def test_exhaustive_completion_state_and_failure_presence(flags):
         (EvaluationTimeoutError("Check", 1), Category.TIMEOUT),
         (ValueError("authentication timeout resource limit"), Category.UNKNOWN),
         (Exception("arbitrary"), Category.UNKNOWN),
+        (ExternalSpanProviderError("arbitrary"), Category.MODEL_PROVIDER),
+        (ExternalSpanInvalidOutputError("arbitrary"), Category.MODEL_INVALID_OUTPUT),
+        (ExternalSpanPartialReadError("arbitrary"), Category.MODEL_PARTIAL_READ),
     ],
 )
 def test_classification_uses_exception_types_only(error, expected):

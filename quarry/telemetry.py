@@ -31,7 +31,7 @@ MAX_MODEL_USAGE_CALLS: Final = 1_000_000
 MAX_MODEL_ALIAS_CHARS: Final = 200
 MAX_MODEL_OPERATION_CHARS: Final = 64
 
-ModelOperation = Literal["score", "classify", "complete", "input_tokens"]
+ModelOperation = Literal["score", "classify", "complete", "input_tokens", "spans"]
 
 _PUBLIC_OPERATIONS: Final[dict[str, ModelOperation]] = {
     "score": "score",
@@ -44,6 +44,7 @@ _PUBLIC_OPERATIONS: Final[dict[str, ModelOperation]] = {
     "window_token_counts": "input_tokens",
     "classify_window_batch": "classify",
     "transform": "complete",
+    "external_spans": "spans",
 }
 
 

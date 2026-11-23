@@ -75,6 +75,7 @@ class ModelRead:
         self._parts_requested = False
         self._complete_characters = self._characters
         self._complete_cut = None
+        self._external_partial = False
 
     def _slot(self, slot: str) -> bool:
         if type(slot) is str and slot in {"input", "context", "constitution", "tools"}:
@@ -101,6 +102,16 @@ class ModelRead:
     def unavailable(self, *, slot: str) -> None:
         if not self._limited and self._slot(slot) and slot not in self._inputs:
             self._add(slot, InputMeasurement(UnitMeasurement("characters", "unavailable"), None))
+
+    def external_input(self, source, coverage, *, complete):
+        if self._limited:
+            return
+        session = self._session()
+        if session is not None and self._pid == os.getpid():
+            from quarry.integrations.read_external_spans import collect_external_input
+
+            self._external_partial = not complete
+            self._add("input", collect_external_input(session, source, coverage, complete=complete))
 
     def tools(self, tools: object) -> None:
         if self._limited:
@@ -172,7 +183,11 @@ class ModelRead:
         ranges = tuple(interval for _, item in ordered for interval in item.characters.intervals)
         if complete:
             characters = UnitMeasurement("characters", "measured", ranges)
-        elif ranges:
+        elif (
+            ranges
+            or self._external_partial
+            and all(item.characters.state in {"measured", "partial"} for _, item in ordered)
+        ):
             characters = UnitMeasurement("characters", "partial", ranges)
         else:
             states = {item.characters.state for _, item in ordered}

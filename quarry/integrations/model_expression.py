@@ -2361,20 +2361,26 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
 
     observation = current_model_read()
     if observation is not None:
+        from quarry.config import ExternalSpanConfig
         from quarry.integrations.model_inference import ModelInferenceBackend
 
-        window_owned = False
+        input_owned = False
         if operation in {"classify", "spans"} and isinstance(backend, ModelInferenceBackend):
             method_name = (
                 "model_classify_messages" if operation == "classify" else "model_span_messages"
             )
             method = getattr(backend, method_name)
-            window_owned = (
-                backend._model(alias).windows is not None
+            model = backend._model(alias)
+            input_owned = (
+                (
+                    model.windows is not None
+                    or operation == "spans"
+                    and isinstance(model.spans, ExternalSpanConfig)
+                )
                 and isinstance(method, MethodType)
                 and method.__func__ is getattr(ModelInferenceBackend, method_name)
             )
-        if not window_owned:
+        if not input_owned:
             observation.messages(arguments[0])
         if operation == "score":
             observation.value("constitution", arguments[1], slot="constitution")
@@ -2386,7 +2392,7 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
                 else None
             )
         if (
-            not window_owned
+            not input_owned
             and tools is not None
             and (type(tools) not in (tuple, list) or len(tools))
         ):

@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from quarry.config import QuarryConfig
+from quarry.config import ExternalSpanConfig, QuarryConfig
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.language.runtime import functions_in_resource_group, inference_functions
@@ -346,8 +346,15 @@ class ResourceManager:
                         tuple(call for call in configured_calls if call.name in _token_functions())
                     )
                 )
-                requirements["model_classification_models"].update(
-                    self._required_models_from_calls(classification_calls)
+                classifiers = self._required_models_from_calls(classification_calls)
+                requirements["model_classification_models"].update(classifiers)
+                # Existing classifier-span artifacts retain their exact requirement
+                # shape. Only the new explicit external mode needs to distinguish
+                # a legacy classifier call from its span-only requirement.
+                requirements["model_operations"].update(
+                    (alias, "classify")
+                    for alias in classifiers
+                    if self._is_external_span_model(alias)
                 )
 
             if model_calls:
@@ -535,6 +542,27 @@ class ResourceManager:
             )
             raise ResourcePreparationError(error_msg, requirements)
 
+    def _is_external_span_model(self, alias: str) -> bool:
+        models = (
+            self.model_inference_backend.models
+            if self.model_inference_backend is not None
+            else self.config.models
+        )
+        model = models.get(alias)
+        return model is not None and isinstance(model.spans, ExternalSpanConfig)
+
+    def _required_classifiers(self, requirements: dict[str, set[Any]]) -> set[str]:
+        operations = requirements.get("model_operations", set())
+        return {
+            alias
+            for alias in requirements.get("model_classification_models", set())
+            if not (
+                self._is_external_span_model(alias)
+                and (alias, "spans") in operations
+                and (alias, "classify") not in operations
+            )
+        }
+
     def load_required_resources(self, requirements: dict[str, set[Any]]) -> None:
         """
         Pre-load all required resources.
@@ -558,7 +586,7 @@ class ResourceManager:
                 requirements.get("llm_complete_models", set())
             )
             self.model_inference_backend.require_classification_models(
-                requirements.get("model_classification_models", set())
+                self._required_classifiers(requirements)
             )
             span_models = requirements.get("model_span_models", set())
             if span_models:
@@ -579,7 +607,7 @@ class ResourceManager:
             self.config,
             models_to_load=list(requirements.get("llm_models", set())),
             completion_models_to_load=requirements.get("llm_complete_models", set()),
-            classification_models_to_load=requirements.get("model_classification_models", set()),
+            classification_models_to_load=self._required_classifiers(requirements),
             span_models_to_load=requirements.get("model_span_models", set()),
             rate_limiter=self.llm_rate_limiter,
         )

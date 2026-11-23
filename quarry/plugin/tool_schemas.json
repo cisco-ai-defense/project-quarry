@@ -1382,7 +1382,10 @@
               "skipped",
               "truncated_input",
               "evaluation_limit",
-              "unknown"
+              "unknown",
+              "model_provider",
+              "model_invalid_output",
+              "model_partial_read"
             ],
             "title": "Category",
             "type": "string"
@@ -1463,7 +1466,8 @@
               "score",
               "classify",
               "complete",
-              "input_tokens"
+              "input_tokens",
+              "spans"
             ],
             "maxLength": 64,
             "title": "Operation",

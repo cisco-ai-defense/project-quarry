@@ -145,6 +145,9 @@ from quarry.types.exceptions import (
     ConversationValidationError,
     EvaluationError,
     EvaluationTimeoutError,
+    ExternalSpanInvalidOutputError,
+    ExternalSpanPartialReadError,
+    ExternalSpanProviderError,
     InvalidInputError,
     LLMError,
     ModelError,
@@ -153,6 +156,7 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
+from quarry.types.external_spans import ExternalSpanLimitError
 from quarry.types.failures import ScanFailureCategory, _category_from_metadata
 from quarry.types.messages import (
     Message,
@@ -255,6 +259,14 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.TIMEOUT
     if issubclass(error_type, ConversationValidationError | InvalidInputError):
         return ScanFailureCategory.INVALID_INPUT
+    if issubclass(error_type, ExternalSpanPartialReadError):
+        return ScanFailureCategory.MODEL_PARTIAL_READ
+    if issubclass(error_type, ExternalSpanInvalidOutputError):
+        return ScanFailureCategory.MODEL_INVALID_OUTPUT
+    if issubclass(error_type, ExternalSpanProviderError):
+        return ScanFailureCategory.MODEL_PROVIDER
+    if issubclass(error_type, ExternalSpanLimitError):
+        return ScanFailureCategory.EVALUATION_LIMIT
     if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL
     if issubclass(error_type, ResourceError | ResourcePreparationError):

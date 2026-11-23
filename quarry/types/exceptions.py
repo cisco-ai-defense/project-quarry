@@ -191,6 +191,18 @@ class LLMError(ResourceError):
     """Raised when LLM operations fail."""
 
 
+class ExternalSpanProviderError(LLMError):
+    """An external-span provider failed before returning a validated reply."""
+
+
+class ExternalSpanInvalidOutputError(LLMError):
+    """An external-span reply cannot be admitted or bound to its actual request."""
+
+
+class ExternalSpanPartialReadError(LLMError):
+    """The selected external-span read is explicitly incomplete and non-authoritative."""
+
+
 # The ``LLMError`` code of a refused model call: the model gave no usable answer.
 MODEL_REFUSED = "model_refused"
 
