@@ -203,6 +203,22 @@ class ExternalSpanPartialReadError(LLMError):
     """The selected external-span read is explicitly incomplete and non-authoritative."""
 
 
+class CandidateInvalidOutputError(LLMError):
+    """A candidate batch cannot be admitted against its complete native request."""
+
+
+class CandidateInvalidInputError(InvalidInputError):
+    """Candidate input has no exact native source-part geometry."""
+
+
+class CandidatePartialReadError(LLMError):
+    """At least one requested candidate channel is incomplete and non-authoritative."""
+
+
+class CandidateProviderError(LLMError):
+    """A registered candidate provider or check failed with sanitized diagnostics."""
+
+
 class LocalTokenizerUnavailableError(LLMError):
     """The explicitly configured local tokenizer or template cannot be used."""
 

@@ -22,7 +22,7 @@ from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from quarry.config import ExternalSpanConfig, QuarryConfig
+from quarry.config import CandidateSpanConfig, ExternalSpanConfig, QuarryConfig
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.language.runtime import functions_in_resource_group, inference_functions
@@ -361,7 +361,7 @@ class ResourceManager:
                 requirements["model_operations"].update(
                     (alias, "classify")
                     for alias in classifiers
-                    if self._is_external_span_model(alias)
+                    if self._is_direct_span_model(alias)
                 )
 
             if model_calls:
@@ -549,14 +549,16 @@ class ResourceManager:
             )
             raise ResourcePreparationError(error_msg, requirements)
 
-    def _is_external_span_model(self, alias: str) -> bool:
+    def _is_direct_span_model(self, alias: str) -> bool:
         models = (
             self.model_inference_backend.models
             if self.model_inference_backend is not None
             else self.config.models
         )
         model = models.get(alias)
-        return model is not None and isinstance(model.spans, ExternalSpanConfig)
+        return model is not None and isinstance(
+            model.spans, ExternalSpanConfig | CandidateSpanConfig
+        )
 
     def _required_classifiers(self, requirements: dict[str, set[Any]]) -> set[str]:
         operations = requirements.get("model_operations", set())
@@ -564,7 +566,7 @@ class ResourceManager:
             alias
             for alias in requirements.get("model_classification_models", set())
             if not (
-                self._is_external_span_model(alias)
+                self._is_direct_span_model(alias)
                 and (alias, "spans") in operations
                 and (alias, "classify") not in operations
             )

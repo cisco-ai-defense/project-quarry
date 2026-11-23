@@ -45,6 +45,7 @@ _PUBLIC_OPERATIONS: Final[dict[str, ModelOperation]] = {
     "classify_window_batch": "classify",
     "transform": "complete",
     "external_spans": "spans",
+    "candidate_batch": "spans",
 }
 
 

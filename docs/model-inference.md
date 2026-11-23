@@ -284,6 +284,9 @@ For host-supplied spans with explicit complete or partial coverage, see
 [external span adapters](external-spans.md). That mode uses its own dispatch contract
 and does not require classifier or token heads for span-only policies.
 
+For explicitly registered local patterns, named checks and shared host batches,
+see [candidate providers](candidate-providers.md).
+
 Decode character spans using `CharacterWindow.span(...)` or the supplied `SourceText.span(...)`.
 For token spans, use positions in the full encoding and the host's actual character mapping;
 token indices are not character offsets. Keep the geometry returned by the source and add the

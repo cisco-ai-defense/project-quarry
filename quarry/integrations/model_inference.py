@@ -49,6 +49,7 @@ from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
 from quarry.cache.scan_responses import ScanResponses
 from quarry.config import (
+    CandidateSpanConfig,
     ExternalSpanConfig,
     InferenceModelConfig,
     QuarryConfig,
@@ -2225,6 +2226,16 @@ class ModelInferenceBackend:
     def require_span_models(self, model_ids: Collection[str]) -> None:
         """Fail before scanning when a required model cannot produce spans."""
 
+        candidates = [
+            model_id
+            for model_id in model_ids
+            if isinstance(self._model(model_id).spans, CandidateSpanConfig)
+        ]
+        if candidates:
+            from quarry.integrations.candidate_providers import require_candidate_provider
+
+            for model_id in candidates:
+                require_candidate_provider(self._model(model_id), self.adapters)
         external = [
             model_id
             for model_id in model_ids
@@ -2234,12 +2245,14 @@ class ModelInferenceBackend:
         plain = [
             model_id
             for model_id in model_ids
-            if model_id not in external and self._model(model_id).windows is None
+            if model_id not in external
+            and model_id not in candidates
+            and self._model(model_id).windows is None
         ]
         self._require_capability(plain, "classify_messages", "classify messages")
         self._require_capability(plain, "decode_spans", "decode spans")
         for model_id in model_ids:
-            if model_id in external:
+            if model_id in external or model_id in candidates:
                 continue
             model = self._model(model_id)
             if model.windows is not None:
@@ -2701,6 +2714,7 @@ class ModelInferenceBackend:
         refusals: bool = False,
         cache_category: str | None = None,
         local: bool = False,
+        request_settings_digest: bytes | None = None,
     ) -> Any:
         """Send one adapter request, ``adapter.<method>(model, *payload())``, or reuse the
         response to the same request, and return ``read(response)``. ``payload`` is built only
@@ -2778,7 +2792,7 @@ class ModelInferenceBackend:
                 if reason is None:
                     raise
                 return _Refused(reason, _REFUSAL_MESSAGES[reason])
-            return response if prepare is None else prepare(response)
+            return response if prepare is None else await _read(response, prepare)
 
         # An adapter's configuration is not visible in its class, so each instance names its
         # own results.
@@ -2786,7 +2800,9 @@ class ModelInferenceBackend:
             "local-model-request-v1" if local else "model-request",
             method,
             object_identity(adapter),
-            self._settings_digest(method, model),
+            self._settings_digest(method, model)
+            if request_settings_digest is None
+            else request_settings_digest,
             *key,
         )
         wait_timeout = None
@@ -3787,7 +3803,7 @@ class ModelInferenceBackend:
                 alias = str(node.value).split("\x1f", 1)[0]
                 model = self._model(alias)
                 if (
-                    not isinstance(model.spans, ExternalSpanConfig)
+                    not isinstance(model.spans, ExternalSpanConfig | CandidateSpanConfig)
                     and getattr(self.adapters[model.adapter], "supports_token_head", False) is True
                 ):
                     self._require_head_adapter(alias)
@@ -3808,7 +3824,7 @@ class ModelInferenceBackend:
     def _token_head_for(self, model_id: str, *, producer: bool = False, candidates=None) -> bool:
         """Use a typed input plan, or compatible loaded aliases for direct native calls."""
         model = self._model(model_id)
-        if producer and isinstance(model.spans, ExternalSpanConfig):
+        if producer and isinstance(model.spans, ExternalSpanConfig | CandidateSpanConfig):
             return False
         adapter = self.adapters[model.adapter]
         planned = head_requests(self)
@@ -3825,7 +3841,9 @@ class ModelInferenceBackend:
         else:
             compatible = any(
                 self.models[alias].spans is not None
-                and not isinstance(self.models[alias].spans, ExternalSpanConfig)
+                and not isinstance(
+                    self.models[alias].spans, ExternalSpanConfig | CandidateSpanConfig
+                )
                 and self.models[alias].adapter == model.adapter
                 and self._settings_digest(method, self.models[alias]) == settings
                 for alias in self._loaded_model_ids
@@ -3987,6 +4005,12 @@ class ModelInferenceBackend:
                 raise ConfigurationError(f"Inference model '{model_id}' has no spans configuration")
             if model.category is None:
                 raise ConfigurationError(f"Inference model '{model_id}' has no category")
+            if isinstance(model.spans, CandidateSpanConfig):
+                from quarry.integrations.candidate_adapter import read_candidate_spans
+
+                return await read_candidate_spans(
+                    self, model_id, messages, threshold, timeout=timeout
+                )
             if isinstance(model.spans, ExternalSpanConfig):
                 from quarry.integrations.external_span_adapter import read_external_spans
 

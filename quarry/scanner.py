@@ -147,9 +147,13 @@ from quarry.safety.validator import (
     validate_conversation_top_level,
 )
 from quarry.telemetry import ModelUsageLedger, add_durations, elapsed_seconds, merge_model_usage
+from quarry.types.candidates import CandidateLimitError
 from quarry.types.context import ScanContext, preflight_conversation_total_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
+    CandidateInvalidOutputError,
+    CandidatePartialReadError,
+    CandidateProviderError,
     ConfigurationError,
     ConversationValidationError,
     EvaluationError,
@@ -271,14 +275,26 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.TIMEOUT
     if issubclass(error_type, ConversationValidationError | InvalidInputError):
         return ScanFailureCategory.INVALID_INPUT
-    if issubclass(error_type, ExternalSpanPartialReadError):
+    if issubclass(error_type, ExternalSpanPartialReadError | CandidatePartialReadError):
         return ScanFailureCategory.MODEL_PARTIAL_READ
-    if issubclass(error_type, ExternalSpanInvalidOutputError | LocalTokenizerInvalidOutputError):
+    if issubclass(
+        error_type,
+        ExternalSpanInvalidOutputError
+        | LocalTokenizerInvalidOutputError
+        | CandidateInvalidOutputError,
+    ):
         return ScanFailureCategory.MODEL_INVALID_OUTPUT
-    if issubclass(error_type, ExternalSpanProviderError | LocalTokenizerUnavailableError):
+    if issubclass(
+        error_type,
+        ExternalSpanProviderError | LocalTokenizerUnavailableError | CandidateProviderError,
+    ):
         return ScanFailureCategory.MODEL_PROVIDER
     if issubclass(
-        error_type, ExternalSpanLimitError | LocalMatchWorkError | LocalTokenizerLimitError
+        error_type,
+        ExternalSpanLimitError
+        | CandidateLimitError
+        | LocalMatchWorkError
+        | LocalTokenizerLimitError,
     ):
         return ScanFailureCategory.EVALUATION_LIMIT
     if issubclass(error_type, LLMError | ModelError):
@@ -796,6 +812,7 @@ class DSLScanner:
         if self.verbose:
             logger.info("[STATUS] Compiling rules to DFA artifacts...")
         compiled: dict[str, Any] = {}
+        local_candidate_aliases = self._registered_local_candidate_aliases()
         for name, rule in rules.items():
             event_token = EVENT_SURFACES.set(self.input_registry.event_surfaces)
             static_token = STATIC_SURFACES.set(self.input_registry.state_surfaces)
@@ -809,6 +826,7 @@ class DSLScanner:
                         if model.complete is not None
                     },
                     transforms=self.config.transforms,
+                    local_candidate_aliases=local_candidate_aliases,
                 )
             finally:
                 INPUT_TEXTS.reset(texts_token)
@@ -823,6 +841,14 @@ class DSLScanner:
         if self.verbose:
             logger.info(f"[STATUS] Compiled {len(compiled)} rules")
         return compiled
+
+    def _registered_local_candidate_aliases(self) -> frozenset[str]:
+        """Attest native registrations without discovering or invoking host capabilities."""
+        from quarry.integrations.candidate_providers import registered_local_candidate_aliases
+
+        return registered_local_candidate_aliases(
+            self.config, self.model_inference_backend, self.model_adapters
+        )
 
     def _parse_rule_text(self, rule_text: str, source: str) -> tuple[DSLRule, ...]:
         """Parse a rule from an inline text string without filesystem access."""

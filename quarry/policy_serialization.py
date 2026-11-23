@@ -44,6 +44,7 @@ from quarry.engine.atoms import (
     ModelExpression,
     StringSemantics,
     is_message_group_expression,
+    model_expression_local_candidates_only,
     model_expression_requires_model,
     validate_constructed_message_graph,
     validate_model_expression,
@@ -635,7 +636,7 @@ def _required_model_expression(raw: object, name: str) -> ModelExpression:
     return expression
 
 
-def _atom_from_wire(raw: object, index: int) -> AtomSpec:
+def _atom_from_wire(raw: object, index: int, local_candidate_aliases=frozenset()) -> AtomSpec:
     name = f"rule.artifact.atom_specs[{index}]"
     value = _mapping(raw, name)
     _exact_keys(value, _ATOM_FIELDS, name)
@@ -653,6 +654,12 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
             model_expression is not None
             and model_expression_requires_model(model_expression)
             and kwargs["cost"] is not Cost.LLM
+            and not (
+                kwargs["cost"] is Cost.MODEL
+                and model_expression_local_candidates_only(
+                    model_expression, local_candidate_aliases
+                )
+            )
         ):
             raise ValueError("model expressions that call a model require LLM cost")
         checked_semantics = dict(semantics)
@@ -1068,6 +1075,7 @@ def _split_checks_from_wire(
     count: list[int],
     computed_depth: int,
     computed_count: list[int],
+    local_candidate_aliases=frozenset(),
 ) -> dict[str, CompiledRuleArtifact]:
     checks: dict[str, CompiledRuleArtifact] = {}
     for index, entry in enumerate(_list(raw, "rule.artifact.split_checks")):
@@ -1085,6 +1093,7 @@ def _split_checks_from_wire(
             _count=count,
             _computed_depth=computed_depth,
             _computed_count=computed_count,
+            local_candidate_aliases=local_candidate_aliases,
         )
     return checks
 
@@ -1178,6 +1187,7 @@ def _artifact_from_wire(
     _count: list[int] | None = None,
     _computed_depth: int = 0,
     _computed_count: list[int] | None = None,
+    local_candidate_aliases=frozenset(),
 ) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
     compiler_version = _string(value.get("compiler_version"), "rule.artifact.compiler_version")
@@ -1192,7 +1202,7 @@ def _artifact_from_wire(
         raise _fail(f"computed message condition depth exceeds {MAX_COMPUTED_CONDITION_DEPTH}")
     path = _called_rule_path(_path, id(value), count)
     specs = [
-        _atom_from_wire(item, index)
+        _atom_from_wire(item, index, local_candidate_aliases)
         for index, item in enumerate(_list(value["atom_specs"], "rule.artifact.atom_specs"))
     ]
     if len({spec.atom_id for spec in specs}) != len(specs):
@@ -1211,7 +1221,13 @@ def _artifact_from_wire(
         tool_quantifiers=_tool_quantifiers_from_wire(value["tool_quantifiers"]),
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
         split_checks=_split_checks_from_wire(
-            value["split_checks"], inputs, path, count, _computed_depth, computed_count
+            value["split_checks"],
+            inputs,
+            path,
+            count,
+            _computed_depth,
+            computed_count,
+            local_candidate_aliases,
         ),
         declared_resources=_declared_resources_from_wire(value["declared_resources"]),
         declared_pattern_checks=declared_check_names(
@@ -1242,6 +1258,7 @@ def _artifact_from_wire(
                 _count=count,
                 _computed_depth=_computed_depth + 1,
                 _computed_count=computed_count,
+                local_candidate_aliases=local_candidate_aliases,
             ),
         )
     artifact = replace(artifact, computed_conditions=computed)
@@ -1536,7 +1553,16 @@ def load_compiled_policy(
     metadata = _string_mapping(rule_value["metadata"], "rule.metadata")
     try:
         recorded_inputs = _mapping(value.get("inputs", {}), "inputs")
-        artifact = _artifact_from_wire(rule_value["artifact"], frozenset(recorded_inputs))
+        from quarry.integrations.candidate_providers import registered_local_candidate_aliases
+
+        local_candidate_aliases = registered_local_candidate_aliases(
+            runtime_config or QuarryConfig(config_version=config_version), model_inference_backend
+        )
+        artifact = _artifact_from_wire(
+            rule_value["artifact"],
+            frozenset(recorded_inputs),
+            local_candidate_aliases=local_candidate_aliases,
+        )
         requirements = requirements_from_artifact(artifact)
     except RecursionError as exc:
         raise _fail("compiled artifact exceeds the supported nesting depth") from exc
