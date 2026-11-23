@@ -46,6 +46,7 @@ from quarry.plugin.service import (
     load_runtime_config,
 )
 from quarry.policy import bind_prepared_policy
+from quarry.safety import timer as evaluation_timer
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.results import Score, Span
@@ -1328,22 +1329,99 @@ async def test_a_batch_explains_after_its_deadline_without_losing_a_verdict(tmp_
     ] == [[(), (index,)] for index in range(3)]
 
 
+class _ExplorationBudgetClock:
+    """Charge declared provider work to the actual task-local evidence deadline."""
+
+    def __init__(self):
+        self.native_monotonic = evaluation_timer.time.monotonic
+        self.deadlines = {}
+        self.elapsed = {}
+
+    def monotonic(self):
+        deadline = evaluation_timer.current_evaluation_deadline()
+        if deadline is None or deadline.error_message != "Evidence budget exhausted":
+            return self.native_monotonic()
+        identity = id(deadline)
+        self.deadlines[identity] = deadline
+        # Preserve the real epoch used by native absolute timers. Only the evidence
+        # owner's consumed work is controlled; verdict/admission clocks remain real.
+        return deadline.expires_at - 0.5 + self.elapsed.setdefault(identity, 0.0)
+
+    def spend(self, seconds):
+        deadline = evaluation_timer.current_evaluation_deadline()
+        assert deadline is not None and deadline.error_message == "Evidence budget exhausted"
+        self.monotonic()
+        self.elapsed[id(deadline)] += seconds
+
+
+def _budgeted_batch_guard(tmp_path, monkeypatch, cost):
+    clock = _ExplorationBudgetClock()
+    # Replace this module's clock object, leaving asyncio's native clock and timers intact.
+    monkeypatch.setattr(evaluation_timer, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    class BudgetedAdapter(_HitScoreAdapter):
+        async def score(self, config, messages, *, timeout=None):
+            assert timeout is not None and 0 < timeout <= 0.5
+            clock.spend(cost)
+            result = await super().score(config, messages, timeout=timeout)
+            evaluation_timer.raise_if_evaluation_expired()
+            return result
+
+    adapter = BudgetedAdapter()
+    plugin = _plugin(
+        tmp_path,
+        monkeypatch,
+        adapter,
+        {"guard": {**SCORE_MODEL, "model": "guard-v1"}},
+        explore_timeout=0.5,
+        max_model_calls=3,
+    )
+    return plugin, adapter, clock
+
+
+def _distinct_batch_turns():
+    conversations = [_turns(3, hit=index) for index in range(4)]
+    for index, conversation in enumerate(conversations):
+        for message in conversation["messages"]:
+            message["content"] = f"conversation {index}: " + message["content"]
+    return conversations
+
+
 async def test_each_batch_conversation_is_explored_under_its_own_budget(tmp_path, monkeypatch):
-    # Three model calls explore one conversation; a budget shared by the batch would run
-    # out before the second.
-    plugin = _guarded(tmp_path, monkeypatch, delay=0.05, explore_timeout=0.5, max_model_calls=3)
+    # Three calls cost0.45 of each finite0.5 budget. A shared deadline or shared
+    # three-call allowance cannot finish all twelve physically distinct requests.
+    plugin, adapter, clock = _budgeted_batch_guard(tmp_path, monkeypatch, cost=0.15)
     compilation, scanner = plugin._prepare_rule(_TRIGGER_THEN_GUARD, None)
     policy, values = bind_prepared_policy(scanner, _TRIGGER_THEN_GUARD, {})
 
-    results = await policy.scan_many_async(
-        [_turns(3, hit=index) for index in range(4)], values, explain=True
-    )
+    results = await policy.scan_many_async(_distinct_batch_turns(), values, explain=True)
 
     assert [result.completion_state for result in results] == ["complete"] * 4
     assert [
         [(atom.status, atom.true_positions) for atom in result.explanations[0].atoms][1]
         for result in results
     ] == [("satisfied", (index,)) if index < 3 else ("false", ()) for index in range(4)]
+    assert adapter.calls == 12
+    assert [result.model_usage["calls"] for result in results] == [3, 3, 3, 3]
+    assert len(clock.deadlines) == 4
+    assert max(clock.elapsed.values()) == pytest.approx(0.45)
+    assert sum(clock.elapsed.values()) > 0.5
+
+
+@pytest.mark.parametrize(
+    ("cost", "statuses"),
+    [(0.25, ["satisfied", "unknown", "unknown", "unknown"]), (0.5, ["unknown"] * 4)],
+)
+async def test_batch_exploration_controlled_clock_still_enforces_finite_expiry(
+    tmp_path, monkeypatch, cost, statuses
+):
+    plugin, _, clock = _budgeted_batch_guard(tmp_path, monkeypatch, cost)
+    _, scanner = plugin._prepare_rule(_TRIGGER_THEN_GUARD, None)
+    policy, values = bind_prepared_policy(scanner, _TRIGGER_THEN_GUARD, {})
+    results = await policy.scan_many_async(_distinct_batch_turns(), values, explain=True)
+    assert [result.completion_state for result in results] == ["complete"] * 4
+    assert [result.explanations[0].atoms[1].status for result in results] == statuses
+    assert len(clock.deadlines) == 4
 
 
 async def test_a_batch_explains_each_conversation():
