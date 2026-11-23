@@ -249,3 +249,17 @@ def test_snapshot_and_config_limits_cannot_be_forged_or_coerced():
             replace(cfg, limits=LocalTokenizerLimits(max_input_characters=5)),
             _Job(monotonic() + 5),
         )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{% set x = 'hello' %}{% for m in messages %}{{ m.content }}{% else %}{% set x = 'hello world' %}{% endfor %}{{ x }}",
+        "{% set x = 'outer' %}{% for m in messages if false %}bad{% else %}{% set x = 'inner' %}{{ x }}{% endfor %}{{ x }}",
+        "{% set x = 'outer' %}{% for m in messages %}{% for z in [] %}bad{% else %}{% set x = 'inner' %}{{ x }}{% endfor %}{{ x }}{% endfor %}{{ x }}",
+    ],
+)
+@pytest.mark.parametrize("messages", [[], [{"role": "user", "content": "synthetic"}]])
+def test_loop_else_assignments_stay_local_like_native_jinja(template, messages):
+    expected = ImmutableSandboxedEnvironment().from_string(template).render(messages=messages)
+    assert render(template, messages=messages) == expected
