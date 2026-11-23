@@ -1603,6 +1603,9 @@ def load_compiled_policy(
             + ", ".join(mismatched_models)
         )
 
+    pattern_options: dict[str, Any] = (
+        {"pattern_checks": pattern_checks} if pattern_checks is not None else {}
+    )
     scanner = DSLScanner._from_compiled_policy(
         config,
         rule=rule,
@@ -1611,7 +1614,7 @@ def load_compiled_policy(
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
         input_adapters=input_adapters,
-        pattern_checks=pattern_checks,
+        **pattern_options,
     )
     return CompiledPolicy(
         _rule_name=artifact.rule_name,

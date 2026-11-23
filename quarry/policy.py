@@ -739,13 +739,16 @@ def compile_policy(
             quarry_rules_paths=(),
             quarry_rule_texts=(source,),
         )
+    pattern_options: dict[str, Any] = (
+        {"pattern_checks": pattern_checks} if pattern_checks is not None else {}
+    )
     scanner = DSLScanner(
         config,
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
         input_adapters=input_adapters,
         _allow_parameters=True,
-        pattern_checks=pattern_checks,
+        **pattern_options,
     )
     return CompiledPolicy._from_scanner(
         scanner,

@@ -963,9 +963,10 @@ class QuarryPlugin:
             adapter_kwargs: dict[str, Any] = (
                 {"model_adapters": self._model_adapters} if self._model_adapters is not None else {}
             )
+            if self._pattern_checks is not None:
+                adapter_kwargs["pattern_checks"] = self._pattern_checks
             scanner = DSLScanner(
                 config,
-                pattern_checks=self._pattern_checks,
                 llm_rate_limiter=self._rate_limiter,
                 limits=replace(config.get_safety_limits(), fail_on_timeout=False),
                 _allow_parameters=True,
