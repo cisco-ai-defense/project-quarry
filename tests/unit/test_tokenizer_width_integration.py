@@ -14,7 +14,11 @@ from quarry.cache.keys import input_key
 from quarry.config import QuarryConfig
 from quarry.integrations.local_tokenizer import LocalTokenizerAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
-from quarry.types.exceptions import ConfigurationError, LocalTokenizerInvalidOutputError
+from quarry.types.exceptions import (
+    ConfigurationError,
+    LocalTokenizerInvalidInputError,
+    LocalTokenizerInvalidOutputError,
+)
 from quarry.types.messages import Messages
 from quarry.types.tokenizer_width import CappedTokenCount
 from tests.unit.model_fakes import ModelAdapter, passthrough_builder
@@ -101,6 +105,20 @@ def test_remote_tokenizer_cannot_claim_a_native_width(tmp_path):
     tokens["adapter"] = "vllm"
     with pytest.raises((ValueError, ConfigurationError)):
         QuarryConfig.from_mapping(raw, tmp_path, require_rules=False)
+
+
+@pytest.mark.parametrize("count", [257, 300])
+async def test_oversized_wire_lists_keep_canonical_invalid_input_failure(tmp_path, count):
+    cfg = config(tmp_path)
+    backend = ModelInferenceBackend(cfg)
+    wire = [{"role": "user", "content": "aaaa"}] * count
+    try:
+        with pytest.raises(LocalTokenizerInvalidInputError):
+            await backend._count_messages("counter", wire, [], key=(wire, []))
+        with pytest.raises(LocalTokenizerInvalidInputError):
+            await backend._count_messages_capped("counter", wire, [], cap=0, key=(wire, []))
+    finally:
+        backend.adapters["local_tokenizer"].close()
 
 
 def test_absent_width_preserves_previous_local_cache_and_public_model_identity(tmp_path):
