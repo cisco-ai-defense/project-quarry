@@ -4478,12 +4478,18 @@ class ModelInferenceBackend:
                 tokens = self._model(model_id).tokens
                 # Custom score builders keep canonical counts. A supported native
                 # whole-request renderer can prove overflow for written/other
-                # native selections, preserving every offered fragment.
+                # native selections, preserving every offered fragment. Capped
+                # bindings have narrower limits than canonical trim inputs.
                 if (
                     not canonical
                     and tokens is not None
                     and tokens.source_width is not None
                     and not (implicit and operation == "score")
+                    and type(size) is int
+                    and 0 <= size < 1 << 63
+                    and type(model_id) is str
+                    and 1 <= len(model_id) <= 256
+                    and model_id.isprintable()
                 ):
                     capped = await self._count_messages_capped(
                         model_id,

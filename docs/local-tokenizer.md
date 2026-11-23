@@ -155,6 +155,8 @@ attestation records, with no request text, encodings or native artifact referenc
 
 When configured, native trim fit comparisons may use capped counts. The whole
 selected result still receives a canonical exact count before a cut is returned.
+Trim budgets above the capped integer range, and model aliases outside the
+1-to-256 printable-character binding range, use canonical counting throughout.
 Implicit score requests with custom message builders, ordinary `input_tokens`,
 split arithmetic and downstream model validation keep canonical counts. Cached
 capped replies have their own method namespace and bind the actual adapter

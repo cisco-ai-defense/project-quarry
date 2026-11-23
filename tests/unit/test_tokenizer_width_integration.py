@@ -293,6 +293,30 @@ async def test_actual_trim_agrees_with_canonical_selection_and_confirms_final_cu
         reference.adapters["local_tokenizer"].close()
 
 
+@pytest.mark.parametrize("alias", ["counter", "c" * 257, "counter\n"])
+@pytest.mark.parametrize("size", [60, 1 << 63])
+async def test_trim_outside_capped_binding_limits_preserves_canonical_selection(
+    tmp_path, alias, size
+):
+    cfg = config(tmp_path)
+    model = cfg.models["counter"]
+    cfg = replace(cfg, models={alias: model})
+    canonical = replace(
+        cfg, models={alias: replace(model, tokens=replace(model.tokens, source_width=None))}
+    )
+    backend, reference = ModelInferenceBackend(cfg), ModelInferenceBackend(canonical)
+    messages = Messages.from_openai([{"role": "user", "content": "a" * 512}])
+    try:
+        expected = await reference.model_trim_messages(alias, "classify", messages, size)
+        actual = await backend.model_trim_messages(alias, "classify", messages, size)
+        assert actual.messages.to_openai_messages() == expected.messages.to_openai_messages()
+        assert actual.omitted_messages == expected.omitted_messages
+        assert actual.omitted_characters == expected.omitted_characters
+    finally:
+        backend.adapters["local_tokenizer"].close()
+        reference.adapters["local_tokenizer"].close()
+
+
 async def test_implicit_custom_score_builder_and_split_arithmetic_keep_canonical_counts(
     tmp_path, monkeypatch
 ):
