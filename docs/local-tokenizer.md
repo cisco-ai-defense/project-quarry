@@ -130,8 +130,9 @@ Omitting `source_width` preserves prior configuration/cache/policy identities.
 the caller loop and returns detached verified metadata, or `None` when the
 claimed width cannot be proved. The verifier checks the actual pinned native
 version and state. Its supported pipeline has no normalizer, one byte-level
-pretokenizer, complete model coverage of all 256 byte symbols, unique vocabulary
-IDs and concatenating BPE merges. Added literal tokens contribute their own
+pretokenizer, complete model coverage of all 256 byte symbols, unique dense
+vocabulary IDs and concatenating BPE merges. Density is checked before native
+serialization, whose work otherwise depends on the largest ID. Added literal tokens contribute their own
 source width and must not consume surrounding whitespace. Unknown-token loss,
 ID aliasing, destructive splitting, normalization, truncation, padding and
 unmodeled settings cannot authorize a proof. Artifact padding/truncation and

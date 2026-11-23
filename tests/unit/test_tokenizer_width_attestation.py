@@ -25,8 +25,9 @@ def bpe(*, missing=False, collision=False):
     vocab = {char: index for index, char in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))}
     merges = []
     if missing:
-        del vocab["x"]
-        vocab["unreachable"] = 256  # Cardinality alone cannot prove alphabet coverage.
+        absent_id = vocab.pop("x")
+        # Keep IDs dense: cardinality/density cannot prove alphabet coverage.
+        vocab["unreachable"] = absent_id
     elif collision:
         vocab["aa"] = vocab["a"]
         merges = [("a", "a")]
@@ -116,6 +117,23 @@ def test_lost_bytes_and_fused_unknowns_require_model_alphabet_coverage(tmp_path)
     assert len(loaded.tokenizer.get_vocab(with_added_tokens=False)) == 256
     assert loaded.encode("x" * 128, cfg, job()).token_ids == ()
     assert attest_loaded_width(cfg, claim(cfg, width=16), loaded, job()) is None
+
+
+def test_sparse_native_ids_reject_before_unbounded_reverse_vocab_serialization(
+    tmp_path, monkeypatch
+):
+    reference = bpe()
+    document = json.loads(reference.to_str())
+    document["model"]["vocab"]["a"] = 1_000_000_000
+    cfg = artifact(tmp_path, document=document)
+    loaded = load_local_tokenizer(cfg, job())
+    assert loaded.encode("a", cfg, job()).token_ids == (1_000_000_000,)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("native serializer reached sparse vocabulary IDs")
+
+    monkeypatch.setattr(Tokenizer, "to_str", forbidden)
+    assert attest_loaded_width(cfg, claim(cfg), loaded, job()) is None
 
 
 def test_colliding_ids_can_compress_an_unbounded_run_beyond_declared_word_lengths(tmp_path):

@@ -177,6 +177,7 @@ def attest_loaded_width(
             or not 1 <= len(word) <= 4096
             or type(token) is not int
             or not 0 <= token < 1 << 32
+            or token >= len(vocab)
             or token in ids
         ):
             return None
@@ -189,6 +190,9 @@ def attest_loaded_width(
         or any(char not in vocab for char in alphabet)
     ):
         return None
+    # The pinned native serializer walks every integer through max(model ID),
+    # collecting/printing holes. Unique IDs within the model cardinality prove
+    # density before entering that native work; sparse artifacts stay canonical.
     serialized = native.to_str()
     job.checkpoint()
     if (
