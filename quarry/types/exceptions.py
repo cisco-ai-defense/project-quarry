@@ -203,6 +203,22 @@ class ExternalSpanPartialReadError(LLMError):
     """The selected external-span read is explicitly incomplete and non-authoritative."""
 
 
+class LocalTokenizerUnavailableError(LLMError):
+    """The explicitly configured local tokenizer or template cannot be used."""
+
+
+class LocalTokenizerInvalidInputError(InvalidInputError):
+    """A local tokenizer cannot faithfully consume this native request shape."""
+
+
+class LocalTokenizerInvalidOutputError(LLMError):
+    """A native tokenizer reply has invalid token IDs or code-point geometry."""
+
+
+class LocalTokenizerLimitError(LLMError):
+    """Owned local tokenizer work exceeded a finite admission or execution limit."""
+
+
 # The ``LLMError`` code of a refused model call: the model gave no usable answer.
 MODEL_REFUSED = "model_refused"
 
