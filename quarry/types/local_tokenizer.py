@@ -9,6 +9,7 @@ must verify the pinned bytes and execute under their own bounded worker owner.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from math import isfinite
@@ -98,6 +99,10 @@ class LocalTokenizerConfig:
     model_revision: str
     tokenizer_revision: str
     template: str | None = field(default=None, repr=False)
+    template_variables: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    add_generation_prompt: bool = False
+    trim_blocks: bool = False
+    lstrip_blocks: bool = False
     framing: TokenFramingMargins = field(default_factory=TokenFramingMargins)
     limits: LocalTokenizerLimits = field(default_factory=LocalTokenizerLimits)
 
@@ -117,6 +122,37 @@ class LocalTokenizerConfig:
             raise LocalTokenizerValidationError("invalid local tokenizer artifact digest")
         _label(self.model_revision, "model revision")
         _label(self.tokenizer_revision, "tokenizer revision")
+        for name in ("add_generation_prompt", "trim_blocks", "lstrip_blocks"):
+            if type(getattr(self, name)) is not bool:
+                raise LocalTokenizerValidationError("invalid local tokenizer template option")
+        if type(self.template_variables) not in (tuple, list) or len(self.template_variables) > 32:
+            raise LocalTokenizerValidationError("invalid local tokenizer template variables")
+        variables = {}
+        for pair in self.template_variables:
+            if type(pair) not in (tuple, list) or len(pair) != 2:
+                raise LocalTokenizerValidationError("invalid local tokenizer template variable")
+            key, value = pair
+            if (
+                type(key) is not str
+                or not 1 <= len(key) <= 64
+                or not key.isascii()
+                or not key.isidentifier()
+                or key.startswith("_")
+                or key
+                in {"messages", "tools", "add_generation_prompt", "loop", "true", "false", "none"}
+                or key in variables
+                or type(value) is not str
+                or len(value) > 4096
+            ):
+                raise LocalTokenizerValidationError("invalid local tokenizer template variable")
+            try:
+                value.encode("utf-8")
+            except UnicodeError:
+                raise LocalTokenizerValidationError(
+                    "invalid local tokenizer variable Unicode"
+                ) from None
+            variables[key] = value
+        object.__setattr__(self, "template_variables", tuple(sorted(variables.items())))
         if (
             type(self.framing) is not TokenFramingMargins
             or type(self.limits) is not LocalTokenizerLimits
@@ -149,6 +185,17 @@ class LocalTokenizerConfig:
             "template_sha256": sha256(self.template.encode("utf-8")).hexdigest()
             if self.template is not None
             else None,
+            "template_variables_sha256": sha256(
+                json.dumps(
+                    dict(self.template_variables),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "add_generation_prompt": self.add_generation_prompt,
+            "trim_blocks": self.trim_blocks,
+            "lstrip_blocks": self.lstrip_blocks,
             "framing": asdict(self.framing),
             "limits": asdict(self.limits),
             "padding": False,
