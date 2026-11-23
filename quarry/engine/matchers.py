@@ -21,7 +21,8 @@ values) and a pattern/modifier spec, each returns a boolean or scalar. These are
 leaf evaluators the DFA's atoms bind to — a matcher answers one boolean bit that
 follows one guard transition. Matchers **never** see DFA state or rule logic;
 composition, negation, flow, and counts are all handled by the guard graphs. They are
-pure functions: no I/O, no mutable state, no non-determinism.
+pure functions when no work observer is bound: no I/O or retained matching state.
+An explicit observer can measure synchronous work and enforce its allowance.
 
 Scope is exactly the local predicates the DSL exposes, with the regex semantics of
 `quarry/cache/regex_cache.py` (RE2 search, case-insensitive when `nocase`).
@@ -39,7 +40,8 @@ These slot in as new `predicate` kinds when the DSL grows; the `AtomSpec` field 
 (`quarry/engine/atoms.py`) already reserves `Cost.DECODE`/`MODEL`/`LLM`/`YARA` tiers and
 the `predicate`/`string_semantics` carriers for them.
 
-This is a pure core module — no Quarry imports. `regex` uses the stdlib `re` directly;
+This standalone core has no scanner or safety imports. Optional scoped work observers
+arrive through the engine interface; the default observer is absent. `regex` uses the stdlib `re` directly;
 production injects an RE2 backend through the seam below, which narrows the accepted
 grammar rather than changing how these functions compose. Matchers stay pure.
 """
@@ -54,6 +56,8 @@ from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import groupby, repeat
+
+from quarry.engine.local_work import measured_local_work
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,7 @@ def fullword_pattern(literal: str) -> str:
     return f"{_edge_assertion(literal[0])}{re.escape(literal)}{_edge_assertion(literal[-1])}"
 
 
+@measured_local_work("prepare")
 def apply_modifiers(pattern: str, mods: Modifiers = NO_MODS) -> tuple[str, bool]:
     """Return ``(effective_pattern, use_regex)`` — the exact transform quarry applies.
 
@@ -196,6 +201,7 @@ def _regex_flags(mods: Modifiers) -> int:
     return re.IGNORECASE if mods.nocase else 0
 
 
+@measured_local_work("match")
 def match_contains(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> bool:
@@ -215,6 +221,7 @@ def match_contains(
     return effective in text
 
 
+@measured_local_work("match")
 def match_contains_any(
     text: str, patterns, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> bool:
@@ -222,6 +229,7 @@ def match_contains_any(
     return any(match_contains(text, p, mods, regex=regex) for p in patterns)
 
 
+@measured_local_work("prepare", iterator=True)
 def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int, int]]:
     """Yield literal matches in source offsets, including Unicode case folding."""
 
@@ -247,6 +255,7 @@ def _literal_spans(text: str, pattern: str, nocase: bool) -> Iterator[tuple[int,
         found = haystack.find(needle, finish)
 
 
+@measured_local_work("prepare", iterator=True)
 def match_spans(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> Iterator[tuple[int, int]]:
@@ -261,6 +270,7 @@ def match_spans(
     return _literal_spans(text, effective, mods.nocase)
 
 
+@measured_local_work("prepare", iterator=True)
 def matching_patterns(
     text: str,
     patterns: Sequence[tuple[str, Modifiers]],
@@ -277,6 +287,7 @@ def matching_patterns(
         yield span, tuple(index for _, index in matched)
 
 
+@measured_local_work("match")
 def match_regex(
     text: str, pattern: str, nocase: bool = False, *, regex: RegexBackend = PURE_REGEX
 ) -> bool:
@@ -293,6 +304,7 @@ def match_regex(
     )
 
 
+@measured_local_work("match")
 def _literal_span(text: str, literal: str, nocase: bool) -> tuple[int, int] | None:
     """Span of the first occurrence of ``literal`` in ``text``, as indices into ``text``.
 
@@ -326,6 +338,7 @@ def _literal_span(text: str, literal: str, nocase: bool) -> tuple[int, int] | No
     return start, len(text)
 
 
+@measured_local_work("match")
 def find_position(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> int | None:
@@ -340,6 +353,7 @@ def find_position(
     return span[0] if span else None
 
 
+@measured_local_work("match")
 def count_occurrences(
     text: str,
     pattern: str,
@@ -369,6 +383,7 @@ def count_occurrences(
     return found if limit is None else min(found, limit)
 
 
+@measured_local_work("match")
 def extract_match(
     text: str, pattern: str, mods: Modifiers = NO_MODS, *, regex: RegexBackend = PURE_REGEX
 ) -> str | None:
@@ -394,6 +409,7 @@ _CMP = {
 }
 
 
+@measured_local_work("match")
 def compare(left, op: str, right) -> bool:
     """Relational/equality comparison. Raises ``ValueError`` on an unknown operator."""
     fn = _CMP.get(op)
@@ -402,6 +418,7 @@ def compare(left, op: str, right) -> bool:
     return bool(fn(left, right))
 
 
+@measured_local_work("match")
 def match_length(text: str, op: str, n: float) -> bool:
     """``len(text) <op> n`` size gate."""
     return compare(len(text or ""), op, n)
@@ -410,6 +427,7 @@ def match_length(text: str, op: str, n: float) -> bool:
 _MISSING = object()
 
 
+@measured_local_work("prepare")
 def field_access(obj, path: str):
     """Traverse a dotted ``path`` into ``obj`` (dict/list/attr), returning the value or
     :data:`MISSING` if any segment is absent — preserving quarry's null-vs-missing
@@ -446,6 +464,7 @@ def field_access(obj, path: str):
     return cur
 
 
+@measured_local_work("prepare")
 def _step(obj, seg: str):
     if isinstance(obj, Mapping):
         return obj.get(seg, _MISSING)
@@ -474,6 +493,7 @@ def _step(obj, seg: str):
 MISSING = _MISSING
 
 
+@measured_local_work("prepare")
 def field_parts(path: str) -> tuple[str, ...]:
     """Split a dotted field path while preserving escaped dots and backslashes."""
 
@@ -497,6 +517,7 @@ def field_parts(path: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
+@measured_local_work("prepare")
 def value_texts(value, path: str = "") -> list[tuple[str, str]]:
     """Locate each scalar text of a nested JSON value at its own escaped path."""
 
@@ -521,11 +542,13 @@ def value_texts(value, path: str = "") -> list[tuple[str, str]]:
     return texts
 
 
+@measured_local_work("match")
 def truth(value) -> bool:
     """The truth of ``value`` used as a test. A :data:`MISSING` value is false."""
     return value is not _MISSING and bool(value)
 
 
+@measured_local_work("prepare")
 def coerce_field_text(val) -> str | None:
     """Coerce an already-fetched field value to text, or ``None`` if missing or null.
     A list or tuple — from a ``*`` wildcard, an index, or a field whose own JSON value
@@ -537,6 +560,7 @@ def coerce_field_text(val) -> str | None:
     return str(val)
 
 
+@measured_local_work("prepare")
 def field_text(obj, path: str) -> str | None:
     """Field value coerced to text, or ``None`` if missing. A list (from ``*`` or an
     index) is joined so a downstream string matcher sees all elements."""
