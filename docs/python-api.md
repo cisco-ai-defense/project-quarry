@@ -53,6 +53,10 @@ Request `window_observations=True` for a separate bounded snapshot of reached wi
 classifiers and span readers. Use `observe_model_windows()` to collect across calls and
 `current_rule_name()` for live callback ownership. See [window observations](window-observations.md).
 
+Configure `local_match_work` to shadow or enforce per-conversation CPU allowances for
+explicit local rule groups. Results then include bounded `local_match_work` evidence;
+an enforcing cut leaves the affected rule incomplete. See [local matching work](local-match-work.md).
+
 ### Scan timing and model usage
 
 `ScanResult.scan_time` is the bounded, finite, nonnegative monotonic duration for the scan.

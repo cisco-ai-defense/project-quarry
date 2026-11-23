@@ -125,6 +125,7 @@ class ScanResult:
     # Optional scalar snapshot. Its collection/measurement state does not alter verdicts.
     logical_reads: dict[str, Any] | None = field(default=None, kw_only=True)
     window_observations: dict[str, Any] | None = field(default=None, kw_only=True)
+    local_match_work: dict[str, Any] | None = field(default=None, kw_only=True)
 
     def __setstate__(self, state: object) -> None:
         """Restore known dataclass fields and initialize telemetry absent from older pickles."""
@@ -136,7 +137,7 @@ class ScanResult:
         unknown = set(state) - field_names
         if unknown:
             raise ValueError("ScanResult pickle state contains unknown fields")
-        missing = field_names - set(state) - {"model_usage", "rule_timings"}
+        missing = field_names - set(state) - {"model_usage", "rule_timings", "local_match_work"}
         if missing:
             raise ValueError("ScanResult pickle state is missing required fields")
         for name, value in state.items():
@@ -145,6 +146,8 @@ class ScanResult:
             object.__setattr__(self, "rule_timings", None)
         if "model_usage" not in state:
             object.__setattr__(self, "model_usage", empty_model_usage())
+        if "local_match_work" not in state:
+            object.__setattr__(self, "local_match_work", None)
 
     @property
     def failures(self) -> tuple[ScanFailure, ...]:

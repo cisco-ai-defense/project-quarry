@@ -438,6 +438,46 @@ class WindowObservationReport(TypedDict):
     state: Literal["collected", "scope_unavailable"]
 
 
+LocalWorkCount = Annotated[StrictInt, Field(ge=0, le=(1 << 63) - 1)]
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class LocalMatchWorkGroupReport(TypedDict):
+    """Native CPU segments only; allowance and overshoot are per conversation."""
+
+    label: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    mode: Literal["shadow", "enforce"]
+    allowance_cpu_ns: Annotated[StrictInt, Field(ge=1, le=(1 << 63) - 1)]
+    conversations: LocalWorkCount
+    exhausted_conversations: LocalWorkCount
+    state: Literal["measured", "unmetered"]
+    known_cpu_ns: LocalWorkCount
+    value_cpu_ns: LocalWorkCount | None
+    known_overshoot_cpu_ns: LocalWorkCount
+    overshoot_cpu_ns: LocalWorkCount | None
+    exhausted: StrictBool
+    segments: LocalWorkCount
+    denied_segments: LocalWorkCount
+    active_segments: LocalWorkCount
+    unmetered_segments: LocalWorkCount
+    counter_saturated: StrictBool
+    cut_phase: Literal["prepare", "match", "iterate"] | None
+    closed: StrictBool
+    complete: StrictBool
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class LocalMatchWorkReport(TypedDict):
+    """Bounded local work evidence; completion is distinct from scan completion."""
+
+    version: Literal[1]
+    state: Literal["collected", "owner_unavailable"]
+    scope: Literal["conversation", "batch"]
+    conversations: LocalWorkCount
+    complete: StrictBool
+    groups: Annotated[list[LocalMatchWorkGroupReport], Field(max_length=64)]
+
+
 @with_config(EXTENSIBLE_SCHEMA)
 class ScanEntry(TypedDict):
     """One conversation's result inside a batch."""
@@ -456,6 +496,7 @@ class ScanEntry(TypedDict):
     decision_path: NotRequired[DecisionPathPayload]
     visualization: NotRequired[dict[str, Any]]
     window_observations: NotRequired[WindowObservationReport]
+    local_match_work: NotRequired[LocalMatchWorkReport]
 
 
 @with_config(EXTENSIBLE_SCHEMA)
@@ -484,6 +525,7 @@ class ScanResponse(VersionEnvelope):
     count: NotRequired[int]
     visualization: NotRequired[dict[str, Any]]
     window_observations: NotRequired[WindowObservationReport]
+    local_match_work: NotRequired[LocalMatchWorkReport]
 
 
 def published_output_schemas() -> dict[str, dict[str, Any]]:

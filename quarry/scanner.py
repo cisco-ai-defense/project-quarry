@@ -68,6 +68,12 @@ from quarry.engine.flow_requirements import (
     cross_source_flow_has_candidates,
     flows_settled,
 )
+from quarry.engine.local_work import (
+    current_local_work,
+    ensure_local_work_authoritative,
+    local_work_scope,
+    measured_local_work,
+)
 from quarry.engine.matchers import MISSING, truth
 from quarry.engine.matchers import compare as _compare
 from quarry.engine.oracle import Grounded
@@ -120,6 +126,8 @@ from quarry.language.runtime import (
 )
 from quarry.rule_versioning import check_rule_compatibility
 from quarry.safety.limits import SafetyLimits, json_size
+from quarry.safety.local_match_work import LocalMatchWorkError, LocalMatchWorkSession
+from quarry.safety.local_work_reporting import aggregate_local_match_work
 from quarry.safety.regex_backend import RE2_REGEX
 from quarry.safety.timer import (
     QuarryTimeoutError,
@@ -265,7 +273,7 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.MODEL_INVALID_OUTPUT
     if issubclass(error_type, ExternalSpanProviderError):
         return ScanFailureCategory.MODEL_PROVIDER
-    if issubclass(error_type, ExternalSpanLimitError):
+    if issubclass(error_type, ExternalSpanLimitError | LocalMatchWorkError):
         return ScanFailureCategory.EVALUATION_LIMIT
     if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL
@@ -295,6 +303,7 @@ def _raised_timeout_result(
         error_category=ScanFailureCategory.TIMEOUT,
         rule_timings=dict(sorted((partial.rule_timings or {}).items())) or None,
         model_usage=merge_model_usage([partial.model_usage]),
+        local_match_work=partial.local_match_work,
     )
 
 
@@ -572,6 +581,8 @@ class DSLScanner:
             config.adapters, config.inputs, input_adapters
         )
         scanner.input_registry = InputRegistry(declarations)
+        if config.local_match_work is not None:
+            config.local_match_work.validate_rules((rule.name,))
         resource_manager = ResourceManager(
             config,
             model_inference_backend=model_inference_backend,
@@ -635,6 +646,11 @@ class DSLScanner:
             raise RuleCompatibilityError(
                 compatibility_issues[0].running_version,
                 compatibility_issues,
+            )
+
+        if self.config.local_match_work is not None:
+            self.config.local_match_work.validate_rules(
+                tuple(rule.name for rule, _ in parsed_rules)
             )
 
         adapter_kwargs: dict[str, Any] = (
@@ -1799,6 +1815,21 @@ class DSLScanner:
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Close rule value ownership on success, failures and cancellation."""
+        if current_local_work() is not None:
+            # A nested/default scan never spends the caller's selected allowance.
+            with local_work_scope(None):
+                return await self._scan_data_async(
+                    data,
+                    file_path=file_path,
+                    enable_explain=enable_explain,
+                    record_traces=record_traces,
+                    rules_subset=rules_subset,
+                    parameters=parameters,
+                    decision_paths=decision_paths,
+                    explore=explore,
+                    explore_selector=explore_selector,
+                    deferred_evidence=deferred_evidence,
+                )
         read_scope = new_read_scope()
         record_scan_scope(read_scope)
         backend = getattr(self.resource_manager, "model_inference_backend", None)
@@ -1817,20 +1848,35 @@ class DSLScanner:
             read_usage_scope(None, scope=read_scope) if read_scope is not None else nullcontext(),
             ExitStack() as value_lifetimes,
         ):
-            result = await self._scan_data_with_values_async(
-                data,
-                read_scope=read_scope,
-                file_path=file_path,
-                enable_explain=enable_explain,
-                record_traces=record_traces,
-                rules_subset=rules_subset,
-                parameters=parameters,
-                decision_paths=decision_paths,
-                explore=explore,
-                explore_selector=explore_selector,
-                deferred_evidence=deferred_evidence,
-                value_lifetimes=value_lifetimes,
-            )
+            work_kwargs: dict[str, Any] = {}
+            if self.config.local_match_work is not None:
+                work_session = LocalMatchWorkSession(
+                    self.config.local_match_work, known_rules=tuple(self.compiled_rules)
+                )
+                value_lifetimes.callback(work_session.close)
+                work_kwargs["local_work"] = work_session
+            try:
+                result = await self._scan_data_with_values_async(
+                    data,
+                    read_scope=read_scope,
+                    file_path=file_path,
+                    enable_explain=enable_explain,
+                    record_traces=record_traces,
+                    rules_subset=rules_subset,
+                    parameters=parameters,
+                    decision_paths=decision_paths,
+                    explore=explore,
+                    explore_selector=explore_selector,
+                    deferred_evidence=deferred_evidence,
+                    value_lifetimes=value_lifetimes,
+                    **work_kwargs,
+                )
+            except QuarryTimeoutError as error:
+                if work_kwargs and error.scan_result is not None:
+                    error.scan_result.local_match_work = work_session.snapshot()
+                raise
+            if work_kwargs:
+                result.local_match_work = work_session.snapshot()
         record_result_scope(result, read_scope)
         return result
 
@@ -1849,6 +1895,7 @@ class DSLScanner:
         explore: bool = False,
         explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
+        local_work: LocalMatchWorkSession | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
 
@@ -2238,21 +2285,35 @@ class DSLScanner:
             # host supplies unrelated extension events between two messages.
             key = (include_extension_events, use_mixed_timeline)
             if key not in shared_input:
-                if include_extension_events and use_mixed_timeline:
-                    source = context
-                else:
-                    source = context.copy()
-                    source.ordered_timeline = None
-                    if not include_extension_events:
-                        source.extension_event_surfaces = {}
-                        source.extension_event_sequence = ()
-                shared_input[key] = build_evaluation_input(source)
+                shared_input[key] = prepare_input(include_extension_events, use_mixed_timeline)
             return shared_input[key]
+
+        @measured_local_work("prepare")
+        def prepare_input(
+            include_extension_events: bool, use_mixed_timeline: bool
+        ) -> EvaluationInput:
+            if include_extension_events and use_mixed_timeline:
+                source = context
+            else:
+                source = context.copy()
+                source.ordered_timeline = None
+                if not include_extension_events:
+                    source.extension_event_surfaces = {}
+                    source.extension_event_sequence = ()
+            return build_evaluation_input(source)
 
         async def evaluate_rule(rule_name: str, rule) -> dict[str, Any]:
             """Evaluate a single rule with isolated context."""
-            rule_ctx = context.copy()
-            value_lifetimes.callback(rule_ctx.close_message_values)
+            rule_owner = local_work.owner_for(rule_name) if local_work is not None else None
+
+            def prepare_rule_context() -> ScanContext:
+                prepared = context.copy()
+                # Retain cleanup before the accounting call can reject an overshoot.
+                value_lifetimes.callback(prepared.close_message_values)
+                return prepared
+
+            if rule_owner is None:
+                rule_ctx = prepare_rule_context()
             rule_timeout = self.limits.rule_timeout
             if self.config.config_version == 1 and self._rule_grounds_external(rule_name):
                 rule_timeout = self.limits.inference_timeout
@@ -2273,6 +2334,7 @@ class DSLScanner:
                 with (
                     evaluation_deadline(rule_timeout, f"Rule {rule_name} timeout"),
                     read_usage_scope(rule_name, scope=read_scope),
+                    local_work_scope(rule_owner) if local_work is not None else nullcontext(),
                 ):
                     selectors = artifact.read_surfaces
                     if faulty := sorted(selectors & part_faults.keys()):
@@ -2285,6 +2347,8 @@ class DSLScanner:
                         raise ConversationValidationError(
                             "The conversation does not carry " + ", ".join(sorted(missing))
                         )
+                    if rule_owner is not None:
+                        rule_ctx = rule_owner.call("prepare", prepare_rule_context)
                     if (
                         timeline_fault is not None
                         and artifact.orders_input_items
@@ -2361,6 +2425,7 @@ class DSLScanner:
                             else f"Rule {rule_name} timeout"
                         )
                         raise QuarryTimeoutError(message) from e
+                    ensure_local_work_authoritative()
                 rule_elapsed = elapsed_seconds(rule_start)
                 rule_ctx.evaluation_warnings.extend(warnings)
 
@@ -2524,7 +2589,12 @@ class DSLScanner:
             async def one(res) -> None:
                 exec_result = res["exec_result"]
                 try:
-                    with read_usage_scope(res["rule_name"], scope=read_scope, phase="evidence"):
+                    with (
+                        read_usage_scope(res["rule_name"], scope=read_scope, phase="evidence"),
+                        local_work_scope(local_work.owner_for(res["rule_name"]))
+                        if local_work is not None
+                        else nullcontext(),
+                    ):
                         if exec_result.refine is not None:
                             exec_result = await exec_result.refine(remaining_evaluation_time)
                             res["exec_result"] = exec_result
@@ -2724,6 +2794,7 @@ class DSLScanner:
         agg_evaluation_warnings: list[str] = []
         agg_truncation_info: dict[str, str] = {}
         batch_was_truncated = False
+        local_work_report = None
 
         # Fail closed on an empty batch: there is nothing to authoritatively scan, so a "clean"
         # (exit 0) result would be indistinguishable from a batch that ran and matched nothing.
@@ -2762,6 +2833,10 @@ class DSLScanner:
                     all_outputs[f"{label}:{rule_name}"] = output
                 total_scan_time += result.scan_time
                 usage_reports.append(result.model_usage)
+                if result.local_match_work is not None:
+                    local_work_report = aggregate_local_match_work(
+                        (local_work_report, result.local_match_work)
+                    )
 
                 if result.rule_timings:
                     for rule_name, timing in result.rule_timings.items():
@@ -2819,6 +2894,10 @@ class DSLScanner:
                 if partial is not None:
                     total_scan_time += partial.scan_time
                     usage_reports.append(partial.model_usage)
+                    if partial.local_match_work is not None:
+                        local_work_report = aggregate_local_match_work(
+                            (local_work_report, partial.local_match_work)
+                        )
                     for rule_name, timing in (partial.rule_timings or {}).items():
                         aggregated_timings.setdefault(rule_name, []).append(timing)
                 # An unexpected per-conversation failure is a non-authoritative result; make sure
@@ -2849,6 +2928,7 @@ class DSLScanner:
             evaluation_warnings=agg_evaluation_warnings or None,
             explanations=all_evidence or None,
             model_usage=merge_model_usage(usage_reports),
+            local_match_work=local_work_report,
         )
 
     def scan_file(

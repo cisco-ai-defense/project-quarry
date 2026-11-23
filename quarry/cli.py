@@ -195,6 +195,8 @@ def format_results(
                 result_dict["logical_reads"] = result.logical_reads
             if result.window_observations is not None:
                 result_dict["window_observations"] = result.window_observations
+            if result.local_match_work is not None:
+                result_dict["local_match_work"] = result.local_match_work
             output.append(result_dict)
 
         return orjson.dumps(output, option=orjson.OPT_INDENT_2).decode()
