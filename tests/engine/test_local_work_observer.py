@@ -5,6 +5,8 @@
 
 import asyncio
 import contextvars
+import itertools
+import threading
 
 import pytest
 
@@ -34,7 +36,10 @@ def owner(*, mode="enforce", allowance=1_000_000_000):
         (lambda: matchers.field_text({"content": "synthetic"}, "content"), "synthetic"),
     ],
 )
-def test_real_local_results_match_with_an_explicit_owner(operation, expected):
+def test_real_local_results_match_with_an_explicit_owner(monkeypatch, operation, expected):
+    # Nanosecond units do not promise nanosecond resolution. Short native calls
+    # can legitimately have equal start/end ticks on Windows.
+    monkeypatch.setattr(work, "thread_time_ns", itertools.count(step=17).__next__)
     baseline = operation()
     measured = owner()
     with local_work_scope(measured):
@@ -43,6 +48,7 @@ def test_real_local_results_match_with_an_explicit_owner(operation, expected):
     assert actual == baseline == expected
     report = measured.report()
     assert report["complete"] and report["known_cpu_ns"] > 0
+    assert report["value_cpu_ns"] == 17
     assert report["segments"] == 1
 
 
@@ -110,13 +116,24 @@ def test_scope_restores_an_outer_owner_even_after_an_exception():
     assert current_local_work() is None
 
 
-async def test_copied_off_loop_context_charges_the_actual_worker():
+async def test_copied_off_loop_context_charges_the_actual_worker(monkeypatch):
+    caller = threading.get_ident()
+    readers = []
+    ticks = itertools.count(step=17)
+
+    def clock():
+        readers.append(threading.get_ident())
+        return next(ticks)
+
+    monkeypatch.setattr(work, "thread_time_ns", clock)
     measured = owner()
     with local_work_scope(measured):
         assert await asyncio.to_thread(matchers.match_contains, "synthetic aba", "aba")
     measured.close()
     assert measured.report()["complete"] and measured.report()["segments"] == 1
     assert measured.report()["known_cpu_ns"] > 0
+    assert measured.report()["value_cpu_ns"] == 17
+    assert len(readers) == 2 and readers[0] == readers[1] and readers[0] != caller
 
 
 @pytest.mark.parametrize("managed_engine", [False, True])
