@@ -208,3 +208,44 @@ def test_completed_shared_group_rule_stays_complete_when_next_rule_is_denied(det
     row = result.local_match_work["groups"][0]
     assert row["value_cpu_ns"] == 20 and row["overshoot_cpu_ns"] == 0
     assert row["denied_segments"] == 1
+
+
+@pytest.mark.parametrize("timeout_point", ["before-second-scan", "after-second-verdict"])
+async def test_raising_batch_timeout_finalizes_completed_prefix_before_report_aggregation(
+    monkeypatch, timeout_point
+):
+    from dataclasses import replace
+
+    from quarry.safety.limits import SafetyLimits
+    from quarry.safety.timer import QuarryTimeoutError
+
+    runtime = replace(
+        config(mode="shadow", texts=()),
+        safety_limits=SafetyLimits(rule_timeout=None, fail_on_timeout=True),
+    )
+    policy = compile_policy(RULE, runtime_config=runtime)
+    original = policy._scanner._scan_data_with_parameters_async
+    calls = 0
+    observed = []
+
+    async def scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2 and timeout_point == "before-second-scan":
+            await asyncio.sleep(1.05)
+        result = await original(*args, **kwargs)
+        observed.append(result)
+        if calls == 2 and timeout_point == "after-second-verdict":
+            await asyncio.sleep(1.05)
+        return result
+
+    monkeypatch.setattr(policy._scanner, "_scan_data_with_parameters_async", scan)
+    with pytest.raises(QuarryTimeoutError) as caught:
+        await policy.scan_many_async([DATA, DATA], explain=True, deadline_seconds=1.0)
+    partial = caught.value.scan_result
+    assert partial is not None and not partial.is_complete
+    assert observed and all(result.local_match_work["complete"] for result in observed)
+    report = partial.local_match_work
+    assert report["complete"]
+    assert all(row["closed"] and row["active_segments"] == 0 for row in report["groups"])
+    assert all(row["value_cpu_ns"] is not None for row in report["groups"])
