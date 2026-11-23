@@ -29,6 +29,7 @@ from typing import TypeVar
 
 from quarry.async_runtime import call_host
 from quarry.integrations.rate_limiter import LLMRateLimiter
+from quarry.integrations.request_limits import owned_request_limit
 from quarry.safety.timer import (
     QuarryTimeoutError,
     clamp_to_evaluation_deadline,
@@ -106,14 +107,16 @@ class ModelCallBudget:
             self.max_calls_per_alias is not None
             and self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias
         ):
-            raise LLMError(
-                f"Inference model '{alias}' reached its model-call limit "
-                f"(max_model_calls={self.max_calls_per_alias})",
-                {
-                    "code": "model_call_limit",
-                    "model": alias,
-                    "max_model_calls": self.max_calls_per_alias,
-                },
+            raise owned_request_limit(
+                LLMError(
+                    f"Inference model '{alias}' reached its model-call limit "
+                    f"(max_model_calls={self.max_calls_per_alias})",
+                    {
+                        "code": "model_call_limit",
+                        "model": alias,
+                        "max_model_calls": self.max_calls_per_alias,
+                    },
+                )
             )
 
     def consume(self, alias: str, operation: ModelOperation = "complete") -> None:
@@ -170,7 +173,11 @@ class ModelUsage:
         """
 
         history = retry_history if retry_history is not None else ModelRetryHistory()
-        effective_timeout = clamp_to_evaluation_deadline(timeout)
+        try:
+            effective_timeout = clamp_to_evaluation_deadline(timeout)
+        except QuarryTimeoutError as exc:
+            owned_request_limit(exc)
+            raise
         if effective_timeout is None:
             return await self._attempt(
                 model,
@@ -349,8 +356,8 @@ class ModelUsage:
         """Preserve rule-deadline ownership or return a model-call timeout."""
 
         if evaluation_timeout_message is not None:
-            return QuarryTimeoutError(evaluation_timeout_message)
-        return ModelUsage._timeout_error(model, last_failure, failed_attempts)
+            return owned_request_limit(QuarryTimeoutError(evaluation_timeout_message))
+        return owned_request_limit(ModelUsage._timeout_error(model, last_failure, failed_attempts))
 
     @staticmethod
     def _timeout_error(

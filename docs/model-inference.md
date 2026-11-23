@@ -175,6 +175,13 @@ the supplied `timeout` and report a structured failure with
 `model_refused` is a refusal that a rule can handle with `if_refused`; other codes fail the rule.
 A required adapter method that is missing fails during rule preparation rather than during a scan.
 
+Concurrent callers sharing one physical request share its terminal host failure. An adapter's
+`TimeoutError`, `QuarryTimeoutError`, or `timeout`/`model_call_limit` diagnostic code alone does
+not authorize an additional request for another waiter. Quarry permits a viable waiter with
+its own budget to retry when the shared request actually exhausts the initiating caller's
+Quarry deadline or model-call allowance. Provider retries within one logical call continue
+to consume that call's existing time and attempt budgets.
+
 Each scan has a deadline, model-call budget, and scan-local cache. Adapters must honor cancellation and timeouts in their own clients. The runnable [model example](../examples/model-inference/) uses a deterministic local adapter without network access.
 
 ## Generic model windows
