@@ -67,8 +67,8 @@ class LocalTokenizerLimits:
             )
         if (
             type(self.max_wall_seconds) not in (int, float)
-            or not isfinite(self.max_wall_seconds)
             or not 0 < self.max_wall_seconds <= 30
+            or not isfinite(self.max_wall_seconds)
         ):
             raise LocalTokenizerValidationError("invalid local tokenizer wall allowance")
         object.__setattr__(self, "max_wall_seconds", float(self.max_wall_seconds))

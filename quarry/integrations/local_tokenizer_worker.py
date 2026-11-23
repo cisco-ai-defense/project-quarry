@@ -154,7 +154,7 @@ class _LocalWorkerOwner:
 
     async def run(self, function: Callable[[_Job], Any], *, timeout: float) -> Any:
         self._process()
-        if type(timeout) not in (int, float) or not isfinite(timeout) or not 0 < timeout <= 30:
+        if type(timeout) not in (int, float) or not 0 < timeout <= 30 or not isfinite(timeout):
             _raise("input")
         raise_if_evaluation_expired()
         job = _Job(monotonic() + timeout)
