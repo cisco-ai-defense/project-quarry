@@ -254,6 +254,7 @@ class _WindowObservationStore:
                 reader.phase,
                 event.model,
                 event.operation,
+                event.outcome,
                 event.cut if event.cut is not None else identity,
                 frame["reply"],
             )
