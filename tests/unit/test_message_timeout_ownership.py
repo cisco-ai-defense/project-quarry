@@ -17,10 +17,13 @@ from tests.unit.test_message_rewrites import RewriteAdapter, service
 
 
 @pytest.mark.parametrize("owner", ["rule", "scan", "rule_inside_scan", "scan_inside_rule"])
+@pytest.mark.parametrize("clock_start", [1024.0, 1015.0000000000001])
 async def test_expired_native_message_timer_preserves_its_evaluation_owner(
-    tmp_path, monkeypatch, owner
+    tmp_path, monkeypatch, owner, clock_start
 ):
-    now = timer.time.monotonic()
+    # Exercise exact subtraction and rounding across a binary exponent boundary.
+    now = clock_start
+    expected_remaining = (clock_start + 10) - clock_start
     monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
     cancelled = asyncio.Event()
 
@@ -38,7 +41,7 @@ async def test_expired_native_message_timer_preserves_its_evaluation_owner(
     class EarlyAsyncio:
         def timeout(self, seconds):
             observed.append(seconds)
-            assert seconds == 10
+            assert seconds == expected_remaining
             # Exercise a real expiring asyncio.Timeout while the cooperative
             # clock still reads before its deadline, as a coarse clock can do.
             return asyncio.timeout(0)
@@ -60,8 +63,8 @@ async def test_expired_native_message_timer_preserves_its_evaluation_owner(
         stack.enter_context(manager(10, "selected evaluation owner"))
         with pytest.raises(timer.QuarryTimeoutError, match="^selected evaluation owner$"):
             await backend.transform_messages("rewrite", source)
-        assert timer.remaining_evaluation_time() == 10
-    assert observed == [10] and cancelled.is_set()
+        assert timer.remaining_evaluation_time() == expected_remaining
+    assert observed == [expected_remaining] and cancelled.is_set()
 
 
 async def test_adapter_timeout_does_not_borrow_an_unexpired_evaluation_owner(tmp_path):
