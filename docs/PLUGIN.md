@@ -17,6 +17,13 @@ extend a response without hiding data from an older client. The checked-in schem
 `quarry/plugin/tool_schemas.json` and are regenerated with the language artifacts. Python hosts
 can import the corresponding response types from `quarry.plugin`.
 
+The decision-path contract requires `conversation_sha256` and permits `null` for input
+rejected before hashing. Other digest fields retain their SHA-256 constraints. Model alias
+reference entries may include `display_name`, a string of 1 to 100 characters, alongside
+their optional description. Both contracts preserve additive fields. These declarations
+describe the response boundary; input admission and display-label production belong to the
+scanner and runtime configuration.
+
 ## Install from the repository
 
 The repository is one installable unit:
@@ -765,6 +772,15 @@ Model aliases, backend endpoints, named `text_ref` resources, safety limits, and
 server settings. Declared text parameters are tool inputs by design; they are bound into the ad hoc
 policy for that scan and represented only by a redacted marker in parameter evidence.
 Configured model rate limits are shared across every compile and scan handled by that server.
+Startup, reference requests, and local-only compilation do not construct unused model backends
+or inspect their credentials. A rule that uses a model alias still requires that alias's backend
+and credentials before it can compile; an unavailable used alias fails with a configuration
+diagnostic. Unused aliases do not prevent local tools from working.
+
+Model rate-limit waits respect the active evaluation deadline. If a throughput window cannot
+open before that deadline, the request fails without taking a ticket. Waiting for a concurrency
+slot stops at the deadline; a slot released in time remains usable. These waits do not dispatch
+a provider request or consume a model-call attempt.
 
 ## Request limits
 

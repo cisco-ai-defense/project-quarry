@@ -54,10 +54,12 @@ class SafetyLimits:
     max_message_size: int = 10_000_000
     max_tool_argument_size: int = 1_000_000
     max_tool_calls: int = 1_000
-    # Maximum JSON nesting depth for a tool-call argument object. Bounds both the
-    # scanner's post-size-preflight validation and the lazy rule-local decoder
-    # (``ToolCall.arguments``).
+    # Maximum JSON nesting depth for message content, offered tool definitions, and tool-call
+    # argument objects. Tool definitions are checked after total-size preflight; arguments are
+    # checked both after preflight and by the lazy rule-local decoder (``ToolCall.arguments``).
     max_nesting_depth: int = 100
+    # Aggregate object/materialization budget. Reused containers are charged per occurrence
+    # because validation and canonicalization materialize every occurrence independently.
     max_total_size: int = 50_000_000  # 50MB
     max_timeline_items: int = 10_000
     max_comprehension_size: int = 10_000
@@ -74,7 +76,7 @@ class SafetyLimits:
     # a conversation that differs from what the caller sent; raise the specific limit instead.
 
     def __post_init__(self) -> None:
-        """Reject timeout values that would silently disable deadline enforcement.
+        """Reject invalid bounds before a scanner can use this limits object.
 
         A NaN/inf/non-positive timeout makes ``min(per_rule, remaining)`` and
         ``asyncio.timeout`` never fire (or fire immediately), so a pathological rule could run
@@ -95,6 +97,12 @@ class SafetyLimits:
             or not 1 <= self.max_nesting_depth <= 100
         ):
             raise ValueError("max_nesting_depth must be an integer from 1 to 100")
+        if (
+            isinstance(self.max_total_size, bool)
+            or not isinstance(self.max_total_size, int)
+            or self.max_total_size < 0
+        ):
+            raise ValueError("max_total_size must be a non-negative integer")
         if (
             isinstance(self.max_model_calls, bool)
             or not isinstance(self.max_model_calls, int)

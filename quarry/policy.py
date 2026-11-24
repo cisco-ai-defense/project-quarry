@@ -458,14 +458,22 @@ class CompiledPolicy:
                         record_traces=record_traces,
                         rules_subset={self._rule_name},
                         decision_paths=decision_paths,
-                        explore=_sampled(
-                            conversation,
-                            self._scanner.compiled_rules[self._rule_name].read_surfaces,
-                            self._adapter_hashes,
-                            self._scanner.compiled_rules[self._rule_name].orders_input_items,
-                            explore_rate,
-                            self._scanner.limits,
-                            self._scanner.input_registry,
+                        explore_selector=(
+                            (
+                                lambda value: _sampled(
+                                    value,
+                                    self._scanner.compiled_rules[self._rule_name].read_surfaces,
+                                    self._adapter_hashes,
+                                    self._scanner.compiled_rules[
+                                        self._rule_name
+                                    ].orders_input_items,
+                                    explore_rate,
+                                    self._scanner.limits,
+                                    self._scanner.input_registry,
+                                )
+                            )
+                            if explore_rate > 0
+                            else None
                         ),
                         deferred_evidence=deferred,
                     )

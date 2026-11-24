@@ -25,7 +25,7 @@ surfaces; no duplicate event is synthesized.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from types import MappingProxyType
 from typing import Annotated, Any
 
@@ -348,15 +348,17 @@ class Conversation:
     @classmethod
     def from_openai(
         cls,
-        value: Mapping[str, Any],
+        value: dict[str, Any],
         *,
         tool_call_types: ToolCallTypeRegistry | None = None,
         max_nesting_depth: int = 100,
     ) -> Conversation:
-        """Build from a complete OpenAI-compatible conversation dictionary."""
+        """Build from an exact built-in dict containing an OpenAI-compatible conversation."""
 
-        if not isinstance(value, Mapping):
-            raise ConversationValidationError(f"Expected mapping, got {type(value).__name__}")
+        if type(value) is not dict:
+            raise ConversationValidationError(
+                f"Expected exact built-in dict, got {type(value).__name__}"
+            )
         payload = dict(value)
         validate_conversation(
             payload,

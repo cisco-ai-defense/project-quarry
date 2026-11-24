@@ -1,0 +1,48 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+rule "core/coding-agents-runtime-behavior-rules/configuration_persistence_fetch_execute_content_write"
+metadata:
+    title = "Remote execution in agent configuration"
+    description = "Select tool calls mentioning agent configuration and remote execution indicators, then score the individual call for a persistent instruction or hook."
+    author = "Cisco AI Defense"
+    severity = "HIGH"
+    revision = "0"
+    updated = "2026-10-14"
+    requires_quarry = ">=0.1.0,<0.2.0"
+    taxonomy_objective = "Persistence"
+    taxonomy_technique = "Configuration Persistence"
+    taxonomy_subtechnique = "Agent Profile Tampering"
+    signal_channel = "tool_calls"
+strings:
+    $agent_files = [
+        "AGENTS.md", "CLAUDE.md", "GEMINI.md", "SKILL.md", "copilot-instructions.md",
+        "settings.json", "config.toml", ".cursor/rules", ".clinerules", ".windsurfrules"
+    ] nocase
+    $execution_terms = [
+        "curl", "wget", "Invoke-WebRequest", "Invoke-RestMethod", "DownloadString",
+        "Invoke-Expression", "PowerShell", "bash", "sh -c",
+        "download and run", "download and execute", "fetch and execute"
+    ] nocase
+parameters:
+    threshold: number policy
+condition:
+    any call in tool_calls where
+        (call.raw_arguments contains_any $agent_files) and
+        (call.raw_arguments contains_any $execution_terms) and
+        (model("configuration_persistence_judge").score(
+            message("user", call.name).add_message("user", call.raw_arguments),
+            text_ref("configuration_persistence_policy")) > params.threshold)
