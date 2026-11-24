@@ -198,10 +198,10 @@ stage; a later scan execution failure retains its exception-based category.
 ```python
 from quarry import compile_policy, load_compiled_policy
 
-policy = compile_policy('rule "Greeting"
+policy = compile_policy("""rule "Greeting"
 condition:
     user_said("hello")
-')
+""")
 compiled_bytes = policy.to_bytes()
 restored = load_compiled_policy(compiled_bytes)
 result = restored.scan({"messages": [{"role": "user", "content": "hello"}]})
@@ -212,6 +212,34 @@ Temporal rules with nested tool quantifiers retain their verdicts through this
 round trip, including captured message values and conditions shared across a
 tool quantifier's body. Prepared policies retain the executable quantifier
 plans read by the compiled rule.
+
+Use `entry_rule` to prepare one entry point from a module containing public helper
+rules:
+
+```python
+source = """
+rule "Greeting"
+condition: user_said("hello")
+
+rule "SelectedGreeting"
+imports: greeting = "Greeting"
+condition: greeting(user_messages)
+"""
+policy = compile_policy(source, entry_rule="SelectedGreeting")
+restored = load_compiled_policy(policy.to_bytes())
+result = restored.scan({"messages": [{"role": "user", "content": "hello"}]})
+```
+
+With an explicit entry, `runtime_config` can supply helper definitions through
+`quarry_rule_texts` or configured rule files. The complete generation must have
+valid, unique rule names and acyclic imports. Only the selected entry runs; its
+saved policy carries the reachable helper checks and referenced runtime identities.
+Loading those bytes does not parse source or reopen helper rule files. Parameters
+used by a helper remain part of the selected policy's parameter schema.
+
+Named local work groups for a prepared policy target the selected entry; nested
+calls share that entry's allowance. Without `entry_rule`, the source still requires
+exactly one rule, and configured rule sources stay outside that compilation.
 
 Authenticate stored compiled bytes before passing them to the loader. The loader checks the wire version, compiler version, rule requirement, and runtime resource identity; it does not prove arbitrary bytes came from your build. Recompile source after an incompatible version change. Policies with bound text parameters also require the host to manage their evidence key and follow the loader's key requirements.
 
