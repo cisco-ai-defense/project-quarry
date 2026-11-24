@@ -158,6 +158,9 @@ from quarry.types.exceptions import (
     ExternalSpanProviderError,
     InvalidInputError,
     LLMError,
+    LocalTokenizerInvalidOutputError,
+    LocalTokenizerLimitError,
+    LocalTokenizerUnavailableError,
     ModelError,
     ResourceError,
     RuleCompatibilityError,
@@ -269,11 +272,13 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.INVALID_INPUT
     if issubclass(error_type, ExternalSpanPartialReadError):
         return ScanFailureCategory.MODEL_PARTIAL_READ
-    if issubclass(error_type, ExternalSpanInvalidOutputError):
+    if issubclass(error_type, ExternalSpanInvalidOutputError | LocalTokenizerInvalidOutputError):
         return ScanFailureCategory.MODEL_INVALID_OUTPUT
-    if issubclass(error_type, ExternalSpanProviderError):
+    if issubclass(error_type, ExternalSpanProviderError | LocalTokenizerUnavailableError):
         return ScanFailureCategory.MODEL_PROVIDER
-    if issubclass(error_type, ExternalSpanLimitError | LocalMatchWorkError):
+    if issubclass(
+        error_type, ExternalSpanLimitError | LocalMatchWorkError | LocalTokenizerLimitError
+    ):
         return ScanFailureCategory.EVALUATION_LIMIT
     if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL

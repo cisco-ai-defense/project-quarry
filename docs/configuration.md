@@ -234,6 +234,11 @@ not change provider requests, model-result cache keys, or compiled-policy model 
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
 
+For explicit pinned local request counts and raw text IDs/code-point offsets,
+configure the optional [`local_tokenizer` adapter](local-tokenizer.md). It loads
+local artifacts only when needed, renders supported request templates off-loop,
+and adds declared framing once per request/message without a provider call.
+
 ## Local matching work allowances
 
 The optional `local_match_work` block selects bounded, nonoverlapping rule groups

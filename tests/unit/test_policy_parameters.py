@@ -33,6 +33,7 @@ from types import SimpleNamespace
 import pytest
 
 import quarry.policy as policy_module
+import quarry.scanner as scanner_module
 from quarry.config import QuarryConfig
 from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
@@ -583,21 +584,71 @@ async def test_a_batch_deadline_raises_when_timeouts_are_configured_to_fail(
 
 async def test_later_limiter_timeout_keeps_prefix_usage_and_adds_no_attempt(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    now = 1024.0
+    armed = {}
+    cancelled = asyncio.Event()
+
+    def clock():
+        return now
+
+    class AdmittedAsyncio:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def timeout(self, seconds):
+            owner = timer.current_evaluation_deadline()
+            assert owner is not None
+            assert owner.error_message == "Policy batch deadline exceeded"
+            assert seconds == owner.expires_at - now
+            # The test's subject is expiry while queued in the second limiter,
+            # so scheduler delay before physical admission must not expire it.
+            native = asyncio.timeout(None)
+            armed[self.kind] = (asyncio.get_running_loop(), native, owner)
+            return native
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    class ExpireSecondLimiter(_PermitFirstLimiter):
+        @asynccontextmanager
+        async def limit(self, model):
+            nonlocal now
+            if self.entries == 1:
+                assert adapter.calls == 1
+                loop, native, owner = armed["provider"]
+                now = owner.expires_at
+                loop.call_soon(native.reschedule, loop.time())
+            try:
+                async with super().limit(model) as waited:
+                    yield waited
+            finally:
+                if self.waiting.is_set():
+                    cancelled.set()
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", AdmittedAsyncio("rule"))
+    monkeypatch.setattr(model_usage, "asyncio", AdmittedAsyncio("provider"))
     config, backend, adapter, _ = _runtime(tmp_path, fail_on_timeout=True)
-    limiter = _PermitFirstLimiter()
+    limiter = ExpireSecondLimiter()
     backend.model_usage.rate_limiter = limiter
     policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
 
     with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
-        await policy.scan_many_async(
-            [_user("first"), _user("waiting")],
-            deadline_seconds=0.2,
+        await asyncio.wait_for(
+            policy.scan_many_async(
+                [_user("first"), _user("waiting")],
+                deadline_seconds=0.2,
+            ),
+            timeout=30,
         )
 
     aggregate = exc_info.value.scan_result
     assert limiter.entries == 2
     assert limiter.waiting.is_set()
+    assert cancelled.is_set()
     assert adapter.calls == aggregate.model_usage["calls"] == 1
     assert aggregate.model_usage["records"] == [
         {"model": "judge", "operation": "score", "calls": 1}
