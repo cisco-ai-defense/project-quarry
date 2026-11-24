@@ -36,6 +36,9 @@ class ScanFailureCategory(StrEnum):
     TRUNCATED_INPUT = auto()
     EVALUATION_LIMIT = auto()
     UNKNOWN = auto()
+    MODEL_PROVIDER = auto()
+    MODEL_INVALID_OUTPUT = auto()
+    MODEL_PARTIAL_READ = auto()
 
 
 def _category_from_metadata(value: object) -> ScanFailureCategory:

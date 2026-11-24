@@ -273,6 +273,10 @@ Optional [window observations](window-observations.md) report the accepted reply
 per-reader cache status, and actual selected-input coverage without extra model or tokenizer
 requests. They keep logical reads separate from physical attempts and do not alter verdicts.
 
+For host-supplied spans with explicit complete or partial coverage, see
+[external span adapters](external-spans.md). That mode uses its own dispatch contract
+and does not require classifier or token heads for span-only policies.
+
 Decode character spans using `CharacterWindow.span(...)` or the supplied `SourceText.span(...)`.
 For token spans, use positions in the full encoding and the host's actual character mapping;
 token indices are not character offsets. Keep the geometry returned by the source and add the

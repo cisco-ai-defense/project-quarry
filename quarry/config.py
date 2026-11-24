@@ -46,6 +46,7 @@ from quarry.types.adapter_transforms import (
     TransformConfig,
 )
 from quarry.types.exceptions import ConfigurationError
+from quarry.types.external_spans import ExternalSpanLimits
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
 from quarry.types.transforms import (
@@ -169,7 +170,18 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "instructions": str,
         "labels": _LIST_OR_MAPPING,
     },
-    "spans": {"class_index": int, "max_input_tokens": int},
+    "spans": {
+        "class_index": int,
+        "max_input_tokens": int,
+        "backend": str,
+        "renderer": str,
+        "limits": {
+            "max_input_characters": int,
+            "max_spans": int,
+            "max_coverage_ranges": int,
+            "max_work": int,
+        },
+    },
     "complete": {"response_schema": _ANY_MAPPING, "max_input_tokens": int},
 }
 
@@ -269,6 +281,26 @@ class SpanConfig:
 
 
 @dataclass(frozen=True)
+class ExternalSpanConfig:
+    """Explicit generic external-span dispatch, separate from classifier span heads."""
+
+    backend: str = "external"
+    renderer: str = "join"
+    limits: ExternalSpanLimits = field(default_factory=ExternalSpanLimits)
+    max_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.backend) is not str or self.backend != "external":
+            raise ValueError("external spans backend must be 'external'")
+        if type(self.renderer) is not str or self.renderer not in ("join", "json"):
+            raise ValueError("external spans renderer must be 'join' or 'json'")
+        if type(self.limits) is not ExternalSpanLimits:
+            raise ValueError("external spans limits must be ExternalSpanLimits")
+        object.__setattr__(self, "limits", replace(self.limits))
+        _input_token_limit(self.max_input_tokens)
+
+
+@dataclass(frozen=True)
 class CompleteConfig:
     """Completion settings for a model alias."""
 
@@ -320,7 +352,7 @@ class InferenceModelConfig:
     score: ScoreConfig | None
     category: str | None = None
     classify: ClassifyConfig | None = None
-    spans: SpanConfig | None = None
+    spans: SpanConfig | ExternalSpanConfig | None = None
     complete: CompleteConfig | None = None
     revision: str | None = field(default=None, metadata={"cache_omit_none": True})
     windows: ModelWindowsConfig | None = field(default=None, metadata={"cache_omit_none": True})
@@ -329,6 +361,8 @@ class InferenceModelConfig:
         _model_revision(self.revision)
         if self.windows is not None and not isinstance(self.windows, ModelWindowsConfig):
             raise ValueError("windows must be a ModelWindowsConfig or None")
+        if isinstance(self.spans, ExternalSpanConfig) and self.windows is not None:
+            raise ValueError("external spans cannot be combined with model windows")
 
     def identity_dict(self) -> dict[str, object]:
         """Canonical model configuration, retaining pre-explanation policy identity.
@@ -1093,6 +1127,17 @@ def _validate_model_template_fragment_semantics(owner: str, data: dict) -> None:
             raise ConfigurationError(
                 f"{owner} spans class_index must be a non-negative integer or null"
             )
+        backend = spans.get("backend")
+        renderer = spans.get("renderer")
+        if backend is not None and backend != "external":
+            raise ConfigurationError(f"{owner} spans backend must be 'external' or null")
+        if renderer is not None and renderer not in ("join", "json"):
+            raise ConfigurationError(f"{owner} spans renderer must be 'join', 'json', or null")
+        if isinstance(spans.get("limits"), dict):
+            try:
+                ExternalSpanLimits(**{k: v for k, v in spans["limits"].items() if v is not None})
+            except ValueError as exc:
+                raise ConfigurationError(f"{owner} spans has invalid external limits") from exc
 
     classify = data.get("classify")
     if isinstance(classify, dict):
@@ -1282,6 +1327,8 @@ def _validate_resolved_model_semantics(name: str, data: dict, *, template: bool)
             if data.get("spans") is not None
             else None
         )
+        if isinstance(spans, ExternalSpanConfig) and data.get("windows") is not None:
+            raise ValueError("external spans cannot be combined with model windows")
         if data.get("complete") is not None:
             _parse_complete_config(name, data["complete"], owner=f"{owner} complete")
     except ConfigurationError:
@@ -1662,13 +1709,31 @@ def _parse_span_config(
     value: object,
     *,
     owner: str | None = None,
-) -> SpanConfig:
+) -> SpanConfig | ExternalSpanConfig:
     """Parse the span output class exposed by one logical alias."""
 
     owner = owner or f"Inference model '{model_name}' spans"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
+    if "backend" in fields:
+        _reject_unknown_fields(fields, {"backend", "renderer", "limits", "max_input_tokens"}, owner)
+        limits = fields.get("limits", {})
+        if type(limits) is not dict:
+            raise ValueError(f"{owner} limits must be a mapping")
+        _reject_unknown_fields(
+            limits,
+            {"max_input_characters", "max_spans", "max_coverage_ranges", "max_work"},
+            f"{owner} limits",
+        )
+        return ExternalSpanConfig(
+            backend=_required_string(fields, "backend", owner),
+            renderer=_required_string(fields, "renderer", owner)
+            if "renderer" in fields
+            else "join",
+            limits=ExternalSpanLimits(**cast(dict[str, int], limits)),
+            max_input_tokens=_input_token_limit(fields.get("max_input_tokens")),
+        )
     _reject_unknown_fields(fields, {"class_index", "max_input_tokens"}, owner)
     class_index = fields.get("class_index")
     if isinstance(class_index, bool) or not isinstance(class_index, int) or class_index < 0:

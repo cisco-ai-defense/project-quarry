@@ -26,9 +26,11 @@ Example usage:
 import argparse
 import csv
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import orjson
 from rich.console import Console
@@ -458,7 +460,7 @@ def format_results(
     return ""
 
 
-def scan_command(args):
+def scan_command(args, *, model_adapters: Mapping[str, Any] | None = None):
     """Handle the scan subcommand."""
     logical_reads = getattr(args, "logical_reads", False)
     if logical_reads and args.output_format != "json":
@@ -496,12 +498,16 @@ def scan_command(args):
         limits = replace(limits, enforce_limits=False)
 
     try:
+        adapter_kwargs: dict[str, Any] = (
+            {"model_adapters": model_adapters} if model_adapters is not None else {}
+        )
         scanner = DSLScanner(
             config=config,
             recursive=args.recursive,
             verbose=args.verbose,
             limits=limits,
             batch_mode=args.batch,
+            **adapter_kwargs,
         )
     except Exception as e:
         print(f"[ERROR] Failed to initialize scanner: {e}", file=sys.stderr)
@@ -659,7 +665,7 @@ def scan_command(args):
     return EXIT_MATCH if total_matches > 0 else EXIT_CLEAN
 
 
-def main():
+def main(argv: list[str] | None = None, *, model_adapters: Mapping[str, Any] | None = None):
     """Main CLI entry point with subcommands."""
     parser = argparse.ArgumentParser(
         description=BANNER,
@@ -744,14 +750,16 @@ Examples:
     )
     scan_parser.set_defaults(func=scan_command)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not hasattr(args, "func"):
         parser.print_help()
         return 1
 
     try:
-        return args.func(args)
+        return args.func(
+            args, **({"model_adapters": model_adapters} if model_adapters is not None else {})
+        )
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         return EXIT_INCOMPLETE

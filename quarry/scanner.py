@@ -145,6 +145,9 @@ from quarry.types.exceptions import (
     ConversationValidationError,
     EvaluationError,
     EvaluationTimeoutError,
+    ExternalSpanInvalidOutputError,
+    ExternalSpanPartialReadError,
+    ExternalSpanProviderError,
     InvalidInputError,
     LLMError,
     ModelError,
@@ -153,6 +156,7 @@ from quarry.types.exceptions import (
     RuleLoadError,
     RuleValidationError,
 )
+from quarry.types.external_spans import ExternalSpanLimitError
 from quarry.types.failures import ScanFailureCategory, _category_from_metadata
 from quarry.types.messages import (
     Message,
@@ -255,6 +259,14 @@ def _failure_category(error: Exception) -> ScanFailureCategory:
         return ScanFailureCategory.TIMEOUT
     if issubclass(error_type, ConversationValidationError | InvalidInputError):
         return ScanFailureCategory.INVALID_INPUT
+    if issubclass(error_type, ExternalSpanPartialReadError):
+        return ScanFailureCategory.MODEL_PARTIAL_READ
+    if issubclass(error_type, ExternalSpanInvalidOutputError):
+        return ScanFailureCategory.MODEL_INVALID_OUTPUT
+    if issubclass(error_type, ExternalSpanProviderError):
+        return ScanFailureCategory.MODEL_PROVIDER
+    if issubclass(error_type, ExternalSpanLimitError):
+        return ScanFailureCategory.EVALUATION_LIMIT
     if issubclass(error_type, LLMError | ModelError):
         return ScanFailureCategory.MODEL
     if issubclass(error_type, ResourceError | ResourcePreparationError):
@@ -434,6 +446,7 @@ class DSLScanner:
         llm_rate_limiter: LLMRateLimiter | None = None,
         _allow_parameters: bool = False,
         input_adapters: Mapping[str, InputAdapter] | None = None,
+        model_adapters: Mapping[str, Any] | None = None,
     ):
         """
         Initialize scanner with config.
@@ -448,6 +461,7 @@ class DSLScanner:
             model_inference_backend: Optional separately constructed model backend.
             llm_rate_limiter: Optional limiter shared across scanner instances.
             input_adapters: Named converters for native input formats.
+            model_adapters: Trusted host model adapters, registered without loading modules.
         """
         self._initialize_execution(
             config,
@@ -459,6 +473,7 @@ class DSLScanner:
             tool_call_types=tool_call_types,
             llm_rate_limiter=llm_rate_limiter,
             allow_parameters=_allow_parameters,
+            model_adapters=model_adapters,
         )
         self.parser = DSLParser()
         self.input_adapters, declarations = load_input_adapters(
@@ -490,6 +505,7 @@ class DSLScanner:
         tool_call_types: ToolCallTypeRegistry | None,
         llm_rate_limiter: LLMRateLimiter | None,
         allow_parameters: bool,
+        model_adapters: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize state shared by source compilation and compiled-policy loading."""
 
@@ -498,6 +514,11 @@ class DSLScanner:
         self.batch_mode = batch_mode
         validated_call_types = Messages.validate_tool_call_types(tool_call_types)
         self.tool_call_types: ToolCallTypeRegistry = MappingProxyType(validated_call_types)
+        if model_inference_backend is not None and model_adapters is not None:
+            raise ValueError("model_adapters and model_inference_backend are mutually exclusive")
+        self.model_adapters = (
+            None if model_adapters is None else MappingProxyType(dict(model_adapters))
+        )
         self.model_inference_backend = model_inference_backend
         self._allow_parameters = allow_parameters
         self.llm_rate_limiter = llm_rate_limiter
@@ -616,10 +637,14 @@ class DSLScanner:
                 compatibility_issues,
             )
 
+        adapter_kwargs: dict[str, Any] = (
+            {"model_adapters": self.model_adapters} if self.model_adapters is not None else {}
+        )
         resource_manager = ResourceManager(
             self.config,
             model_inference_backend=self.model_inference_backend,
             llm_rate_limiter=self.llm_rate_limiter,
+            **adapter_kwargs,
         )
 
         rules: dict[str, DSLRule] = {}
