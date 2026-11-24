@@ -237,6 +237,11 @@ saved policy carries the reachable helper checks and referenced runtime identiti
 Loading those bytes does not parse source or reopen helper rule files. Parameters
 used by a helper remain part of the selected policy's parameter schema.
 
+Freshly compiled entries derive `source_sha256` and `policy_digest` from the linked
+source, including helper definitions. Changing a helper file therefore changes the
+entry's source identity. Loading previously saved bytes preserves the identities
+stored in those bytes.
+
 Named local work groups for a prepared policy target the selected entry; nested
 calls share that entry's allowance. Without `entry_rule`, the source still requires
 exactly one rule, and configured rule sources stay outside that compilation.
