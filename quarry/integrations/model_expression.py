@@ -19,11 +19,12 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import math
 import uuid
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -80,7 +81,7 @@ from quarry.types.adapter_transforms import (
 )
 from quarry.types.exceptions import MODEL_REFUSED, LLMError
 from quarry.types.message_groups import MessageGroups
-from quarry.types.messages import Message, Messages, ToolCall, _synthetic_key
+from quarry.types.messages import Message, Messages, ToolCall, UnreadableToolCall, _synthetic_key
 from quarry.types.origins import (
     Place,
     SourceText,
@@ -696,7 +697,7 @@ async def evaluate_model_expression(
         places = _view_spans(context.conversation.messages, value).items
         return places[0].value if places else MISSING
     if kind == "span_filter":
-        source, local, model = expression.children
+        source = expression.children[0]
         spans = await evaluate_model_expression(
             source,
             context,
@@ -711,67 +712,44 @@ async def evaluate_model_expression(
         survivors = []
         immediate_plans = {}
         for item in spans.items:
-            raise_if_evaluation_expired()
-            scope = {**environment, str(expression.value): item.value}
-            if not truth(
-                await _evaluate_filter(
-                    local,
-                    context,
-                    plans=immediate_plans,
-                    repeatable=len(spans.items) > 1,
-                    event=event,
-                    bindings=scope,
-                    trace=trace,
-                    regex_backend=regex_backend,
-                )
+            if await _span_filter_holds(
+                expression,
+                item.value,
+                context,
+                event,
+                environment,
+                trace,
+                regex_backend,
+                plans=immediate_plans,
+                repeatable=len(spans.items) > 1,
             ):
-                continue
-            if model.kind != "absent" and not truth(
-                await _evaluate_filter(
-                    model,
-                    context,
-                    plans=immediate_plans,
-                    repeatable=len(spans.items) > 1,
-                    event=event,
-                    bindings=scope,
-                    trace=trace,
-                    regex_backend=regex_backend,
-                )
-            ):
-                continue
-            survivors.append(item)
+                survivors.append(item)
         return replace(spans, items=tuple(survivors))
     if kind in {"span_any", "span_all"}:
         source, predicate = expression.children
-        spans = await evaluate_model_expression(
-            source,
-            context,
-            event=event,
-            bindings=environment,
-            trace=trace,
-            regex_backend=regex_backend,
-        )
-        if not isinstance(spans, CollectionResult):
-            raise TypeError("a span quantifier requires a span collection")
-        _check_span_limit(context, len(spans.items), "span quantifier input")
         wanted = kind == "span_any"
         immediate_plans = {}
-        for item in spans.items:
+        variable = str(expression.value)
+        async for span in _stream_quantifier_spans(
+            source, context, event, environment, trace, regex_backend
+        ):
             raise_if_evaluation_expired()
             held = truth(
                 await _evaluate_filter(
                     predicate,
                     context,
                     plans=immediate_plans,
-                    repeatable=len(spans.items) > 1,
+                    repeatable=True,
                     event=event,
-                    bindings={**environment, str(expression.value): item.value},
+                    bindings={**environment, variable: span},
                     trace=trace,
                     regex_backend=regex_backend,
                 )
             )
+            raise_if_evaluation_expired()
             if held is wanted:
                 return wanted
+        raise_if_evaluation_expired()
         return not wanted
     if kind == "outermost":
         spans = await evaluate_model_expression(
@@ -1403,7 +1381,7 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
         ),
         len(filters),
     )
-    body_first = first_paid < len(filters) and not model_expression_requires_model(body)
+    can_check_body_first = first_paid < len(filters) and not model_expression_requires_model(body)
     output = []
     immediate_plans = {}
     pacer = Pacer()
@@ -1451,6 +1429,9 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
                     break
             if not selected:
                 continue
+            # A guarded field on an opaque call can fault. Only read it if the
+            # paid filters include that call in the quantifier's input.
+            body_first = can_check_body_first and not isinstance(item, UnreadableToolCall)
             body_value = await predicate(body, variable) if body_first else None
             if body_first and (
                 (kind == "call_any" and not body_value) or (kind == "call_all" and body_value)
@@ -1853,7 +1834,9 @@ async def _span_source_texts(
     return _view_source_texts(context.conversation.messages, view)
 
 
-async def _evaluate_string_spans(expression, context, event, environment, trace, regex_backend):
+async def _pattern_spans(
+    expression, context, event, environment, trace, regex_backend, *, ordered=False
+) -> AsyncIterator[Span]:
     text_source, *pattern_sources = expression.children
     texts = await _span_source_texts(text_source, context, event, environment, trace, regex_backend)
     pattern_sets = [
@@ -1863,37 +1846,190 @@ async def _evaluate_string_spans(expression, context, event, environment, trace,
     patterns = [
         (pattern, Modifiers.from_flags(flags)) for names, flags in pattern_sets for pattern in names
     ]
-    producer = str(expression.value)
-    run_uuid = uuid.uuid4()
-    items = []
+    matches = _match_text_spans(texts, patterns, regex_backend)
+    if ordered and not _span_texts_are_ordered(texts):
+        # A transformed or reordered source can map matches backwards. It must be sorted
+        # before an ordered consumer can decide which span to return first.
+        found = []
+        async for span in matches:
+            _check_span_limit(context, len(found) + 1, f"{expression.value}.spans() spans")
+            found.append(span)
+        found.sort(key=_span_ends)
+        raise_if_evaluation_expired()
+        for span in found:
+            yield span
+    else:
+        async for span in matches:
+            yield span
+
+
+def _span_texts_are_ordered(texts: list[SourceText]) -> bool:
+    previous_end = None
+    for text in texts:
+        raise_if_evaluation_expired()
+        if not isinstance(text.origin, Place):
+            return False
+        start, end = _span_ends(text.span(0, len(text.text)))
+        # Precision tie-breakers describe matched bounds; text order uses the offsets alone.
+        if previous_end is not None and start[:-1] < previous_end:
+            return False
+        previous_end = end[:-1]
+    return True
+
+
+async def _match_text_spans(texts, patterns, regex_backend) -> AsyncIterator[Span]:
     pacer = Pacer(every=64)
     for text in texts:
         raise_if_evaluation_expired()
-        for (begin, end), _matched in matching_patterns(text.text, patterns, regex=regex_backend):
-            _check_span_limit(context, len(items) + 1, f"{producer}.spans() spans")
+        for (begin, end), _ in matching_patterns(text.text, patterns, regex=regex_backend):
             if pacer.due():
-                raise_if_evaluation_expired()
                 await asyncio.sleep(0)
-            span = text.span(begin, end)
-            identity = json.dumps(
-                [
-                    producer,
-                    span.position,
-                    span.field,
-                    span.start,
-                    span.end_position,
-                    span.end_field,
-                    span.end,
-                    *(span._found or ()),
-                ]
-            )
-            items.append(ResultItem(item_id=str(uuid.uuid5(run_uuid, identity)), value=span))
+            raise_if_evaluation_expired()
+            yield text.span(begin, end)
+        raise_if_evaluation_expired()
+
+
+async def _evaluate_string_spans(expression, context, event, environment, trace, regex_backend):
+    producer = str(expression.value)
+    run_uuid = uuid.uuid4()
+    items = []
+    async for span in _pattern_spans(expression, context, event, environment, trace, regex_backend):
+        _check_span_limit(context, len(items) + 1, f"{producer}.spans() spans")
+        identity = json.dumps(
+            [
+                producer,
+                span.position,
+                span.field,
+                span.start,
+                span.end_position,
+                span.end_field,
+                span.end,
+                *(span._found or ()),
+            ]
+        )
+        items.append(ResultItem(item_id=str(uuid.uuid5(run_uuid, identity)), value=span))
     return CollectionResult(
         output_type="span_collection",
         category=None,
         source=ProducerRef(kind="pattern", name=producer, run_id=str(run_uuid)),
         items=tuple(items),
     )
+
+
+async def _span_filter_holds(
+    expression, span, context, event, environment, trace, regex_backend, *, plans, repeatable
+):
+    _, local, model = expression.children
+    scope = {**environment, str(expression.value): span}
+    for test in (local, model):
+        if test.kind == "absent":
+            continue
+        raise_if_evaluation_expired()
+        if not truth(
+            await _evaluate_filter(
+                test,
+                context,
+                plans=plans,
+                repeatable=repeatable,
+                event=event,
+                bindings=scope,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+        ):
+            return False
+    return True
+
+
+def _can_stream_in_order(expression: ModelExpression) -> bool:
+    if expression.kind == "string_spans":
+        return True
+    if expression.kind in {"span_filter", "outermost"}:
+        return _can_stream_in_order(expression.children[0])
+    return expression.kind == "union" and all(map(_can_stream_in_order, expression.children))
+
+
+async def _stream_quantifier_spans(
+    expression, context, event, environment, trace, regex_backend, *, ordered=False
+) -> AsyncIterator[Span]:
+    kind = expression.kind
+    children = expression.children
+    arguments = (context, event, environment, trace, regex_backend)
+    raise_if_evaluation_expired()
+    if kind == "string_spans":
+        async for span in _pattern_spans(expression, *arguments, ordered=ordered):
+            yield span
+        return
+    if kind == "span_filter":
+        plans = {}
+        async for span in _stream_quantifier_spans(children[0], *arguments, ordered=ordered):
+            if await _span_filter_holds(expression, span, *arguments, plans=plans, repeatable=True):
+                yield span
+        return
+    if kind == "union" and _can_stream_in_order(expression):
+        streams = [_stream_quantifier_spans(child, *arguments, ordered=True) for child in children]
+        async for span in _merge_span_streams(streams):
+            yield span
+        return
+    if kind == "outermost" and _can_stream_in_order(expression):
+        spans = _stream_quantifier_spans(children[0], *arguments, ordered=True)
+        async for span in _outermost_stream(spans):
+            yield span
+        return
+    spans = await evaluate_model_expression(
+        expression,
+        context,
+        event=event,
+        bindings=environment,
+        trace=trace,
+        regex_backend=regex_backend,
+    )
+    if not isinstance(spans, CollectionResult):
+        raise TypeError("a span quantifier requires a span collection")
+    _check_span_limit(context, len(spans.items), "span quantifier input")
+    for item in spans.items:
+        raise_if_evaluation_expired()
+        yield item.value
+
+
+async def _merge_span_streams(streams: list[AsyncIterator[Span]]) -> AsyncIterator[Span]:
+    # Only pattern-derived sources stream here. Their spans all have the same (absent) score.
+    heads = []
+    for index, stream in enumerate(streams):
+        head = await anext(stream, None)
+        if head is not None:
+            heapq.heappush(heads, (_span_ends(head), index, head))
+    previous = None
+    seen: set[Span] = set()
+    while heads:
+        raise_if_evaluation_expired()
+        key, index, span = heapq.heappop(heads)
+        if key != previous:
+            seen.clear()
+            previous = key
+        if span not in seen:
+            seen.add(span)
+            yield span
+        head = await anext(streams[index], None)
+        if head is not None:
+            heapq.heappush(heads, (_span_ends(head), index, head))
+
+
+async def _outermost_stream(spans: AsyncIterator[Span]) -> AsyncIterator[Span]:
+    best: tuple[_SpanPoint, _SpanPoint, Span] | None = None
+    furthest = None
+    async for span in spans:
+        raise_if_evaluation_expired()
+        start, end = _span_ends(span)
+        if best is not None and start != best[0]:
+            if furthest is None or best[1] > furthest:
+                furthest = best[1]
+                yield best[2]
+            best = None
+        if best is None or end > best[1]:
+            best = start, end, span
+    if best is not None and (furthest is None or best[1] > furthest):
+        yield best[2]
 
 
 _SpanPoint = tuple[str, int, tuple[int, int, str], int, float]
@@ -1915,14 +2051,29 @@ def _span_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
     return start, end
 
 
+def _containment_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
+    call = span._source
+    position = span.position
+    if isinstance(call, ToolCall) and position == span.end_position:
+        key = source_key(None)
+        if span._whole_call:
+            return (key, position, (-1, 0, ""), 0, 0), (key, position, (1, 0, ""), 0, math.inf)
+        if span.field.startswith("arguments.") and span.end_field.startswith("arguments."):
+            low, high = call._argument_bounds(span.field, span.start, span.end_field, span.end)
+            part = field_part(call, "raw_arguments", None)
+            found_start, found_end = span._found or (0, math.inf)
+            return (key, position, part, low, found_start), (key, position, part, high, found_end)
+    return _span_ends(span)
+
+
 def _cover_index(spans: Iterable[Span]) -> tuple[list[_SpanPoint], list[_SpanPoint]]:
-    ranges = sorted(_span_ends(span) for span in spans)
+    ranges = sorted(_containment_ends(span) for span in spans)
     return [start for start, _ in ranges], list(accumulate((end for _, end in ranges), max))
 
 
 def _is_covered(index: tuple[list[_SpanPoint], list[_SpanPoint]], inner: Span) -> bool:
     starts, furthest = index
-    start, end = _span_ends(inner)
+    start, end = _containment_ends(inner)
     position = bisect_right(starts, start) - 1
     return position >= 0 and furthest[position] >= end
 
@@ -1972,6 +2123,7 @@ def _view_spans(transcript: Messages, value: Any) -> CollectionResult[Span]:
                 len(texts[-1][1]),
                 source_field=texts[0][0],
                 end_source_field=texts[-1][0],
+                _whole_call=True,
                 place_position=positions[id(view)],
             )
             places.append(span._bind_to_source(view))
