@@ -3,14 +3,14 @@
 
 """Nested calls retain selected messages, source clocks and model-input failures."""
 
+import json
 from dataclasses import replace
 
 import pytest
 
-from quarry import DSLScanner, load_compiled_policy
+from quarry import compile_policy, load_compiled_policy
 from quarry.config import QuarryConfig
-from quarry.integrations.resources import requirements_from_artifact
-from quarry.policy import CompiledPolicy
+from quarry.dsl.parser import DSLParser
 from quarry.safety.limits import SafetyLimits
 from tests.unit.model_fakes import FakeAdapter, set_config_environment, v1_backend, write_v1_config
 
@@ -25,20 +25,11 @@ CHAT = {
 
 
 def _policy(source, config, restored, backend=None):
-    scanner = DSLScanner(
-        replace(config, quarry_rules_paths=(), quarry_rule_texts=(source,)),
-        model_inference_backend=backend,
+    config = replace(config, quarry_rules_paths=())
+    name = DSLParser().parse_many(source)[-1].name
+    policy = compile_policy(
+        source, entry_rule=name, runtime_config=config, model_inference_backend=backend
     )
-    # The policy API stores one entry point; its artifact carries its nested checks.
-    name = next(reversed(scanner.compiled_rules))
-    entry = DSLScanner._from_compiled_policy(
-        config,
-        rule=scanner.loaded_rules[name],
-        artifact=scanner.compiled_rules[name],
-        resource_requirements=requirements_from_artifact(scanner.compiled_rules[name]),
-        model_inference_backend=backend,
-    )
-    policy = CompiledPolicy._from_scanner(entry, source)
     if restored:
         wire = policy.to_bytes()
         policy = load_compiled_policy(wire, runtime_config=config, model_inference_backend=backend)
@@ -235,3 +226,65 @@ def test_valid_nested_model_index_scores_only_the_selected_message(
     assert result.rule_matches == [name]
     assert len(adapter.builder_messages) == 1
     assert scored == [[{"role": "user", "content": "needle"}]]
+
+
+@pytest.mark.parametrize("configured_helper", [False, True])
+def test_public_compile_policy_binds_parameters_used_only_by_the_helper(
+    tmp_path, configured_helper
+):
+    helper = """rule "Helper"
+parameters:
+    min_score: number policy
+condition:
+    model("judge").score(messages, "criterion") >= params.min_score
+"""
+    entry = 'rule "Entry" imports: helper = "Helper" condition: helper(messages)'
+    from tests.unit.test_policy_parameters import _runtime
+
+    config, backend, _, _ = _runtime(tmp_path)
+    if configured_helper:
+        path = tmp_path / "helper.rule"
+        path.write_text(helper, encoding="utf-8")
+        config = replace(config, quarry_rules_paths=(path,))
+    else:
+        entry = helper + entry
+
+    for min_score, expected in [(0.5, ["Entry"]), (0.95, [])]:
+        policy = compile_policy(
+            entry,
+            entry_rule="Entry",
+            runtime_config=config,
+            policy_parameters={"min_score": min_score},
+            model_inference_backend=backend,
+        )
+        wire = policy.to_bytes()
+        # Loading does not need the helper's source or the original rule file paths.
+        restored = load_compiled_policy(
+            wire,
+            runtime_config=replace(config, quarry_rules_paths=()),
+            model_inference_backend=backend,
+        )
+        assert restored.to_bytes() == wire
+        for prepared in (policy, restored):
+            result = prepared.scan(CHAT)
+            assert result.is_complete, result.evaluation_errors
+            assert result.rule_matches == expected
+
+
+def test_saved_policy_uses_linked_source_hash(tmp_path):
+    entry = 'rule "Entry" imports: helper = "Helper" condition: helper(messages)'
+    helper_path = tmp_path / "helper.rule"
+    config = QuarryConfig(config_version=2, quarry_rules_paths=(helper_path,))
+    hashes = []
+    for text, expected in [("needle", ["Entry"]), ("other text", [])]:
+        helper_path.write_text(f'rule "Helper" condition: user_said("{text}")', encoding="utf-8")
+        policy = compile_policy(entry, entry_rule="Entry", runtime_config=config)
+        wire = policy.to_bytes()
+        hashes.append(json.loads(wire)["source_sha256"])
+        restored = load_compiled_policy(wire)
+        assert restored.to_bytes() == wire
+        for prepared in (policy, restored):
+            result = prepared.scan(CHAT)
+            assert result.is_complete, result.evaluation_errors
+            assert result.rule_matches == expected
+    assert hashes[0] != hashes[1]
