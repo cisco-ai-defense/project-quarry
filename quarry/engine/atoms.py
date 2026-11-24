@@ -608,6 +608,27 @@ def model_expression_requires_model(expression: ModelExpression) -> bool:
     return False
 
 
+def model_expression_local_candidates_only(
+    expression: ModelExpression, aliases: frozenset[str]
+) -> bool:
+    """An ordering proof for explicit local spans, without granting local purity."""
+    found = False
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind == "model_call":
+            if type(node.value) is not str:
+                return False
+            alias, _, operation = node.value.partition("\x1f")
+            if alias not in aliases or operation != "spans":
+                return False
+            found = True
+        elif node.kind in {"split_any", "model_transform", "trim"}:
+            return False
+        pending.extend(node.children)
+    return found
+
+
 def validate_trim_size(expression: ModelExpression, alias: str) -> None:
     """Only integer arithmetic and same-vocabulary written-text counts set a trim size."""
     pending = [expression]

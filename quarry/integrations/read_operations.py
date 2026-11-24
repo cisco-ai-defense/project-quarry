@@ -113,6 +113,25 @@ class ModelRead:
             self._external_partial = not complete
             self._add("input", collect_external_input(session, source, coverage, complete=complete))
 
+    def candidate_pending(self):
+        """Replace supplied-input metadata until this batch proves actual inspection."""
+        if self._limited:
+            return
+        if self._pid == os.getpid():
+            self._add("input", InputMeasurement(UnitMeasurement("characters", "unavailable"), None))
+
+    def candidate_input(self, sources, coverage, *, complete):
+        if self._limited:
+            return
+        session = self._session()
+        if session is not None and self._pid == os.getpid():
+            from quarry.integrations.read_candidates import collect_candidate_input
+
+            self._external_partial = not complete
+            self._add(
+                "input", collect_candidate_input(session, sources, coverage, complete=complete)
+            )
+
     def tools(self, tools: object) -> None:
         if self._limited:
             return

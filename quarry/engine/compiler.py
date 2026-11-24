@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Iterator, Mapping, Set
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from itertools import combinations
 from math import comb
@@ -121,6 +122,10 @@ from quarry.types.dsl.operators.string import (
 from quarry.types.dsl.render import render_condition
 from quarry.types.response_schema import response_schema_types
 from quarry.types.transforms import MAX_TRANSFORM_CHAIN, ContentTransform
+
+_LOCAL_CANDIDATE_ALIASES: ContextVar[frozenset[str]] = ContextVar(
+    "quarry_compiler_local_candidate_aliases", default=frozenset()
+)
 
 _T = TypeVar("_T")
 
@@ -441,6 +446,7 @@ class _Compiler:
         self._field_types = dict(_MODEL_FIELD_TYPES)
         self._completion_types: dict[str, str] = {}
         self._transforms = dict(transforms or {})
+        self._local_candidate_aliases = _LOCAL_CANDIDATE_ALIASES.get()
         self._response_schemas = dict(response_schemas or {})
         for alias, schema_text in (response_schemas or {}).items():
             root, objects = response_schema_types(alias, schema_text)
@@ -1920,8 +1926,42 @@ class _Compiler:
             expression,
             surface,
             event_bound=event_bound,
-            cost=Cost.LLM if self._contains_model_call(node, service_only=True) else Cost.PURE,
+            cost=self._model_predicate_cost(node),
         )
+
+    def _model_predicate_cost(self, node) -> Cost:
+        if not self._contains_model_call(node, service_only=True):
+            return Cost.PURE
+        nodes = tuple(walk_condition_nodes(node))
+        calls = [current for current in nodes if isinstance(current, ModelCall)]
+        if (
+            calls
+            and all(
+                call.operation == "spans" and call.alias in self._local_candidate_aliases
+                for call in calls
+            )
+            and not any(
+                isinstance(current, FunctionCall)
+                and (
+                    current.name in _EXTERNAL_FUNCS
+                    or current.name in _REFUSAL_GUARDS
+                    or (
+                        current.name == "_transform"
+                        and len(current.args) == 2
+                        and isinstance(current.args[1], Literal)
+                        and isinstance(current.args[1].value, str)
+                        and type(self._transforms.get(current.args[1].value))
+                        is ModelTransformConfig
+                    )
+                )
+                for current in nodes
+            )
+        ):
+            # The runtime attests explicit native local span capabilities. This
+            # orders their finite work before service work, while retaining every
+            # existing model-expression type and local-purity restriction.
+            return Cost.MODEL
+        return Cost.LLM
 
     def _mint_model_expression(
         self,
@@ -5298,6 +5338,7 @@ def compile_rule(
     decompose: bool = True,
     response_schemas: Mapping[str, str] | None = None,
     transforms: Mapping[str, TransformConfig] | None = None,
+    local_candidate_aliases: frozenset[str] = frozenset(),
 ) -> CompileResult:
     """Compile a parsed ``DSLRule`` into a :class:`CompiledRuleArtifact` through the core
     calculus (``quarry.engine.lower``). On any unsupported construct or construction limit,
@@ -5306,7 +5347,9 @@ def compile_rule(
     ``artifact=None``. ``decompose`` builds the rule's decision tree (see ``compile_core``).
     ``response_schemas`` maps each model alias to its completion response schema, which types
     the rule's ``.json`` reads; without one, a rule cannot read ``.json``. ``transforms`` is
-    the immutable registry resolved into transform expressions at compile time."""
+    the immutable registry resolved into transform expressions at compile time.
+    ``local_candidate_aliases`` explicitly attests native local span capabilities
+    for ordering before service work, without changing model-purity validation."""
     from quarry.engine.lower import compile_core
 
     compatibility_issue = check_rule_compatibility(rule)
@@ -5330,13 +5373,26 @@ def compile_rule(
             SourceRef(rule_name=rule_name),
         )
         return CompileResult(rule_name, None, diagnostics)
-    return compile_core(
-        rule,
-        max_work=max_work,
-        decompose=decompose,
-        response_schemas=response_schemas,
-        transforms=transforms,
-    )
+    if (
+        type(local_candidate_aliases) is not frozenset
+        or len(local_candidate_aliases) > 4096
+        or any(
+            type(alias) is not str or not 1 <= len(alias) <= 256
+            for alias in local_candidate_aliases
+        )
+    ):
+        raise ValueError("local candidate aliases require a bounded immutable set of names")
+    token = _LOCAL_CANDIDATE_ALIASES.set(local_candidate_aliases)
+    try:
+        return compile_core(
+            rule,
+            max_work=max_work,
+            decompose=decompose,
+            response_schemas=response_schemas,
+            transforms=transforms,
+        )
+    finally:
+        _LOCAL_CANDIDATE_ALIASES.reset(token)
 
 
 _COMPOSITION_DIAGNOSTIC_WORK = 200_000

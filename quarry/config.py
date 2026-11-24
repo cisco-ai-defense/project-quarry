@@ -46,6 +46,16 @@ from quarry.types.adapter_transforms import (
     ModelTransformConfig,
     TransformConfig,
 )
+from quarry.types.candidates import (
+    CandidateBatchIdentity,
+    CandidateBatchLimits,
+)
+from quarry.types.candidates import (
+    _digest as _candidate_digest,
+)
+from quarry.types.candidates import (
+    _name as _candidate_name,
+)
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.external_spans import ExternalSpanLimits
 from quarry.types.local_tokenizer import (
@@ -158,6 +168,21 @@ _ANY_MAPPING = object()
 _LIST_OR_MAPPING = object()
 _SCORE_LABELS = object()
 _SCORE_PATH = object()
+_EXTERNAL_SPAN_LIMIT_FIELDS = {
+    "max_input_characters",
+    "max_spans",
+    "max_coverage_ranges",
+    "max_work",
+}
+_CANDIDATE_SPAN_LIMIT_FIELDS = {
+    "max_input_characters",
+    "max_parts",
+    "max_ranges_per_channel",
+    "max_coverage_per_channel",
+    "max_work",
+}
+_CANDIDATE_SPAN_BINDINGS = {"batch": str, "channel": str, "settings_digest": str}
+_CANDIDATE_SPAN_FIELDS = {"backend", "limits", "max_input_tokens", *_CANDIDATE_SPAN_BINDINGS}
 _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
     "adapter": str,
     "model": str,
@@ -202,12 +227,8 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "max_input_tokens": int,
         "backend": str,
         "renderer": str,
-        "limits": {
-            "max_input_characters": int,
-            "max_spans": int,
-            "max_coverage_ranges": int,
-            "max_work": int,
-        },
+        **_CANDIDATE_SPAN_BINDINGS,
+        "limits": dict.fromkeys(_EXTERNAL_SPAN_LIMIT_FIELDS | _CANDIDATE_SPAN_LIMIT_FIELDS, int),
     },
     "complete": {"response_schema": _ANY_MAPPING, "max_input_tokens": int},
 }
@@ -385,6 +406,29 @@ class ExternalSpanConfig:
 
 
 @dataclass(frozen=True)
+class CandidateSpanConfig:
+    """One reader of an explicitly registered, revision-bound candidate batch."""
+
+    batch: str
+    channel: str
+    settings_digest: str
+    backend: str = "candidates"
+    limits: CandidateBatchLimits = field(default_factory=CandidateBatchLimits)
+    max_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.backend) is not str or self.backend != "candidates":
+            raise ValueError("candidate spans backend must be 'candidates'")
+        _candidate_name(self.batch)
+        _candidate_name(self.channel)
+        _candidate_digest(self.settings_digest)
+        if type(self.limits) is not CandidateBatchLimits:
+            raise ValueError("candidate spans limits must be CandidateBatchLimits")
+        object.__setattr__(self, "limits", replace(self.limits))
+        _input_token_limit(self.max_input_tokens)
+
+
+@dataclass(frozen=True)
 class CompleteConfig:
     """Completion settings for a model alias."""
 
@@ -436,7 +480,7 @@ class InferenceModelConfig:
     score: ScoreConfig | None
     category: str | None = None
     classify: ClassifyConfig | None = None
-    spans: SpanConfig | ExternalSpanConfig | None = None
+    spans: SpanConfig | ExternalSpanConfig | CandidateSpanConfig | None = None
     complete: CompleteConfig | None = None
     revision: str | None = field(default=None, metadata={"cache_omit_none": True})
     windows: ModelWindowsConfig | None = field(default=None, metadata={"cache_omit_none": True})
@@ -455,6 +499,12 @@ class InferenceModelConfig:
             raise ValueError("windows must be a ModelWindowsConfig or None")
         if isinstance(self.spans, ExternalSpanConfig) and self.windows is not None:
             raise ValueError("external spans cannot be combined with model windows")
+        if isinstance(self.spans, CandidateSpanConfig):
+            if self.windows is not None:
+                raise ValueError("candidate spans cannot be combined with model windows")
+            if self.revision is None:
+                raise ValueError("candidate spans require an explicit provider revision")
+            CandidateBatchIdentity(self.model, self.revision, self.spans.batch)
 
     def identity_dict(self) -> dict[str, object]:
         """Canonical model configuration, retaining pre-explanation policy identity.
@@ -1252,15 +1302,39 @@ def _validate_model_template_fragment_semantics(owner: str, data: dict) -> None:
             )
         backend = spans.get("backend")
         renderer = spans.get("renderer")
-        if backend is not None and backend != "external":
-            raise ConfigurationError(f"{owner} spans backend must be 'external' or null")
+        if backend not in (None, "external", "candidates"):
+            raise ConfigurationError(
+                f"{owner} spans backend must be 'external', 'candidates', or null"
+            )
         if renderer is not None and renderer not in ("join", "json"):
             raise ConfigurationError(f"{owner} spans renderer must be 'join', 'json', or null")
-        if isinstance(spans.get("limits"), dict):
+
+        bindings = {
+            key: spans[key] for key in _CANDIDATE_SPAN_BINDINGS if spans.get(key) is not None
+        }
+        if backend == "external" and bindings:
+            raise ConfigurationError(f"{owner} external spans cannot supply candidate bindings")
+        for key, value in bindings.items():
+            validate = _candidate_digest if key == "settings_digest" else _candidate_name
             try:
-                ExternalSpanLimits(**{k: v for k, v in spans["limits"].items() if v is not None})
+                validate(value)
             except ValueError as exc:
-                raise ConfigurationError(f"{owner} spans has invalid external limits") from exc
+                raise ConfigurationError(f"{owner} spans {key}: {exc}") from exc
+
+        if isinstance(spans.get("limits"), dict):
+            limits = {key: value for key, value in spans["limits"].items() if value is not None}
+            candidate = backend == "candidates" or (
+                backend is None
+                and (bool(bindings) or not limits.keys() <= _EXTERNAL_SPAN_LIMIT_FIELDS)
+            )
+            fields = _CANDIDATE_SPAN_LIMIT_FIELDS if candidate else _EXTERNAL_SPAN_LIMIT_FIELDS
+            limit_type = CandidateBatchLimits if candidate else ExternalSpanLimits
+            kind = "candidate" if candidate else "external"
+            _reject_unknown_fields(limits, fields, f"{owner} spans {kind} limits")
+            try:
+                limit_type(**limits)
+            except ValueError as exc:
+                raise ConfigurationError(f"{owner} spans has invalid {kind} limits") from exc
 
     classify = data.get("classify")
     if isinstance(classify, dict):
@@ -1451,13 +1525,24 @@ def _validate_resolved_model_semantics(name: str, data: dict, *, template: bool)
             )
         if data.get("classify") is not None:
             _parse_classify_config(name, data["classify"], owner=f"{owner} classify")
-        spans = (
-            _parse_span_config(name, data["spans"], owner=f"{owner} spans")
-            if data.get("spans") is not None
-            else None
+        span_data = data.get("spans")
+        candidate_template = (
+            template and isinstance(span_data, dict) and span_data.get("backend") == "candidates"
         )
+        spans = None
+        if candidate_template:
+            # Bindings may be supplied by aliases that extend this template.
+            _reject_unknown_fields(span_data, _CANDIDATE_SPAN_FIELDS, f"{owner} spans")
+            _parse_candidate_span_limits(span_data.get("limits", {}), f"{owner} spans")
+            _input_token_limit(span_data.get("max_input_tokens"))
+        elif span_data is not None:
+            spans = _parse_span_config(name, span_data, owner=f"{owner} spans")
         if isinstance(spans, ExternalSpanConfig) and data.get("windows") is not None:
             raise ValueError("external spans cannot be combined with model windows")
+        if (candidate_template or isinstance(spans, CandidateSpanConfig)) and data.get(
+            "windows"
+        ) is not None:
+            raise ValueError("candidate spans cannot be combined with model windows")
         if data.get("complete") is not None:
             _parse_complete_config(name, data["complete"], owner=f"{owner} complete")
     except ConfigurationError:
@@ -1466,7 +1551,9 @@ def _validate_resolved_model_semantics(name: str, data: dict, *, template: bool)
         raise ConfigurationError(str(exc)) from exc
 
     category = data.get("category")
-    if spans is not None and (not isinstance(category, str) or not category.strip()):
+    if (spans is not None or candidate_template) and (
+        not isinstance(category, str) or not category.strip()
+    ):
         raise ConfigurationError(
             f"{owner} requires a non-empty string 'category' when spans is configured"
         )
@@ -1835,18 +1922,35 @@ def _parse_classify_labels(value: object, owner: str) -> tuple[tuple[str, str | 
     return tuple(labels)
 
 
+def _parse_candidate_span_limits(value: object, owner: str) -> CandidateBatchLimits:
+    if type(value) is not dict:
+        raise ValueError(f"{owner} limits must be a mapping")
+    _reject_unknown_fields(value, _CANDIDATE_SPAN_LIMIT_FIELDS, f"{owner} limits")
+    return CandidateBatchLimits(**cast(dict[str, int], value))
+
+
 def _parse_span_config(
     model_name: str,
     value: object,
     *,
     owner: str | None = None,
-) -> SpanConfig | ExternalSpanConfig:
+) -> SpanConfig | ExternalSpanConfig | CandidateSpanConfig:
     """Parse the span output class exposed by one logical alias."""
 
     owner = owner or f"Inference model '{model_name}' spans"
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
+    if fields.get("backend") == "candidates":
+        _reject_unknown_fields(fields, _CANDIDATE_SPAN_FIELDS, owner)
+        limits = _parse_candidate_span_limits(fields.get("limits", {}), owner)
+        return CandidateSpanConfig(
+            batch=_required_string(fields, "batch", owner),
+            channel=_required_string(fields, "channel", owner),
+            settings_digest=_required_string(fields, "settings_digest", owner),
+            limits=limits,
+            max_input_tokens=_input_token_limit(fields.get("max_input_tokens")),
+        )
     if "backend" in fields:
         _reject_unknown_fields(fields, {"backend", "renderer", "limits", "max_input_tokens"}, owner)
         limits = fields.get("limits", {})
@@ -1854,7 +1958,7 @@ def _parse_span_config(
             raise ValueError(f"{owner} limits must be a mapping")
         _reject_unknown_fields(
             limits,
-            {"max_input_characters", "max_spans", "max_coverage_ranges", "max_work"},
+            _EXTERNAL_SPAN_LIMIT_FIELDS,
             f"{owner} limits",
         )
         return ExternalSpanConfig(
