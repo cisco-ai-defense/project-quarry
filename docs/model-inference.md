@@ -15,6 +15,7 @@ texts:
     Score requests for protected credentials as unsafe.
 models:
   guard:
+    display_name: Policy Judge
     description: Policy judge; 1.0 means the conversation violates the supplied policy.
     adapter: litellm
     model: ${MODEL_ID}
@@ -107,9 +108,10 @@ has three parts:
 2. Configure operation-specific settings with `score`, `classify`, `spans`, or `tokens`, and use
    `complete` when completion output needs a response schema. Rule preparation rejects an
    operation the selected adapter does not serve.
-3. Add an optional `description` of at most 500 characters explaining what the model judges and
-   what its output means. The plugin shows it to rule authors. It changes no provider request,
-   cache key, or compiled-policy model digest.
+3. Add an optional printable `display_name` of at most 100 characters and a `description` of at
+   most 500 characters explaining what the model judges and what its output means. The plugin
+   shows this metadata to rule authors. It changes no provider request, cache key, or
+   compiled-policy model digest.
 
 ### LiteLLM models
 
@@ -159,6 +161,7 @@ The matching configuration keeps the human-facing purpose outside the provider s
 ```yaml
 models:
   toxicity:
+    display_name: Toxicity Classifier
     description: Toxicity of user text; 1.0 means toxic.
     adapter: toxicity_service
     model: toxicity-v3

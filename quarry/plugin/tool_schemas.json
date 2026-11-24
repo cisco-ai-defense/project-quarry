@@ -734,6 +734,12 @@
             "title": "Description",
             "type": "string"
           },
+          "display_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
           "operations": {
             "items": {
               "type": "string"

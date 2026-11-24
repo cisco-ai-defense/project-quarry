@@ -159,7 +159,8 @@ async def quarry_reference(
     ``model_aliases`` accompanies ``index``. Pass ``include_models=true`` to read it with another
     action, or false to omit it from ``index``. ``runtime_config_version`` identifies whether its
     ``operations`` are version 1 compatibility functions or version 2 ``model("alias")`` methods.
-    Pick the alias whose optional description fits the rule; compilation verifies its operation.
+    Pick the alias whose optional display name or description fits the rule; compilation verifies
+    its operation.
 
     Use ``rejected`` to read the spellings Quarry refuses and what to write instead. It
     returns the complete table, or only matching rows when a ``query`` substring is given.
