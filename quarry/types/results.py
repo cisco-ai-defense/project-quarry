@@ -142,6 +142,7 @@ class Span:
     _found: tuple[int, int] | None = field(init=False, default=None, repr=False)
     place_position: int | None = None
     end_place_position: int | None = None
+    _whole_call: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         found = self._found_in
