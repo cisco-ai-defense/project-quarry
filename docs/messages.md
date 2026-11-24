@@ -45,6 +45,7 @@ character positions. An escaped character, including a surrogate pair, covers it
 escape sequence. Duplicate object keys refer to their last decoded value. A number whose spelling
 changes during decoding conservatively covers its whole original JSON token. Extraction from a
 decoded span still returns decoded text; extraction from a raw span returns original JSON text.
+`outermost` uses these same coordinates when removing contained spans from a mixed collection.
 
 Messages, tools, and nested JSON values remain immutable during a scan. Serialization returns new
 Python containers. Text, image URL, and input-audio parts retain their OpenAI wire shape.
