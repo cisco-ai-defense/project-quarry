@@ -198,10 +198,10 @@ stage; a later scan execution failure retains its exception-based category.
 ```python
 from quarry import compile_policy, load_compiled_policy
 
-policy = compile_policy('''rule "Greeting"
+policy = compile_policy("""rule "Greeting"
 condition:
     user_said("hello")
-''')
+""")
 compiled_bytes = policy.to_bytes()
 restored = load_compiled_policy(compiled_bytes)
 result = restored.scan({"messages": [{"role": "user", "content": "hello"}]})
@@ -217,14 +217,14 @@ Use `entry_rule` to prepare one entry point from a module containing public help
 rules:
 
 ```python
-source = '''
+source = """
 rule "Greeting"
 condition: user_said("hello")
 
 rule "SelectedGreeting"
 imports: greeting = "Greeting"
 condition: greeting(user_messages)
-'''
+"""
 policy = compile_policy(source, entry_rule="SelectedGreeting")
 restored = load_compiled_policy(policy.to_bytes())
 result = restored.scan({"messages": [{"role": "user", "content": "hello"}]})
