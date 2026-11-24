@@ -2062,7 +2062,7 @@ def _outermost_spans(items: tuple[ResultItem[Span], ...]) -> list[ResultItem[Spa
     longest: dict[_SpanPoint, tuple[_SpanPoint, int]] = {}
     for index, item in enumerate(items):
         raise_if_evaluation_expired()
-        start, end = _span_ends(item.value)
+        start, end = _containment_ends(item.value)
         best = longest.get(start)
         if (
             best is None
