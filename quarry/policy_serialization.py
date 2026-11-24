@@ -67,6 +67,7 @@ from quarry.engine.contracts import (
     TreeNode,
 )
 from quarry.engine.decision import boot_diagram_is_decided
+from quarry.engine.pattern_checks import PatternCheck, declared_check_names
 from quarry.engine.symbolic_dfa import DFA, DFAState, Guard, GuardLeaf, GuardNode
 from quarry.integrations.resources import requirements_from_artifact
 from quarry.language.runtime import surface_names
@@ -83,7 +84,7 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 FORMAT_KIND = "quarry.compiled-policy"
-FORMAT_VERSION = 11
+FORMAT_VERSION = 12
 _WIRE_SCHEMAS: list[tuple[type[DataclassInstance], set[str]]] = []
 _RESOURCE_REQUIREMENT_KEYS = frozenset(
     {
@@ -141,7 +142,7 @@ _ARTIFACT_KEYS = _wire_fields(
     CompiledRuleArtifact,
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
     "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions computed_conditions "
-    "full_trace_proof decision_tree split_checks flow_requirements declared_resources",
+    "full_trace_proof decision_tree split_checks flow_requirements declared_resources declared_pattern_checks",
     unserialized="node_atom_ids",
 )
 _FLOW_REQUIREMENT_FIELDS = _wire_fields(
@@ -173,12 +174,12 @@ _ATOM_FIELDS = _wire_fields(
 )
 _STRING_SEMANTICS_FIELDS = _wire_fields(
     StringSemantics,
-    "case_insensitive fullword base64 is_regex decode normalize list_mode",
+    "case_insensitive fullword base64 is_regex decode normalize list_mode checks",
 )
 _MODEL_EXPRESSION_FIELDS = _wire_fields(ModelExpression, "kind value children")
 _CAPTURE_BIND_FIELDS = _wire_fields(
     CaptureBind,
-    "surface field patterns is_regex case_insensitive fullword base64 window_start window_stop name",
+    "surface field patterns is_regex case_insensitive fullword base64 window_start window_stop name checks",
 )
 _CAPTURE_TEST_FIELDS = _wire_fields(CaptureTest, "surface field case_insensitive")
 _CAPTURE_PLAN_FIELDS = _wire_fields(
@@ -374,6 +375,7 @@ def _artifact_to_wire(
         ],
         "full_trace_proof": artifact.full_trace_proof,
         "declared_resources": _json_value(artifact.declared_resources),
+        "declared_pattern_checks": list(artifact.declared_pattern_checks),
         "decision_tree": _decision_tree_to_wire(artifact.decision_tree),
         "dfa": _dfa_to_wire(artifact.dfa),
         "split_checks": [
@@ -653,7 +655,11 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
             and kwargs["cost"] is not Cost.LLM
         ):
             raise ValueError("model expressions that call a model require LLM cost")
-        kwargs["string_semantics"] = StringSemantics(**semantics)
+        checked_semantics = dict(semantics)
+        checked_semantics["checks"] = tuple(
+            _list(semantics["checks"], f"{name}.string_semantics.checks")
+        )
+        kwargs["string_semantics"] = StringSemantics(**checked_semantics)
         for field_name in ("patterns", "parameter_names", "constructed_field_paths"):
             kwargs[field_name] = tuple(_list(value[field_name], f"{name}.{field_name}"))
         if value["input_pipeline"] is not None:
@@ -764,6 +770,7 @@ def _capture_from_wire(raw: object) -> CapturePlan | ElementPlan | None:
             ),
             fullword=_boolean(bind["fullword"], "rule.artifact.capture_plan.bind.fullword"),
             base64=_boolean(bind["base64"], "rule.artifact.capture_plan.bind.base64"),
+            checks=tuple(_list(bind["checks"], "rule.artifact.capture_plan.bind.checks")),
             window_start=_optional_integer(
                 bind["window_start"], "rule.artifact.capture_plan.bind.window_start"
             ),
@@ -1207,6 +1214,9 @@ def _artifact_from_wire(
             value["split_checks"], inputs, path, count, _computed_depth, computed_count
         ),
         declared_resources=_declared_resources_from_wire(value["declared_resources"]),
+        declared_pattern_checks=declared_check_names(
+            tuple(_list(value["declared_pattern_checks"], "declared_pattern_checks"))
+        ),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
         flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),
@@ -1499,6 +1509,7 @@ def load_compiled_policy(
     model_inference_backend=None,
     llm_rate_limiter=None,
     input_adapters=None,
+    pattern_checks: Mapping[str, PatternCheck] | None = None,
 ) -> CompiledPolicy:
     """Hydrate one authenticated compiled policy without parsing or compiling source."""
 
@@ -1592,6 +1603,9 @@ def load_compiled_policy(
             + ", ".join(mismatched_models)
         )
 
+    pattern_options: dict[str, Any] = (
+        {"pattern_checks": pattern_checks} if pattern_checks is not None else {}
+    )
     scanner = DSLScanner._from_compiled_policy(
         config,
         rule=rule,
@@ -1600,6 +1614,7 @@ def load_compiled_policy(
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
         input_adapters=input_adapters,
+        **pattern_options,
     )
     return CompiledPolicy(
         _rule_name=artifact.rule_name,

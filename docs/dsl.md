@@ -48,7 +48,7 @@ conversation first. Comprehension variables and called-rule bodies retain their 
 bindings. Forward references do not escape an `or` branch or a nested alias scope.
 Recompile saved policies from their rule source after this compiler-version change.
 
-Compiled-policy format 10 also retains declared resource requirements when constant folding removes an
+Compiled-policy format 12 retains declared resource and named-check requirements when constant folding removes an
 expression. Reload validates the same model configuration and capabilities as source
 compilation, without dispatching a model for an expression skipped at runtime.
 
@@ -73,10 +73,10 @@ For a trailing value absorbed into an `any ... where ...` or `all ... where ...`
 compiler gives bounded parenthesis guidance. These diagnostics respect local shadowing and
 analyze shared expression graphs within fixed work and depth bounds.
 
-Compiler 27 corrects stored extraction labels and explicit default-bound spelling while
-retaining executable-array normalization and load-time composition diagnostics.
-Serialized format 10 is unchanged. Recompile saved compiler-26 and earlier
-policies from their original rule source before loading them with this compiler.
+Current compiler 31 and serialized format 12 retain explicit extraction labels,
+default-bound spelling, executable-array normalization and load-time composition
+diagnostics, together with Unicode literal boundaries and named host checks.
+Recompile older saved policies from their original rule source before loading them.
 
 ```text
 rule "Repeated shell requests"

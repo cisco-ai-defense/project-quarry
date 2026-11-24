@@ -45,6 +45,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
+from quarry.engine.pattern_checks import check_names, parse_pattern_flags
+
 # Separator for a match-position *operand group*: a single ``position``/``position_abs``
 # operand can be a set of patterns (e.g. the wildcard ``@a*`` expands to every ``$a*``
 # string), whose match position is the EARLIEST across the group. The group is encoded as
@@ -325,10 +327,8 @@ def validate_model_expression(expression: ModelExpression) -> None:
             raise ValueError("model text reference name must be a non-empty string")
         if node.kind == "join" and not isinstance(node.value, str):
             raise TypeError("model join separator must be a string")
-        if node.kind == "string_patterns" and (
-            not isinstance(node.value, str) or len(node.value) != 4 or set(node.value) - {"0", "1"}
-        ):
-            raise ValueError("model string-pattern flags must contain four binary digits")
+        if node.kind == "string_patterns":
+            parse_pattern_flags(node.value)
         if (
             node.kind == "text_equals"
             and node.value is not None
@@ -789,10 +789,14 @@ class StringSemantics:
     normalize: str = ""
     # "any" (match if any pattern hits) vs "all" (all must hit) for pattern lists.
     list_mode: str = "any"
+    checks: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        check_names(self.checks)
 
     def content_key(self) -> tuple:
         """Return the content key of the string semantics."""
-        return (
+        key = (
             self.case_insensitive,
             self.fullword,
             self.base64,
@@ -801,6 +805,7 @@ class StringSemantics:
             self.normalize,
             self.list_mode,
         )
+        return (*key, self.checks) if self.checks else key
 
 
 @dataclass(frozen=True)

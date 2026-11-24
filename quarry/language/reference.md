@@ -1158,6 +1158,17 @@ Grammar: `pattern_block: "{" pattern_expr ("or" pattern_expr)* "}"`
 
 Examples: [examples/patterns-and-aliases.rule](examples/patterns-and-aliases.rule)
 
+### pattern-check-modifier
+
+Keep only matches accepted by an explicitly registered trusted host predicate.
+
+Write `check("name")` after a pattern. It never imports or serializes Python.
+Checks receive the matched source substring and must return a strict Boolean.
+
+Grammar: `pattern_check_modifier: "check" "(" STRING ")"`
+
+Examples: [examples/checked-pattern.rule](examples/checked-pattern.rule) (requires a configured backend)
+
 ### pattern-match
 
 Test one value against a block containing alternative field predicates.
@@ -1250,14 +1261,16 @@ Examples: [examples/string-operations.rule](examples/string-operations.rule)
 
 ### string-modifiers
 
-Change a declared pattern with `nocase`, `fullword`, `base64`, or `regex`.
+Change a pattern with `nocase`, `fullword`, `base64`, `regex`, or `check`.
 
 `nocase` matches the pattern regardless of letter case. Text matching is otherwise
 case-sensitive, so `nocase` is the mechanism for case-insensitive `contains` and
 `contains_any` checks. Modifiers apply to a single pattern or an array of patterns,
 and to every use of the pattern, including `#name` counts and `@name` positions.
+`fullword` literal boundaries use Unicode alphanumerics and underscore.
+`check("name")` applies a bounded explicit host predicate to matched source text.
 
-Grammar: `string_modifiers: MODIFIER+`
+Grammar: `string_modifiers: (MODIFIER | pattern_check_modifier)+`
 
 Examples: [examples/case-insensitive-match.rule](examples/case-insensitive-match.rule), [examples/language-basics.rule](examples/language-basics.rule)
 
@@ -1353,6 +1366,7 @@ Examples: [examples/indexes-and-counts.rule](examples/indexes-and-counts.rule)
 | `=` | operator | no |
 | `base64` | modifier | no |
 | `before` | flow_word | no |
+| `check` | modifier | no |
 | `collect:` | block_keyword | no |
 | `:` | punctuation | no |
 | `,` | punctuation | no |

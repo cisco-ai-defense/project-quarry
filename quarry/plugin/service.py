@@ -51,6 +51,7 @@ from quarry.decision_report import (
     scanner_digests,
     tree_report,
 )
+from quarry.engine.pattern_checks import PatternCheck, copy_pattern_checks
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.resources import ResourcePreparationError
@@ -366,7 +367,11 @@ class QuarryPlugin:
         runtime_config: QuarryConfig | None = None,
         *,
         model_adapters: Mapping[str, Any] | None = None,
+        pattern_checks: Mapping[str, PatternCheck] | None = None,
     ):
+        self._pattern_checks = (
+            None if pattern_checks is None else copy_pattern_checks(pattern_checks)
+        )
         self._model_adapters = (
             None if model_adapters is None else MappingProxyType(dict(model_adapters))
         )
@@ -958,6 +963,8 @@ class QuarryPlugin:
             adapter_kwargs: dict[str, Any] = (
                 {"model_adapters": self._model_adapters} if self._model_adapters is not None else {}
             )
+            if self._pattern_checks is not None:
+                adapter_kwargs["pattern_checks"] = self._pattern_checks
             scanner = DSLScanner(
                 config,
                 llm_rate_limiter=self._rate_limiter,

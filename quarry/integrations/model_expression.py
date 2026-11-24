@@ -1314,12 +1314,7 @@ async def evaluate_model_expression(
                 result = match_contains_any(
                     str(right),
                     patterns,
-                    Modifiers(
-                        nocase=flags[0] == "1",
-                        fullword=flags[1] == "1",
-                        base64=flags[2] == "1",
-                        regex=flags[3] == "1",
-                    ),
+                    Modifiers.from_flags(flags),
                     regex=regex_backend,
                 )
             else:

@@ -529,6 +529,7 @@ class Oracle:
                 fullword=spec.string_semantics.fullword,
                 base64=spec.string_semantics.base64,
                 regex=spec.string_semantics.is_regex,
+                checks=spec.string_semantics.checks,
             )
             fa, ga = spec.patterns[0].split(_POSITION_FIELD_SEP, 1)
             fb, gb = spec.patterns[1].split(_POSITION_FIELD_SEP, 1)
@@ -575,6 +576,7 @@ class Oracle:
             fullword=spec.string_semantics.fullword,
             base64=spec.string_semantics.base64,
             regex=spec.string_semantics.is_regex,
+            checks=spec.string_semantics.checks,
         )
         if pred == "capture_match":
             # An explicit bind site: the value is one of the pattern's matches here.
@@ -606,7 +608,9 @@ class Oracle:
         if pred == "regex":
             return Grounded(
                 any(
-                    _M.match_regex(text, p, nocase=mods.nocase, regex=self._regex)
+                    _M.match_regex(
+                        text, p, nocase=mods.nocase, regex=self._regex, checks=mods.checks
+                    )
                     for p in spec.patterns
                 )
             )

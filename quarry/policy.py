@@ -33,6 +33,7 @@ from quarry.async_runtime import run_engine, run_sync
 from quarry.config import QuarryConfig
 from quarry.decision_report import conversation_sha256, explores, scanner_digests, tree_report
 from quarry.engine.contracts import CompiledRuleArtifact
+from quarry.engine.pattern_checks import PatternCheck
 from quarry.input_registry import InputRegistry
 from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
@@ -734,6 +735,7 @@ def compile_policy(
     llm_rate_limiter=None,
     evidence_key: bytes | None = None,
     input_adapters: Mapping[str, InputAdapter] | None = None,
+    pattern_checks: Mapping[str, PatternCheck] | None = None,
 ) -> CompiledPolicy:
     """Compile a reusable policy for one rule and bind its policy parameters.
 
@@ -754,12 +756,16 @@ def compile_policy(
             quarry_rules_paths=runtime_config.quarry_rules_paths if entry_rule is not None else (),
             quarry_rule_texts=(source,),
         )
+    pattern_options: dict[str, Any] = (
+        {"pattern_checks": pattern_checks} if pattern_checks is not None else {}
+    )
     scanner = DSLScanner(
         config,
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
         input_adapters=input_adapters,
         _allow_parameters=True,
+        **pattern_options,
     )
     if entry_rule is not None:
         if not isinstance(entry_rule, str) or entry_rule not in scanner.compiled_rules:

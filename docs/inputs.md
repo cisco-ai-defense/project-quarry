@@ -74,7 +74,7 @@ filters, quantifiers and outermost inputs use the same bound. Exceeding it fails
 evaluation without truncating results. These operations also honor the scan deadline;
 disabling size limits does not disable that deadline.
 
-Compiler identity is 26 with compiled-policy format 10. Recompile older artifacts
+Compiler identity is 31 with compiled-policy format 12. Recompile older artifacts
 from their saved rule sources; current artifacts reload without recompilation.
 
 For declared-input scans, plugin decision paths hash only the rule's selected, validated data. Unread sections do not change `conversation_sha256`; it is null when the selected data cannot be safely hashed.

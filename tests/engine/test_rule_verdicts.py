@@ -215,12 +215,11 @@ _VERDICTS = [
         id="fullword-starting-with-punctuation",
     ),
     pytest.param(
-        # Word characters are ASCII, as in RE2's \b and \B, so an adjacent
-        # non-ASCII letter does not count as touching the literal.
+        # Unicode alphanumerics touch the literal, including at a non-ASCII edge.
         _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),
         _conv(_user("caféñ")),
-        True,
-        id="fullword-non-ascii-letter-is-not-a-word-character",
+        False,
+        id="fullword-non-ascii-letter-touches-literal",
     ),
     pytest.param(
         _rule("any m in user_messages where m.content contains $w", '$w = "café" fullword'),

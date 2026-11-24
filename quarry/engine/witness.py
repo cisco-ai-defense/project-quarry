@@ -377,6 +377,7 @@ def _describe_semantics(spec) -> str:
         flags.append("fullword")
     if semantics.base64:
         flags.append("base64")
+    flags.extend(f"check({name})" for name in semantics.checks)
     if semantics.decode:
         flags.append(f"decode={semantics.decode}")
     if semantics.normalize:
