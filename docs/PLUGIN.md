@@ -544,7 +544,7 @@ timeline attempts; tool indexes belong to nested checks.
           ],
           "compiled": {
             "dfa_hash": "…",
-            "compiler_version": "0.1.0-phase1-tool-occurrences",
+            "compiler_version": "compiler-31",
             "num_states": 3,
             "atom_ids": ["atom_bad"],
             "temporal": true,
