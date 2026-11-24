@@ -4,14 +4,11 @@
 """Called checks track only their parameter declarations and preserve root usage."""
 
 import json
-from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 
-from quarry import DSLScanner, load_compiled_policy
-from quarry.integrations.resources import requirements_from_artifact
-from quarry.policy import CompiledPolicy
+from quarry import compile_policy, load_compiled_policy
 from quarry.types.exceptions import RuleValidationError
 from tests.unit.test_policy_parameters import _runtime
 
@@ -24,21 +21,13 @@ SOURCES = {
 
 
 def policy(source, config, backend, policy_parameters=None):
-    scanner = DSLScanner(
-        replace(config, quarry_rule_texts=(source,)),
+    return compile_policy(
+        source,
+        entry_rule="Caller",
+        runtime_config=config,
         model_inference_backend=backend,
-        _allow_parameters=True,
+        policy_parameters=policy_parameters,
     )
-    name = next(reversed(scanner.compiled_rules))
-    artifact = scanner.compiled_rules[name]
-    entry = DSLScanner._from_compiled_policy(
-        config,
-        rule=scanner.loaded_rules[name],
-        artifact=artifact,
-        resource_requirements=requirements_from_artifact(artifact),
-        model_inference_backend=backend,
-    )
-    return CompiledPolicy._from_scanner(entry, source, policy_parameters)
 
 
 @pytest.mark.parametrize("case", list(SOURCES))

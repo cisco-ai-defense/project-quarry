@@ -38,6 +38,7 @@ from quarry.input_registry import InputRegistry
 from quarry.inputs import InputAdapter, adapter_fingerprints
 from quarry.integrations.model_usage import model_call_budget
 from quarry.integrations.read_results import collect_read_reports, transfer_result_scope
+from quarry.integrations.resources import requirements_from_artifact
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.local_work_reporting import aggregate_local_match_work
@@ -725,6 +726,7 @@ def bind_prepared_policy(
 def compile_policy(
     source: str,
     *,
+    entry_rule: str | None = None,
     policy_parameters: Mapping[str, object] | None = None,
     runtime_config: QuarryConfig | None = None,
     model_inference_backend=None,
@@ -733,20 +735,28 @@ def compile_policy(
     input_adapters: Mapping[str, InputAdapter] | None = None,
     pattern_checks: Mapping[str, PatternCheck] | None = None,
 ) -> CompiledPolicy:
-    """Compile one rule and bind its policy parameters into a reusable policy."""
+    """Compile a policy, optionally selecting an entry from a helper-rule module."""
 
     if not isinstance(source, str) or not source.strip():
         raise ValueError("rule source must be a non-empty string")
+    if entry_rule is not None and (
+        not isinstance(entry_rule, str) or not entry_rule.strip() or len(entry_rule) > 256
+    ):
+        raise ValueError("entry_rule must be a non-empty rule name of at most 256 characters")
 
     if runtime_config is None:
         config = QuarryConfig(quarry_rule_texts=(source,), config_version=2)
     else:
-        # QuarryConfig is deeply immutable, so the request variant can share its models,
-        # prompts, and limits by reference — only the rule source differs.
+        # Configured sources participate only when a caller explicitly selects an entry.
+        # The ordinary one-rule API keeps its existing source isolation.
         config = replace(
             runtime_config,
-            quarry_rules_paths=(),
-            quarry_rule_texts=(source,),
+            quarry_rules_paths=(
+                runtime_config.quarry_rules_paths if entry_rule is not None else ()
+            ),
+            quarry_rule_texts=(
+                (*runtime_config.quarry_rule_texts, source) if entry_rule is not None else (source,)
+            ),
         )
     pattern_options: dict[str, Any] = (
         {"pattern_checks": pattern_checks} if pattern_checks is not None else {}
@@ -759,6 +769,25 @@ def compile_policy(
         _allow_parameters=True,
         **pattern_options,
     )
+    if entry_rule is not None:
+        if entry_rule not in scanner.compiled_rules:
+            raise ValueError("entry_rule does not name a compiled rule")
+        if len(scanner.compiled_rules) > 1:
+            artifact = scanner.compiled_rules[entry_rule]
+            # Bind only the executable entry and its embedded child checks. Reuse the
+            # prepared backend/limiter, while deriving resource identity from this entry
+            # rather than the entire source module. The guarded loader uses this same
+            # single-entry construction and enforces its named work configuration.
+            scanner = DSLScanner._from_compiled_policy(
+                config,
+                rule=scanner.loaded_rules[entry_rule],
+                artifact=artifact,
+                resource_requirements=requirements_from_artifact(artifact),
+                model_inference_backend=scanner.resource_manager.model_inference_backend,
+                llm_rate_limiter=scanner.resource_manager.llm_rate_limiter,
+                input_adapters=input_adapters,
+                **pattern_options,
+            )
     return CompiledPolicy._from_scanner(
         scanner,
         source,

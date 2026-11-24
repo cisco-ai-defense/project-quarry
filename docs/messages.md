@@ -269,6 +269,12 @@ calls. Each child receives the declarations it references; parameters used only 
 caller or a sibling stay outside that child's schema. Same-named declarations must agree
 on type and binding. Unused, undeclared or conflicting parameters still reject the generation.
 
+To save a prepared policy for one caller, use
+`compile_policy(source, entry_rule="SelectedReview")`. Helpers can be in that source
+module or in the explicitly supplied runtime configuration's rule sources. The
+selected policy retains its called checks through serialization and guarded loading;
+see [prepared policies](python-api.md#prepared-policies).
+
 Calls may nest, but imports cannot form a cycle. A rule can import at most 128 names, each
 containing at most 256 characters. Linking checks the complete imported generation against a
 100,000-item budget for expanded condition nodes and copied string entries before cloning it.
