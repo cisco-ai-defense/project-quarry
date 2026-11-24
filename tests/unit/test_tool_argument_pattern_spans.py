@@ -223,3 +223,47 @@ condition:
     result = policy.scan(data)
     assert result.is_complete, result.evaluation_errors
     assert result.rule_matches == ["Read"]
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize(
+    "arguments, count",
+    [
+        ('{"q":"needle"}', 1),
+        ('{"q":"old","z":"needle","q":"needle"}', 2),
+    ],
+)
+@pytest.mark.parametrize("stream", [False, True])
+def test_outermost_spans_share_raw_argument_coordinates(restored, arguments, count, stream):
+    raw = "$raw.spans(assistant_messages[0].tool_calls[0].raw_arguments)"
+    decoded = "$decoded.spans(assistant_messages[0].tool_calls[0])"
+    outermost = f"outermost(union({raw}, {decoded}))"
+    condition = (
+        f'all s in {outermost} where messages.extract(s) == "needle"'
+        if stream
+        else f"len({outermost}) == {count}"
+    )
+    source = f'rule "Read" strings: $raw="needle" $decoded="eed" condition: {condition}'
+    config = QuarryConfig(config_version=2, safety_limits=SafetyLimits(rule_timeout=None))
+    policy = compile_policy(source, runtime_config=config)
+    if restored:
+        policy = load_compiled_policy(policy.to_bytes(), runtime_config=config)
+    data = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "one",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": arguments},
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = policy.scan(data)
+
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == ["Read"]
