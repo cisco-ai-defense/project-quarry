@@ -23,6 +23,7 @@ from dataclasses import replace
 
 import pytest
 
+import quarry.integrations.model_inference as model_inference_module
 from quarry.cache.async_cache import _result_bytes, result_cache, scan_scope
 from quarry.config import LocalTransformConfig, ModelTransformConfig, QuarryConfig
 from quarry.integrations.adapter_transforms import keep_transform, read_transform
@@ -289,25 +290,45 @@ async def test_decoder_limits_are_faults_and_are_not_kept(tmp_path, model):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", [False, True])
 async def test_async_transform_timeout_cancels_final_waiter_and_does_not_keep_result(
-    tmp_path, model
+    tmp_path, model, monkeypatch
 ):
+    loop = asyncio.get_running_loop()
+    waiter = asyncio.current_task()
+    waiter_timeout = asyncio.timeout(None)
     entered = asyncio.Event()
     cancelled = asyncio.Event()
 
+    class ControlledTimeouts:
+        def timeout(self, seconds):
+            if asyncio.current_task() is waiter:
+                return waiter_timeout
+            return asyncio.timeout(seconds)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(model_inference_module, "asyncio", ControlledTimeouts())
+
+    def expire_waiter():
+        entered.set()
+        waiter_timeout.reschedule(loop.time())
+
     class WaitingAdapter(TextAdapter):
         async def transform(self, config, part, *, timeout=None):
-            entered.set()
+            # Start the caller's deadline after the adapter has started.
+            loop.call_soon_threadsafe(expire_waiter)
             try:
                 await asyncio.Event().wait()
             finally:
-                cancelled.set()
+                loop.call_soon_threadsafe(cancelled.set)
 
     service = backend(tmp_path, WaitingAdapter(), model=model)
-    with pytest.raises(ModelError) as error:
-        await service.transform_unit("convert", text("input"), timeout=0.02)
-    assert error.value.details["code"] == "timeout"
-    assert entered.is_set()
-    await asyncio.wait_for(cancelled.wait(), 1)
+    async with asyncio.timeout(5):
+        with pytest.raises(ModelError) as error:
+            await service.transform_unit("convert", text("input"), timeout=60)
+        assert error.value.details["code"] == "timeout"
+        assert entered.is_set()
+        await cancelled.wait()
 
 
 @pytest.mark.asyncio
