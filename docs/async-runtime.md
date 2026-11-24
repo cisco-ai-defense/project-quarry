@@ -19,6 +19,12 @@ shared request uses its initiating host. Reader validation, model budgets, resul
 and logical-input accounting remain attached to their existing scan owners.
 Delegating custom backends preserve logical-read attribution and transform input provenance.
 
+An adapter-reported timeout or failure remains the failed physical request for every shared
+waiter, including versioned local transforms. A separate viable waiter may retry when Quarry
+actually enforces the initiating caller's deadline or alias call limit. An exception name or
+diagnostic code alone does not establish that ownership. Last-reader cancellation and cleanup
+retain their existing behavior.
+
 Each engine pacer yields every 64 steps independently. Ready host requests are handed off
 before the next queued local continuation, allowing both remote requests and local work to
 make progress. The application's event loop schedules a callback after its handoff.

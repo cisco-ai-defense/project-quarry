@@ -109,6 +109,11 @@ from quarry.integrations.read_operations import (
     transform_model_read,
     transform_part_read,
 )
+from quarry.integrations.request_limits import (
+    is_owned_request_limit,
+    owned_request_limit,
+    raise_if_owned_evaluation_expired,
+)
 from quarry.integrations.shared_transforms import (
     TRANSFORM_BATCH_SIZE,
     InvalidSharedTransform,
@@ -292,10 +297,11 @@ def _attributed_failure(
         )
         else LLMError
     )
-    return kind(
+    attributed = kind(
         public_message,
         {**exc.details, "model": model_id},
     )
+    return owned_request_limit(attributed) if is_owned_request_limit(exc) else attributed
 
 
 def _make_boundary(seed: int) -> str:
@@ -1931,12 +1937,7 @@ def _starters_limit(error: BaseException) -> bool:
     """Whether a shared request failed only because of the limits of the caller that started
     it, its deadline or its alias's call budget, which another caller does not share."""
 
-    if isinstance(error, QuarryTimeoutError | TimeoutError):
-        return True
-    return isinstance(error, LLMError) and error.details.get("code") in {
-        "model_call_limit",
-        "timeout",
-    }
+    return is_owned_request_limit(error)
 
 
 def _detached(response: Any) -> Any:
@@ -2563,18 +2564,31 @@ class ModelInferenceBackend:
         )
 
         async def local_request(*, timeout):
+            operation_timeout = asyncio.timeout(timeout)
             try:
-                async with asyncio.timeout(timeout):
+                async with operation_timeout:
                     raw = await _invoke_transform_adapter(
                         name,
                         lambda: adapter.transform(settings, deepcopy(snapshot), timeout=timeout),
                     )
-                    raise_if_evaluation_expired()
+                    try:
+                        raise_if_evaluation_expired()
+                    except QuarryTimeoutError as exc:
+                        owned_request_limit(exc)
+                        raise
                     return keep_transform(raw, snapshot, name)
-            except (QuarryError, QuarryTimeoutError, TimeoutError):
+            except TimeoutError as exc:
+                if operation_timeout.expired():
+                    owned_request_limit(exc)
+                raise
+            except (QuarryError, QuarryTimeoutError):
                 raise
             except Exception as exc:
                 raise transform_error(name, "adapter_error", "adapter failed") from exc
+            finally:
+                # A shared failure can retain this frame through its traceback.
+                # Its native timer must not retain the completed request task.
+                operation_timeout = None
 
         try:
             if type(definition) is ModelTransformConfig:
@@ -2739,7 +2753,7 @@ class ModelInferenceBackend:
                     # requests, rate-limit tickets or billable-model call counts.
                     try:
                         response = await invoke_unprepared(timeout)
-                        raise_if_evaluation_expired()
+                        raise_if_owned_evaluation_expired()
                     except LLMError as exc:
                         raise _attributed_failure(
                             exc.message, exc, model_id, private_model=rate_limit_model
