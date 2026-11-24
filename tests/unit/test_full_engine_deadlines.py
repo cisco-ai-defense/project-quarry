@@ -306,11 +306,57 @@ def test_timeout_while_waiting_for_limiter_records_no_adapter_attempt(tmp_path) 
     assert exc_info.value.scan_result.model_usage["calls"] == 0
 
 
-def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path) -> None:
+def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path, monkeypatch) -> None:
+    import quarry.cache.async_cache as async_cache_module
+
+    now = 1024.0
+    armed = []
+    finished = threading.Event()
+
+    class AdmittedTimeouts:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def timeout(self, seconds):
+            owner = timer.current_evaluation_deadline()
+            if owner is None:
+                assert self.kind == "provider"
+                owner = next(item[3] for item in armed if item[0] == "rule")
+            assert seconds == owner.expires_at - now
+            assert seconds == (1024.0 + 0.05) - 1024.0
+            # This case requires post-dispatch telemetry. Keep scheduling before
+            # admission outside its synthetic clock, then expire a native timer.
+            native = asyncio.timeout(None)
+            armed.append((self.kind, asyncio.get_running_loop(), native, owner))
+            return native
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(model_usage, "monotonic", lambda: now)
+    monkeypatch.setattr(scanner_module, "asyncio", AdmittedTimeouts("rule"))
+    monkeypatch.setattr(model_usage, "asyncio", AdmittedTimeouts("provider"))
+    monkeypatch.setattr(async_cache_module, "asyncio", AdmittedTimeouts("wait"))
+
+    class Admitted(_SlowAdapter):
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            nonlocal now
+            self.calls += 1
+            assert {item[0] for item in armed} == {"rule", "wait", "provider"}
+            _, loop, native, owner = next(item for item in armed if item[0] == "rule")
+            assert owner.error_message == "Rule m timeout"
+            now = owner.expires_at
+            loop.call_soon_threadsafe(native.reschedule, loop.time())
+            try:
+                await asyncio.Future()
+            finally:
+                finished.set()
+
     conversation = tmp_path / "conversation.json"
     conversation.write_text('{"messages":[{"role":"user","content":"attack"}]}')
 
-    file_adapter = _SlowAdapter(0.5)
+    file_adapter = Admitted(0.5)
     file_scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
@@ -322,8 +368,13 @@ def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path) -> None
     assert file_adapter.calls == file_result.model_usage["calls"] == 1
     assert file_result.rule_timings["m"] >= 0.0
     assert file_result.error == "Rule m timeout"
+    assert finished.wait(3)
+    assert next(item[2] for item in armed if item[0] == "rule").expired()
 
-    batch_adapter = _SlowAdapter(0.5)
+    now = 1024.0
+    armed.clear()
+    finished.clear()
+    batch_adapter = Admitted(0.5)
     batch_scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
@@ -335,6 +386,8 @@ def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path) -> None
     assert batch_adapter.calls == batch_result.model_usage["calls"] == 1
     assert batch_result.rule_timings["m"] >= 0.0
     assert batch_result.evaluation_errors == {"conv_1": "Rule m timeout"}
+    assert finished.wait(3)
+    assert next(item[2] for item in armed if item[0] == "rule").expired()
 
 
 @pytest.mark.parametrize(

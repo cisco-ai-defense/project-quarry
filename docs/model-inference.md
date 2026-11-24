@@ -301,6 +301,68 @@ window attaining it, with bounded coordinate summaries. Arithmetic and aggregate
 keep their own deciding value. Summaries contain no input text, token IDs, or raw provider reply.
 Unavailable token-to-character mapping is reported as unavailable; it is not guessed.
 
+## Score labels, arguments and JSON verdicts
+
+The built-in LiteLLM scorer accepts either the existing single string or a list of 1–16 labels
+for each side of `score.tokens`. A returned positive label scores `1`; a negative label scores
+`0`, unless validated probability extraction is configured. Lists are copied, sorted and stored
+as immutable tuples. Each label contains at most 256 characters after a bounded input check.
+Empty labels, duplicates, control/format characters and labels that equal or prefix a label on
+the opposite side are rejected. Matching is case-sensitive and uses the complete label. A string
+that looks like a JSON list is one literal label; it is never interpreted as a set.
+
+`score.arguments` accepts only these request settings:
+
+| Setting | Accepted value |
+| --- | --- |
+| `max_tokens` | Integer from 1 through 4096 |
+| `temperature` | Finite number from 0 through 2 |
+| `top_p` | Finite number greater than 0 and at most 1 |
+| `seed` | Signed 64-bit integer |
+
+Booleans are not numbers here. Arguments cannot set the provider, endpoint, credentials, tools,
+messages, timeout, retries, logprob controls or arbitrary provider options. Existing string-token
+requests default to one output token and temperature zero. Label sets and JSON verdicts default
+to 128 output tokens; explicit reasoning/explanation budgets take precedence unless an argument
+reduces the budget. Reasoning and explanation budgets are integers from 16 through 4096; an
+argument cannot enlarge them. Extended formats reject a provider length stop even if the partial
+reply resembles a valid label. A legacy one-token response retains its existing length-stop
+behavior when it contains a complete configured label. Replies have a 65,536-character ceiling.
+
+For a strict JSON verdict, configure `score.extraction.label` and optionally
+`score.extraction.confidence`. A path is either a dotted sequence of object keys, such as
+`answer.label`, or an explicit list of string keys and nonnegative array indexes, such as
+`["answers", 0, "label"]`. Paths have 1–16 components, at most 128 characters per key and 512
+characters in aggregate. No expressions, attribute lookup or remote schema resolution occurs.
+Label and confidence paths must select separate values. JSON extraction cannot be combined
+with token-probability extraction, reasoning or explanation output.
+
+The selected JSON label must exactly equal a configured label. Confidence must be a finite JSON
+number in `[0, 1]` and describes that selected label: a positive label with confidence `c` yields
+`c`, while a negative label yields `1-c`. With no confidence path, the selected label gives its
+binary score. Missing paths, Boolean/string confidence, unknown labels, duplicate keys, nonfinite
+numbers, trailing text and malformed JSON are refused. Replies are bounded to 16,384 characters
+by default; `extraction.max_chars` can select 16–65,536. JSON is limited to depth 16, 4096 values
+and 128 characters per integer literal. Parsing consults the active deadline. Public failures
+contain neither the raw reply nor a chained JSON decoder exception retaining it.
+
+When `score.extraction.probabilities` enables token odds, confidence is used only when provider
+token text reconstructs the complete reply and identifies the actual final verdict span. Every
+configured label from both sides must have a valid, distinct alternative in that token's bounded
+metadata. The score is the sum of positive mass divided by total configured-label mass. Partial,
+misaligned, nonfinite, duplicate or impossible metadata falls back to the validated emitted label.
+Quoted, escaped and whitespace-containing compound labels also use that binary fallback: one
+token's alternatives do not establish odds for a compound answer. Reasoning text cannot provide
+confidence for a different final answer.
+
+These settings participate in request-cache keys, compiled-policy model bindings and decision
+identity. Identical aliases can share a request; changed arguments or extraction settings cannot
+reuse a differently configured score. Validated confidence flows through ordinary, explained,
+prepared-policy and chunked decisions using the existing score bounds and calibration checks.
+System One retains its native question format and rejects these LiteLLM verdict extensions.
+Application adapters receive their immutable score configuration and must explicitly implement
+any supported extensions. This does not make arbitrary host adapters format-compatible.
+
 ## Data egress
 
 A model operation can send selected messages, tools, and policy text to the configured endpoint. Review provider retention, logging, TLS, redirects, and credentials before enabling model rules. Keep conversation content and text parameters out of logs and errors.

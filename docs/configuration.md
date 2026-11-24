@@ -234,6 +234,35 @@ not change provider requests, model-result cache keys, or compiled-policy model 
 
 Supported model fields can use an exact `${ENV_NAME}` reference. Set the value in the application environment, not in a committed configuration file. The [model guide](model-inference.md) covers `classify`, `complete`, `spans`, token counting, and application adapters. The examples use a local adapter and need no provider key.
 
+LiteLLM score aliases also support bounded [label sets, request arguments and strict JSON
+verdicts](model-inference.md#score-labels-arguments-and-json-verdicts). For example:
+
+```yaml
+models:
+  review:
+    adapter: litellm
+    model: ${MODEL_ID}
+    score:
+      boundary_seed: 7
+      tokens:
+        negative: ["NO", "SAFE"]
+        positive: ["YES", "UNSAFE"]
+      arguments:
+        max_tokens: 128
+        temperature: 0
+      extraction:
+        label: answer.label
+        confidence: answer.confidence
+        max_chars: 16384
+```
+
+This configuration expects JSON such as `{"answer":{"label":"SAFE","confidence":0.9}}`,
+which yields a positive score of `0.1`. Confidence describes the selected label. Settings are
+copied into immutable values and participate in request and policy identity. Template `null`
+removes inherited settings; removing JSON extraction requires removing both its label and
+confidence paths. Existing single-string token configurations keep their default request and
+identity when these extensions are absent.
+
 For explicit pinned local request counts and raw text IDs/code-point offsets,
 configure the optional [`local_tokenizer` adapter](local-tokenizer.md). It loads
 local artifacts only when needed, renders supported request templates off-loop,
