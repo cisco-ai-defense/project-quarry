@@ -18,8 +18,10 @@ from quarry.types.rules import ScanResult
 
 
 class _ReadReports:
-    def __init__(self, session):
+    def __init__(self, session, *, logical_reads=True, window_observations=False):
         self.session = session
+        self.logical_reads = logical_reads
+        self.window_observations = window_observations
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._scopes = {}
@@ -92,6 +94,13 @@ class _ReadReports:
 
     def attach(self, results):
         """Render once, partition once, then copy only each result's own scalar records."""
+        if self.window_observations:
+            self._attach_windows(results)
+        if not self.logical_reads:
+            if self._pid == os.getpid():
+                with self._lock:
+                    self._scopes.clear()
+            return results
         if self._pid != os.getpid() or self._unassociated():
             for result in results:
                 result.logical_reads = self.session.scope_report(None)
@@ -130,6 +139,13 @@ class _ReadReports:
         return results
 
     def attach_combined(self, result):
+        if self.window_observations:
+            self._attach_windows([result], combined=True)
+        if not self.logical_reads:
+            if self._pid == os.getpid():
+                with self._lock:
+                    self._scopes.clear()
+            return result
         if self._pid != os.getpid() or self._unassociated():
             result.logical_reads = self.session.scope_report(None)
             return result
@@ -141,6 +157,45 @@ class _ReadReports:
         else:
             result.logical_reads = scopes_report(self.session.report(), selected)
         return result
+
+    def _attach_windows(self, results, *, combined=False):
+        report = self.session.window_observation_report()
+        if self._pid != os.getpid():
+            # Do not acquire a mutex inherited from a vanished parent thread.
+            for result in results:
+                result.window_observations = {
+                    **report,
+                    "scopes": [],
+                    "state": "scope_unavailable",
+                    "rows": [],
+                    "omitted": max(1, report["omitted"]),
+                }
+            return
+        unavailable = self._unassociated()
+        with self._lock:
+            scopes = dict(self._scopes)
+            selected = set(self._seen_scopes)
+            unavailable = unavailable or self._scope_unavailable
+        partitions = {}
+        for row in report["rows"]:
+            partitions.setdefault(row["scope"], []).append(row)
+        for result in results:
+            previous = scopes.get(id(result))
+            scope = previous[1] if previous is not None and previous[0]() is result else None
+            valid = not unavailable and (combined or type(scope) is int)
+            result.window_observations = {
+                **report,
+                "scopes": sorted(selected) if combined and valid else [scope] if valid else [],
+                "state": "collected" if valid else "scope_unavailable",
+                "omitted": report["omitted"] if valid else max(1, report["omitted"]),
+                "rows": copy.deepcopy(
+                    [row for key in sorted(selected) for row in partitions.get(key, ())]
+                    if combined and valid
+                    else partitions.get(scope, [])
+                    if valid
+                    else []
+                ),
+            }
 
 
 _REPORTS: ContextVar[_ReadReports | None] = ContextVar("quarry_logical_read_reports", default=None)
@@ -165,13 +220,17 @@ def transfer_result_scope(source: ScanResult, target: ScanResult) -> None:
 
 
 @contextmanager
-def collect_read_reports():
+def collect_read_reports(*, logical_reads=True, window_observations=False):
     """Borrow an active session, otherwise own one through all native request cleanup."""
     with ExitStack() as stack:
         session = current_read_usage()
         if session is None:
             session = stack.enter_context(model_read_usage())
-        reports = _ReadReports(session)
+        if window_observations:
+            session.enable_window_observations()
+        reports = _ReadReports(
+            session, logical_reads=logical_reads, window_observations=window_observations
+        )
         token = _REPORTS.set(reports)
         try:
             with observe_read_scopes(reports):

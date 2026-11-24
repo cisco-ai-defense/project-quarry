@@ -111,6 +111,7 @@ from quarry.integrations.read_usage import (
     retain_read_usage,
 )
 from quarry.integrations.resources import ResourceManager, ResourcePreparationError
+from quarry.integrations.rule_scope import _rule_scope
 from quarry.language.runtime import (
     rejected_call_guidance,
     suggest_function_names,
@@ -1627,10 +1628,13 @@ class DSLScanner:
         deadline_seconds: float | None = None,
         *,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (sync wrapper)."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         return run_sync(
             self.scan_data_async(
                 data,
@@ -1639,6 +1643,7 @@ class DSLScanner:
                 rules_subset,
                 deadline_seconds,
                 **({"logical_reads": True} if logical_reads else {}),
+                **({"window_observations": True} if window_observations else {}),
             )
         )
 
@@ -1651,6 +1656,7 @@ class DSLScanner:
         deadline_seconds: float | None = None,
         *,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules (async).
 
@@ -1662,9 +1668,13 @@ class DSLScanner:
         ``logical_reads=True`` attaches a bounded scalar input-read snapshot, separate
         from physical usage and verdict completeness. A caller-owned accounting session
         remains live; its report snapshot explicitly retains ``finalized=False``.
+        ``window_observations=True`` separately attaches text-free window reply and
+        selected-input metadata without extra model or tokenizer work.
         """
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         with scan_deadline(deadline_seconds):
             return await run_engine(
                 partial(
@@ -1675,6 +1685,7 @@ class DSLScanner:
                     rules_subset,
                     deadline_seconds,
                     logical_reads=logical_reads,
+                    window_observations=window_observations,
                 )
             )
 
@@ -1687,9 +1698,12 @@ class DSLScanner:
         deadline_seconds: float | None,
         *,
         logical_reads: bool,
+        window_observations: bool = False,
     ) -> ScanResult:
-        if logical_reads:
-            with collect_read_reports() as reports:
+        if logical_reads or window_observations:
+            with collect_read_reports(
+                logical_reads=logical_reads, window_observations=window_observations
+            ) as reports:
                 result = await self._scan_data_with_deadline_async(
                     data, file_path, enable_explain, rules_subset, deadline_seconds
                 )
@@ -1774,6 +1788,7 @@ class DSLScanner:
         # to deferred evidence through value_lifetimes.pop_all().
         with (
             head_scope,
+            _rule_scope(None),
             read_usage_scope(None, scope=read_scope) if read_scope is not None else nullcontext(),
             ExitStack() as value_lifetimes,
         ):
@@ -2645,13 +2660,18 @@ class DSLScanner:
         enable_explain: ExplainLevel = False,
         *,
         logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Scan multiple conversations from a batch file."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
-        if not logical_reads:
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
+        if not (logical_reads or window_observations):
             return self._scan_batch_data(conversations, file_path, enable_explain)
-        with collect_read_reports() as reports:
+        with collect_read_reports(
+            logical_reads=logical_reads, window_observations=window_observations
+        ) as reports:
             result = self._scan_batch_data(conversations, file_path, enable_explain)
         return reports.attach_combined(result)
 
@@ -2807,14 +2827,23 @@ class DSLScanner:
         )
 
     def scan_file(
-        self, json_path: Path, enable_explain: ExplainLevel = False, *, logical_reads: bool = False
+        self,
+        json_path: Path,
+        enable_explain: ExplainLevel = False,
+        *,
+        logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> ScanResult:
         """Scan a single JSON file with loaded rules."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
-        if not logical_reads:
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
+        if not (logical_reads or window_observations):
             return self._scan_file(json_path, enable_explain)
-        with collect_read_reports() as reports:
+        with collect_read_reports(
+            logical_reads=logical_reads, window_observations=window_observations
+        ) as reports:
             result = self._scan_file(json_path, enable_explain)
         return reports.attach_combined(result)
 
@@ -2857,11 +2886,18 @@ class DSLScanner:
             )
 
     def scan_directory(
-        self, directory: Path, enable_explain: ExplainLevel = False, *, logical_reads: bool = False
+        self,
+        directory: Path,
+        enable_explain: ExplainLevel = False,
+        *,
+        logical_reads: bool = False,
+        window_observations: bool = False,
     ) -> list[ScanResult]:
         """Scan all JSON files in a directory."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise ValueError("window_observations must be a boolean")
         results = []
         pattern = "**/*.json" if self.recursive else "*.json"
         files = sorted(directory.glob(pattern))
@@ -2875,8 +2911,13 @@ class DSLScanner:
             if not self.verbose:
                 print(f"[{i}/{len(files)}] {json_file.name}", flush=True)
             results.append(
-                self.scan_file(json_file, enable_explain, logical_reads=True)
-                if logical_reads
+                self.scan_file(
+                    json_file,
+                    enable_explain,
+                    **({"logical_reads": True} if logical_reads else {}),
+                    **({"window_observations": True} if window_observations else {}),
+                )
+                if logical_reads or window_observations
                 else self.scan_file(json_file, enable_explain)
             )
         return results

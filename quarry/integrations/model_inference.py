@@ -548,7 +548,7 @@ def _assistant_wire_message(value: Any) -> dict[str, Any]:
     return wire
 
 
-def _classifier_probability(result: Any, class_index: int, model_id: str) -> float:
+def _classifier_probability(result: Any, class_index: int, model_id: str, *, observe=None) -> float:
     """Return the maximum configured-head probability across classifier chunks."""
 
     chunks = getattr(result, "chunks", None)
@@ -566,6 +566,8 @@ def _classifier_probability(result: Any, class_index: int, model_id: str) -> flo
                 model_id,
             )
         value = _validated_score(probabilities[class_index], model_id, "Classifier probability")
+        if observe is not None:
+            observe(probabilities)
         maximum = value if maximum is None else max(maximum, value)
     assert maximum is not None
     return maximum
@@ -3178,10 +3180,13 @@ class ModelInferenceBackend:
         measured_class_index=None,
         head_candidates=(),
     ):
-        self._require_window_adapter(model_id, spans=spans)
         model = self._model(model_id)
         config = model.windows
         assert config is not None
+        observation = current_model_read()
+        if observation is not None:
+            observation.window_pending(config.unit)
+        self._require_window_adapter(model_id, spans=spans)
         adapter = self.adapters[model.adapter]
         request_model = self._request_model("classify_window_batch", model)
         token_unit = config.unit == "tokens"
@@ -3214,7 +3219,7 @@ class ModelInferenceBackend:
         if not rendering.source.text or empty_last_turn:
             observation = current_model_read()
             if observation is not None:
-                observation.window_input(rendering.source, (), None)
+                observation.window_input(rendering.source, (), None, unit=config.unit)
                 observation.not_sent()
             return empty_result
         limits = self.config.get_safety_limits()
@@ -3297,12 +3302,14 @@ class ModelInferenceBackend:
         if not batches:
             observation = current_model_read()
             if observation is not None:
-                observation.window_input(rendering.source, (), None)
+                observation.window_input(rendering.source, (), None, unit=config.unit)
                 observation.not_sent()
             return empty_result
         observation = current_model_read()
         if observation is not None:
-            observation.window_input(rendering.source, windows, encoding, rendering.context)
+            observation.window_input(
+                rendering.source, windows, encoding, rendering.context, unit=config.unit
+            )
         section = model.spans if spans else model.classify
         cap = None if section is None else section.max_input_tokens
         if cap is not None:
@@ -3360,6 +3367,14 @@ class ModelInferenceBackend:
                 **({"token_head": True} if head else {}),
             )
 
+        sent_generation = None
+
+        def prepare_reply(raw):
+            nonlocal sent_generation
+            result = (_WindowHeadResponse if head else _WindowResponse)(raw, uuid.uuid4().bytes)
+            sent_generation = result.generation
+            return result
+
         async def consume(response):
             if type(response) is not (_WindowHeadResponse if head else _WindowResponse):
                 raise TypeError("invalid cached window response")
@@ -3371,6 +3386,11 @@ class ModelInferenceBackend:
                     "Window classifier must return one chunk per requested window",
                     model_id,
                 )
+            observed_read = current_model_read()
+            if observed_read is not None:
+                observed_read.window_reply(
+                    response.generation, model.model, chunks, response.generation != sent_generation
+                )
             if measured_class_index is not None:
 
                 async def measure():
@@ -3378,7 +3398,18 @@ class ModelInferenceBackend:
                     for ordinal, chunk in enumerate(chunks):
                         values.append(
                             _classifier_probability(
-                                SimpleNamespace(chunks=(chunk,)), measured_class_index, model_id
+                                SimpleNamespace(chunks=(chunk,)),
+                                measured_class_index,
+                                model_id,
+                                observe=(
+                                    None
+                                    if observed_read is None
+                                    else lambda probabilities, ordinal=ordinal: (
+                                        observed_read.window_vector(
+                                            response.generation, ordinal, probabilities
+                                        )
+                                    )
+                                ),
                             )
                         )
                         if ordinal % 256 == 0:
@@ -3420,9 +3451,7 @@ class ModelInferenceBackend:
             key=(batches, rendering.context, "window-head-v2" if head else "window-headless-v2"),
             timeout=timeout,
             dispatch=dispatch,
-            prepare=lambda raw: (_WindowHeadResponse if head else _WindowResponse)(
-                raw, uuid.uuid4().bytes
-            ),
+            prepare=prepare_reply,
             read=consume,
         )
 

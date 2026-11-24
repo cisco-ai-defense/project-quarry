@@ -22,6 +22,12 @@ from quarry.inputs import InputAdapter
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.integrations.read_tokens import TextTokenBasis
 from quarry.integrations.read_usage import ReadUsageLimits, ReadUsageSession, model_read_usage
+from quarry.integrations.rule_scope import current_rule_name
+from quarry.integrations.window_observations import (
+    ModelWindowObservations,
+    WindowObservationLimits,
+    observe_model_windows,
+)
 from quarry.policy import CompiledPolicy, compile_policy
 from quarry.policy_serialization import load_compiled_policy
 from quarry.prepared import PreparedRuleCache
@@ -62,9 +68,14 @@ from quarry.types.messages import (
 from quarry.types.read_reports import logical_read_report_schema
 from quarry.types.results import CollectionResult, JudgeResult, ProducerRef, ResultItem, Score, Span
 from quarry.types.rules import ScanResult
+from quarry.types.window_reports import window_observation_report_schema
 
 __all__ = [
     "__version__",
+    "current_rule_name",
+    "ModelWindowObservations",
+    "WindowObservationLimits",
+    "observe_model_windows",
     "QuarryError",
     "QuarryGuard",
     "AssistantMessage",
@@ -115,4 +126,5 @@ __all__ = [
     "load_compiled_policy",
     "model_read_usage",
     "logical_read_report_schema",
+    "window_observation_report_schema",
 ]

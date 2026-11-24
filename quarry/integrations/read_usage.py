@@ -42,6 +42,13 @@ from quarry.integrations.read_identity import (
 )
 from quarry.integrations.read_reporting import build_aggregates, scope_report
 from quarry.integrations.read_tokens import TextTokenAtlas, TextTokenBasis
+from quarry.integrations.rule_scope import _rule_scope
+from quarry.integrations.window_observations import (
+    WindowObservationLimits,
+    _snapshot_probabilities,
+    _static_probabilities,
+    _WindowObservationStore,
+)
 from quarry.types.read_observations import _text_read_observer
 
 MeasurementState = Literal[
@@ -519,6 +526,7 @@ class ReadUsageSession:
         limits: ReadUsageLimits | None = None,
         *,
         token_bases: dict[str, TextTokenBasis] | None = None,
+        window_limits: WindowObservationLimits | None = None,
     ) -> None:
         if limits is not None and type(limits) is not ReadUsageLimits:
             raise ValueError("invalid logical read accounting limits")
@@ -528,6 +536,8 @@ class ReadUsageSession:
             raise ValueError("invalid logical read accounting limits") from None
         self._pid = os.getpid()
         self._lock = threading.Lock()
+        self._windows = None if window_limits is None else _WindowObservationStore(window_limits)
+        self._final_windows = None
         self._events: dict[bytes, _Read] = {}
         self._bindings: dict[tuple[_Reader, bytes], None] = {}
         self._range_count = 0
@@ -553,6 +563,163 @@ class ReadUsageSession:
             )
         )
         self._text_inputs = _NativeTextObserver(self.limits, self._token_maps)
+
+    def _window_pending(self, identity, unit):
+        store = self._windows
+        if store is None or self._pid != os.getpid():
+            return
+        with self._lock:
+            if not self._closed and identity in self._events:
+                store.note_pending(identity, unit)
+
+    def _window_input(self, identity, unit, windows, encoding, characters):
+        store = self._windows
+        if store is None or self._pid != os.getpid():
+            return
+        from quarry.integrations.model_windows import TokenEncoding, TokenWindow
+        from quarry.integrations.read_coverage import CoverageLimitError, ReadCoverage
+
+        with self._lock:
+            if self._closed or identity not in self._events:
+                return
+            if identity not in store.frames and len(store.frames) >= store.limits.max_events:
+                store.omitted = min(store.omitted + 1, 1 << 63)
+                return
+            count = len(windows)
+            character_report = {"state": "unavailable", "value": None}
+            token_report = {"state": "unavailable", "value": None}
+            if (
+                not windows
+                and type(characters) is UnitMeasurement
+                and characters.state == "measured"
+                and not characters.intervals
+            ):
+                character_report = {"state": "measured", "value": 0}
+            elif type(characters) is UnitMeasurement and store.work < store.limits.max_work:
+                remaining = max(0, store.limits.max_work - store.work)
+                coverage = ReadCoverage(
+                    max_work=max(1, remaining),
+                    max_intervals=max(1, min(remaining, 262_144)),
+                    max_buckets=max(1, min(remaining, 65_536)),
+                )
+                try:
+                    coverage.add(characters.intervals)
+                    measured = coverage.snapshot()
+                    store.charge(measured.work)
+                    character_report = {
+                        "state": characters.state,
+                        "value": measured.characters if characters.state == "measured" else None,
+                    }
+                except (CoverageLimitError, ValueError):
+                    character_report = {"state": "limit_exceeded", "value": None}
+                finally:
+                    # Failed union work consumes the same independent lifetime budget.
+                    if character_report["state"] == "limit_exceeded":
+                        store.charge(coverage.snapshot().work)
+            elif type(characters) is UnitMeasurement:
+                character_report = {"state": "limit_exceeded", "value": None}
+            if unit == "tokens" and type(encoding) is TokenEncoding:
+                positions = set()
+                complete = True
+                end = len(encoding.token_ids) - 1
+                for window in windows:
+                    if type(window) is not TokenWindow:
+                        complete = False
+                        break
+                    for position in window.positions:
+                        if not store.charge(1):
+                            complete = False
+                            break
+                        if (encoding.prefix_token and position == 0) or (
+                            encoding.suffix_token and position == end
+                        ):
+                            continue
+                        positions.add(position)
+                    if not complete:
+                        break
+                token_report = {
+                    "state": "measured" if complete else "limit_exceeded",
+                    "value": len(positions) if complete else None,
+                }
+            elif not windows:
+                token_report = {"state": "measured", "value": 0}
+            store.note_input(identity, unit, count, character_report, token_report)
+
+    def _window_reply(self, identity, generation, provider_model, chunks, cached):
+        store = self._windows
+        if store is None or self._pid != os.getpid():
+            return
+        count = len(chunks)
+        with self._lock:
+            if self._closed or identity not in self._events:
+                return
+            admitted = store.begin_reply(identity, generation, provider_model, count, cached)
+        if not admitted:
+            return
+        for ordinal in range(count):
+            with self._lock:
+                if self._closed or not store.charge(1):
+                    return
+            try:
+                # Host objects and temporary references are inspected and released outside
+                # the lock. A hostile finalizer cannot reenter a held session mutex.
+                probabilities = _static_probabilities(chunks[ordinal])
+                self._window_vector(generation, ordinal, probabilities, selected=False)
+            except Exception:
+                continue
+
+    def _window_vector(self, generation, ordinal, probabilities, *, selected=True):
+        store = self._windows
+        if store is None or self._pid != os.getpid():
+            return
+        count = len(probabilities) if type(probabilities) in (tuple, list) else -1
+        with self._lock:
+            admitted = not self._closed and store.prepare_vector(
+                generation, ordinal, count, selected=selected
+            )
+        if not admitted:
+            return
+        values, state = _snapshot_probabilities(probabilities, count)
+        with self._lock:
+            if not self._closed:
+                store.commit_vector(generation, ordinal, values, state, selected=selected)
+
+    def window_observation_report(self):
+        """Return detached reached-window metadata without exposing read identities."""
+        if self._pid != os.getpid():
+            return {
+                "version": 1,
+                "enabled": self._windows is not None,
+                "finalized": True,
+                "rows": [],
+                "omitted": 1,
+            }
+        with self._lock:
+            if self._final_windows is not None:
+                return copy.deepcopy(self._final_windows)
+            if self._windows is None:
+                return {
+                    "version": 1,
+                    "enabled": False,
+                    "finalized": self._closed,
+                    "rows": [],
+                    "omitted": 0,
+                }
+            report = self._windows.report(self._bindings, self._events, finalized=False)
+            report["omitted"] = min(report["omitted"] + self._omitted, 1 << 63)
+            return report
+
+    def enable_window_observations(self) -> None:
+        """Enable bounded collection from this point in a caller-owned session.
+
+        Existing read identities are never reconstructed. Collection shares this session's
+        ownership and ends with its final metadata lease; it does not retain provider data.
+        """
+        if self._pid != os.getpid():
+            return
+        with self._lock:
+            if not self._closed and self._windows is None:
+                self._windows = _WindowObservationStore(WindowObservationLimits())
 
     def provide_text_tokens(
         self,
@@ -1040,6 +1207,12 @@ class ReadUsageSession:
                 if event.tokens.state == "pending"
                 else event.tokens,
             )
+        if self._windows is not None:
+            self._final_windows = self._windows.report(self._bindings, self._events, finalized=True)
+            self._final_windows["omitted"] = min(
+                self._final_windows["omitted"] + self._omitted, 1 << 63
+            )
+            self._windows.clear()
         self._final_report = self._render(aggregates=True)
         self._final_report["finalized"] = True
         self._final = {
@@ -1221,10 +1394,11 @@ def read_usage_scope(rule: str | None, *, scope: int | None = 0, phase: str = "d
         and phase in _PHASES
     )
     token = _READER.set(_Reader(scope, rule, phase) if valid else None)
-    try:
-        yield
-    finally:
-        _READER.reset(token)
+    with _rule_scope(rule):
+        try:
+            yield
+        finally:
+            _READER.reset(token)
 
 
 @contextmanager
@@ -1232,8 +1406,9 @@ def model_read_usage(
     limits: ReadUsageLimits | None = None,
     *,
     token_bases: dict[str, TextTokenBasis] | None = None,
+    window_limits: WindowObservationLimits | None = None,
 ) -> Generator[ReadUsageSession, None, None]:
-    session = ReadUsageSession(limits, token_bases=token_bases)
+    session = ReadUsageSession(limits, token_bases=token_bases, window_limits=window_limits)
     owner = session.retain()
     assert owner is not None  # A fresh, validated configuration admits its first owner.
     try:

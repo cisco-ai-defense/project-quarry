@@ -124,6 +124,7 @@ class ScanResult:
     )
     # Optional scalar snapshot. Its collection/measurement state does not alter verdicts.
     logical_reads: dict[str, Any] | None = field(default=None, kw_only=True)
+    window_observations: dict[str, Any] | None = field(default=None, kw_only=True)
 
     def __setstate__(self, state: object) -> None:
         """Restore known dataclass fields and initialize telemetry absent from older pickles."""

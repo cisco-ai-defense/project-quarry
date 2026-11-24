@@ -640,6 +640,7 @@ class QuarryPlugin:
         config_version: int | None = None,
         explore_rate: float = 0.0,
         logical_reads: bool = False,
+        window_observations: bool = False,
         verbosity: ScanVerbosity | None = None,
     ) -> dict[str, Any]:
         """Compile one rule once and scan one conversation or an ordered batch.
@@ -659,6 +660,8 @@ class QuarryPlugin:
 
         ``logical_reads`` adds each conversation's bounded input-read snapshot without
         extra model/tokenizer work. Accounting completeness does not alter verdict status.
+        ``window_observations`` separately adds text-free window probabilities, selected
+        input coverage, and accepted-reply cache status for each conversation.
         """
 
         if verbosity is not None and (
@@ -669,6 +672,8 @@ class QuarryPlugin:
             raise PluginInputError("provide exactly one of conversation or conversations")
         if type(logical_reads) is not bool:
             raise PluginInputError("logical_reads must be a boolean")
+        if type(window_observations) is not bool:
+            raise PluginInputError("window_observations must be a boolean")
         verbosity = verbosity or ("full" if conversation is not None else "compact")
         if explain is None:
             explain = verbosity == "full"
@@ -749,6 +754,7 @@ class QuarryPlugin:
                 decision_paths=True,
                 explore_rate=float(explore_rate),
                 **({"logical_reads": True} if logical_reads else {}),
+                **({"window_observations": True} if window_observations else {}),
             )
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
@@ -859,6 +865,8 @@ class QuarryPlugin:
         }
         if result.logical_reads is not None:
             payload["logical_reads"] = result.logical_reads
+        if result.window_observations is not None:
+            payload["window_observations"] = result.window_observations
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,

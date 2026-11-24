@@ -345,6 +345,96 @@ class TextParameterEvidence(TypedDict):
 ParameterEvidence = NumberParameterEvidence | TextParameterEvidence
 
 
+ObservationCount = Annotated[StrictInt, Field(ge=0, le=1 << 63)]
+ObservationLabel = Annotated[StrictStr, Field(max_length=512)]
+Probability = Annotated[StrictFloat, Field(ge=0, le=1, allow_inf_nan=False)]
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class WindowInputCoverage(TypedDict):
+    """A scalar union over the selected input, with explicit unknown measurement."""
+
+    state: Literal[
+        "measured",
+        "partial",
+        "pending",
+        "unavailable",
+        "limit_exceeded",
+        "failed",
+        "cancelled",
+        "abandoned",
+    ]
+    value: ObservationCount | None
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class WindowObservationRow(TypedDict):
+    """One logical reader's detached view of an actual window reply."""
+
+    scope: ObservationCount
+    rule: ObservationLabel | None
+    phase: Literal["decision", "evidence", "measurement"]
+    model: ObservationLabel
+    provider_model: ObservationLabel | None
+    operation: Literal["classify", "spans"]
+    outcome: Literal[
+        "pending", "succeeded", "not_sent", "failed", "refused", "cancelled", "unknown"
+    ]
+    unit: Literal["characters", "tokens"]
+    window_count: ObservationCount | None
+    source_characters: WindowInputCoverage
+    covered_tokens: WindowInputCoverage
+    cached: StrictBool | None
+    state: Literal[
+        "measured",
+        "partial",
+        "pending",
+        "not_sent",
+        "failed",
+        "refused",
+        "cancelled",
+        "unknown",
+        "unavailable",
+        "limit_exceeded",
+    ]
+    probabilities: (
+        Annotated[
+            list[Annotated[list[Probability], Field(max_length=1_048_576)] | None],
+            Field(max_length=65_536),
+        ]
+        | None
+    )
+    probability_states: (
+        Annotated[
+            list[
+                Literal[
+                    "measured",
+                    "unavailable",
+                    "invalid_probability_vector",
+                    "conflicting_probability_vector",
+                    "limit_exceeded",
+                ]
+            ],
+            Field(max_length=65_536),
+        ]
+        | None
+    )
+    reads: ObservationCount
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class WindowObservationReport(TypedDict):
+    """Optional bounded metadata; its completeness does not determine the verdict."""
+
+    version: Literal[1]
+    enabled: StrictBool
+    finalized: StrictBool
+    rows: Annotated[list[WindowObservationRow], Field(max_length=65_536)]
+    omitted: ObservationCount
+    scopes: Annotated[list[ObservationCount], Field(max_length=65_536)]
+    state: Literal["collected", "scope_unavailable"]
+
+
 @with_config(EXTENSIBLE_SCHEMA)
 class ScanEntry(TypedDict):
     """One conversation's result inside a batch."""
@@ -362,6 +452,7 @@ class ScanEntry(TypedDict):
     explanations: NotRequired[list[dict[str, Any]]]
     decision_path: NotRequired[DecisionPathPayload]
     visualization: NotRequired[dict[str, Any]]
+    window_observations: NotRequired[WindowObservationReport]
 
 
 @with_config(EXTENSIBLE_SCHEMA)
@@ -389,6 +480,7 @@ class ScanResponse(VersionEnvelope):
     results: NotRequired[list[ScanEntry]]
     count: NotRequired[int]
     visualization: NotRequired[dict[str, Any]]
+    window_observations: NotRequired[WindowObservationReport]
 
 
 def published_output_schemas() -> dict[str, dict[str, Any]]:

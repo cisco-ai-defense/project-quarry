@@ -269,6 +269,10 @@ window settings remain separate. Legacy `model_score` and `model_scan` field rea
 when they send the equivalent single user message. Custom response readers still run for each
 logical read; their return values are not memoized as model scores.
 
+Optional [window observations](window-observations.md) report the accepted reply,
+per-reader cache status, and actual selected-input coverage without extra model or tokenizer
+requests. They keep logical reads separate from physical attempts and do not alter verdicts.
+
 Decode character spans using `CharacterWindow.span(...)` or the supplied `SourceText.span(...)`.
 For token spans, use positions in the full encoding and the host's actual character mapping;
 token indices are not character offsets. Keep the geometry returned by the source and add the
