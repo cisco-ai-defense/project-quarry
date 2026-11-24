@@ -40,6 +40,13 @@ changing an otherwise complete rule result.
 `call.raw_arguments` preserves the sender's original string. Models can read raw argument text
 without decoding named fields; alias-specific completion builders may quote it as data.
 
+Containment between spans in decoded arguments and `call.raw_arguments` uses the original JSON
+character positions. An escaped character, including a surrogate pair, covers its complete JSON
+escape sequence. Duplicate object keys refer to their last decoded value. A number whose spelling
+changes during decoding conservatively covers its whole original JSON token. Extraction from a
+decoded span still returns decoded text; extraction from a raw span returns original JSON text.
+`outermost` uses these same coordinates when removing contained spans from a mixed collection.
+
 Messages, tools, and nested JSON values remain immutable during a scan. Serialization returns new
 Python containers. Text, image URL, and input-audio parts retain their OpenAI wire shape.
 

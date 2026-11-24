@@ -1849,13 +1849,13 @@ async def _pattern_spans(
     ]
     matches = _match_text_spans(texts, patterns, regex_backend)
     if ordered and not _span_texts_are_ordered(texts):
-        # A transformed or reordered source can map matches backwards. It must be sorted
-        # before an ordered consumer can decide which span to return first.
+        # Transformed text and decoded fields can map backwards in the original input.
+        # Sort their spans in the same coordinates used to decide containment.
         found = []
         async for span in matches:
             _check_span_limit(context, len(found) + 1, f"{expression.value}.spans() spans")
             found.append(span)
-        found.sort(key=_span_ends)
+        found.sort(key=_containment_ends)
         raise_if_evaluation_expired()
         for span in found:
             yield span
@@ -1870,7 +1870,7 @@ def _span_texts_are_ordered(texts: list[SourceText]) -> bool:
         raise_if_evaluation_expired()
         if not isinstance(text.origin, Place):
             return False
-        start, end = _span_ends(text.span(0, len(text.text)))
+        start, end = _containment_ends(text.span(0, len(text.text)))
         # Precision tie-breakers describe matched bounds; text order uses the offsets alone.
         if previous_end is not None and start[:-1] < previous_end:
             return False
@@ -2000,7 +2000,7 @@ async def _merge_span_streams(streams: list[AsyncIterator[Span]]) -> AsyncIterat
     for index, stream in enumerate(streams):
         head = await anext(stream, None)
         if head is not None:
-            heapq.heappush(heads, (_span_ends(head), index, head))
+            heapq.heappush(heads, (_containment_ends(head), index, head))
     previous = None
     seen: set[Span] = set()
     while heads:
@@ -2014,7 +2014,7 @@ async def _merge_span_streams(streams: list[AsyncIterator[Span]]) -> AsyncIterat
             yield span
         head = await anext(streams[index], None)
         if head is not None:
-            heapq.heappush(heads, (_span_ends(head), index, head))
+            heapq.heappush(heads, (_containment_ends(head), index, head))
 
 
 async def _outermost_stream(spans: AsyncIterator[Span]) -> AsyncIterator[Span]:
@@ -2022,7 +2022,7 @@ async def _outermost_stream(spans: AsyncIterator[Span]) -> AsyncIterator[Span]:
     furthest = None
     async for span in spans:
         raise_if_evaluation_expired()
-        start, end = _span_ends(span)
+        start, end = _containment_ends(span)
         if best is not None and start != best[0]:
             if furthest is None or best[1] > furthest:
                 furthest = best[1]
@@ -2057,7 +2057,10 @@ def _containment_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
     call = span._source
     position = span.position
     if isinstance(call, ToolCall) and position == span.end_position:
-        key = source_key(None)
+        # Translate coordinates without discarding the current input-owner boundary.
+        key = source_key(span.source)
+        if span.source is not None:
+            key += f"\x00owner:{id(span._source)}"
         if span._whole_call:
             return (key, position, (-1, 0, ""), 0, 0), (key, position, (1, 0, ""), 0, math.inf)
         if span.field.startswith("arguments.") and span.end_field.startswith("arguments."):
@@ -2177,7 +2180,7 @@ def _union_spans(lists: list[CollectionResult[Span]]) -> CollectionResult[Span]:
         if earlier is None or _score(item.value) > _score(earlier[1].value):
             kept[key] = (order if earlier is None else earlier[0], item)
     items = [item for _, item in sorted(kept.values(), key=lambda pair: pair[0])]
-    items.sort(key=lambda item: _span_ends(item.value))
+    items.sort(key=lambda item: _containment_ends(item.value))
     raise_if_evaluation_expired()
     categories = {spans.category for spans in lists}
     return CollectionResult(
@@ -2193,7 +2196,7 @@ def _outermost_spans(items: tuple[ResultItem[Span], ...]) -> list[ResultItem[Spa
     longest: dict[_SpanPoint, tuple[_SpanPoint, int]] = {}
     for index, item in enumerate(items):
         raise_if_evaluation_expired()
-        start, end = _span_ends(item.value)
+        start, end = _containment_ends(item.value)
         best = longest.get(start)
         if (
             best is None
