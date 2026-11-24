@@ -138,8 +138,16 @@ def test_nested_service_dependency_keeps_conservative_service_cost():
 @pytest.mark.parametrize("matches", [False, True])
 @pytest.mark.parametrize("metered", [False, True])
 def test_deferred_candidate_collection_gates_dependent_service_and_keeps_work_owner(
-    tmp_path, restored, matches, metered
+    tmp_path, restored, matches, metered, monkeypatch
 ):
+    from itertools import count
+
+    from quarry.safety import local_match_work
+
+    # Native CPU clocks may report zero for these short operations on Windows.
+    # Exercise ownership and charging with deterministic positive segments.
+    ticks = count(0, 10)
+    monkeypatch.setattr(local_match_work, "thread_time_ns", lambda: next(ticks))
     order = []
 
     def check(text):
