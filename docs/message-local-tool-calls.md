@@ -38,5 +38,6 @@ global temporal counts retain their child evidence. Disabled explanations add no
 provider work. Existing called, computed and declared-input frames retain their
 ownership and field-isolation rules.
 
-Prepared policies use compiler 30 and envelope 11. Recompile older policies from
-their saved source before loading them into this compiler.
+Prepared policies bind the exact compiler and envelope versions used to build them.
+When upgrading either version, recompile existing policies from their saved rule
+sources.
