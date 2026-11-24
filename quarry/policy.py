@@ -282,7 +282,9 @@ class CompiledPolicy:
         key = secrets.token_bytes(32) if evidence_key is None else evidence_key
         if not isinstance(key, bytes) or len(key) < 16:
             raise ValueError("evidence_key must contain at least 16 bytes")
-        source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        source_sha256 = scanner.loaded_rules[rule_name].source_sha256
+        if source_sha256 is None:
+            source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
         text_resources = _referenced_text_hashes(
             scanner, scanner.resource_requirements.get("text_resources", set()), key
         )
