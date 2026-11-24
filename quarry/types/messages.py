@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self, cast,
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-from quarry.engine.matchers import field_access, value_texts
+from quarry.engine.matchers import field_access, field_parts, value_texts
 from quarry.language.metadata import (
     DSLParameter,
     SurfaceFieldExclusion,
@@ -42,6 +42,7 @@ from quarry.language.metadata import (
     dsl_surface,
 )
 from quarry.types.exceptions import ConversationValidationError, EvaluationError, InvalidInputError
+from quarry.types.json_source import JSONSource
 from quarry.types.message_links import LinkEvent, resolve_links
 from quarry.types.read_observations import _text_read_observer
 from quarry.types.results import InputText, Span
@@ -835,6 +836,7 @@ class ToolCall(OpenAIObject):
     function: ToolCallFunction
 
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
+    _argument_source: tuple[JSONSource, dict[str, str]] | None = PrivateAttr(default=None)
     _arguments_error: str | None = PrivateAttr(default=None)
     _call_index: int = PrivateAttr(default=-1)
     _id_error: str | None = PrivateAttr(default=None)
@@ -947,10 +949,38 @@ class ToolCall(OpenAIObject):
             object.__setattr__(self, "_arguments_cache", frozen)
         return _project_json(self._arguments_cache)
 
+    def _argument_bounds(self, field: str, start: int, end_field: str, end: int) -> tuple[int, int]:
+        """Return the original JSON bounds of a span in decoded arguments."""
+        cached = self._argument_source
+        if cached is None:
+            leaves = dict(value_texts(self.arguments, "arguments"))
+            cached = JSONSource(self.raw_arguments), leaves
+            object.__setattr__(self, "_argument_source", cached)
+        source, leaves = cached
+        if field == end_field:
+            return source.bounds(field_parts(field)[1:], leaves[field], start, end)
+
+        # A span over several values covers the encoded portions of all those values.
+        # Repeated JSON keys retain their last value, which can move a field in the raw text.
+        bounds = []
+        active = False
+        for name, value in leaves.items():
+            if name == field:
+                active = True
+            if not active:
+                continue
+            low = start if name == field else 0
+            high = end if name == end_field else len(value)
+            bounds.append(source.bounds(field_parts(name)[1:], value, low, high))
+            if name == end_field:
+                break
+        return min(low for low, _ in bounds), max(high for _, high in bounds)
+
     def _discard_decoded_arguments(self) -> None:
         """Drop a tree decoded only for input preflight; rule reads stay lazy."""
 
         object.__setattr__(self, "_arguments_cache", None)
+        object.__setattr__(self, "_argument_source", None)
         object.__setattr__(self, "_arguments_error", None)
 
     @property
@@ -2480,6 +2510,7 @@ class Messages(Sequence[MessageType]):
             yield
             clone = call.model_copy()
             object.__setattr__(clone, "_arguments_cache", None)
+            object.__setattr__(clone, "_argument_source", None)
             object.__setattr__(clone, "_response", None)
             call_clones[slot] = clone
         response_clones: dict[int, ToolMessage] = {}
@@ -2939,6 +2970,7 @@ class Messages(Sequence[MessageType]):
                     yield
                 clone = call.model_copy()
                 object.__setattr__(clone, "_arguments_cache", None)
+                object.__setattr__(clone, "_argument_source", None)
                 object.__setattr__(clone, "_response", None)
                 object.__setattr__(clone, "_message_index", ordinal)
                 call_clones[slot] = clone
