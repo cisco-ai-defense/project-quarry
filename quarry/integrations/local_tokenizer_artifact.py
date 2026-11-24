@@ -301,7 +301,7 @@ class _Bounds:
             _bound(size)
         return size, ascii_only
 
-    def admit(self, text: str, job: _Job) -> None:
+    def admit(self, text: str, job: _Job) -> int:
         size = len(text.encode("utf-8"))
         # Added-token extraction can divide the input into at most2n+1 pieces;
         # each nonempty added token consumes at least one original scalar.
@@ -315,8 +315,9 @@ class _Bounds:
                 size = 4 * (size + pieces)
             _bound(size)
             pieces = max(pieces, 2 * size + 1)
-        _bound((size + pieces) * self.model_multiplier, _NATIVE_TOKENS)
+        token_upper_bound = _bound((size + pieces) * self.model_multiplier, _NATIVE_TOKENS)
         _bound(size * min(max(size, 1), self.search_width), _NATIVE_SEARCH)
+        return token_upper_bound
 
 
 def _model(value: Any) -> tuple[int, int]:
@@ -394,6 +395,7 @@ def _model(value: Any) -> tuple[int, int]:
 class _LoadedTokenizer:
     tokenizer: Any
     bounds: _Bounds
+    count_settings_sha256: str
 
     def encode(
         self, text: object, config: LocalTokenizerConfig, job: _Job
@@ -508,4 +510,4 @@ def load_local_tokenizer(config: LocalTokenizerConfig, job: _Job) -> _LoadedToke
     except Exception:
         _unavailable()
     job.checkpoint()
-    return _LoadedTokenizer(native, bounds)
+    return _LoadedTokenizer(native, bounds, config.count_settings_sha256)

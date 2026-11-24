@@ -55,6 +55,7 @@ from quarry.types.local_tokenizer import (
 )
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
+from quarry.types.tokenizer_width import TokenizerWidthClaim
 from quarry.types.transforms import (
     MAX_TRANSFORM_DEFINITIONS,
     MAX_TRANSFORM_NAME_CHARACTERS,
@@ -161,6 +162,7 @@ _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
         "extraction": {"count": str},
         "model": str,
         "local": _ANY_MAPPING,
+        "source_width": _ANY_MAPPING,
     },
     "score": {
         "max_input_tokens": int,
@@ -203,6 +205,9 @@ class InputTokensConfig:
     count_field: str
     model: str | None = None
     local: LocalTokenizerConfig | None = field(default=None, metadata={"cache_omit_none": True})
+    source_width: TokenizerWidthClaim | None = field(
+        default=None, metadata={"cache_omit_none": True}
+    )
 
     def __post_init__(self) -> None:
         if self.local is not None:
@@ -216,6 +221,18 @@ class InputTokensConfig:
             ):
                 raise ValueError("local tokenization requires its native adapter and configuration")
             object.__setattr__(self, "local", replace(self.local))
+        if self.source_width is not None:
+            if type(self.source_width) is not TokenizerWidthClaim or self.local is None:
+                raise ValueError("source width requires a native local tokenizer and width claim")
+            claim = replace(self.source_width)
+            if (
+                claim.artifact_sha256 != self.local.artifact_sha256
+                or claim.model_revision != self.local.model_revision
+                or claim.tokenizer_revision != self.local.tokenizer_revision
+                or claim.count_settings_sha256 != self.local.count_settings_sha256
+            ):
+                raise ValueError("source width claim must match the local tokenizer settings")
+            object.__setattr__(self, "source_width", claim)
 
 
 _MIN_EXPLANATION_TOKENS = 16
@@ -407,6 +424,8 @@ class InferenceModelConfig:
         if self.windows is None:
             document.pop("windows")
         if self.tokens is not None:
+            if self.tokens.source_width is None:
+                document["tokens"].pop("source_width", None)
             if self.tokens.local is None:
                 document["tokens"].pop("local", None)
             else:
@@ -1808,7 +1827,9 @@ def _parse_input_tokens(
     if not isinstance(value, dict):
         raise ValueError(f"{owner} must be a mapping")
     fields: dict[object, object] = dict(value)
-    _reject_unknown_fields(fields, {"adapter", "endpoint", "extraction", "model", "local"}, owner)
+    _reject_unknown_fields(
+        fields, {"adapter", "endpoint", "extraction", "model", "local", "source_width"}, owner
+    )
     extraction = fields.get("extraction")
     if not isinstance(extraction, dict):
         raise ValueError(f"{owner} requires an 'extraction' mapping")
@@ -1829,7 +1850,24 @@ def _parse_input_tokens(
         local=_parse_local_tokenizer(fields["local"], config_dir=config_dir)
         if "local" in fields
         else None,
+        source_width=_parse_source_width(fields["source_width"])
+        if "source_width" in fields
+        else None,
     )
+
+
+def _parse_source_width(value: object) -> TokenizerWidthClaim:
+    if not isinstance(value, dict):
+        raise ValueError("source width claim must be a native mapping")
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise ValueError("source width claim must be a native mapping")
+    _reject_unknown_fields(value, set(TokenizerWidthClaim.__dataclass_fields__), "source width")
+    try:
+        return TokenizerWidthClaim(**value)
+    except TypeError:
+        raise ValueError(
+            "source width requires all revision, artifact and settings fields"
+        ) from None
 
 
 def _parse_local_tokenizer(value: object, *, config_dir: Path | None) -> LocalTokenizerConfig:

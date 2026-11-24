@@ -109,6 +109,61 @@ message fields likewise need full serialization. Supported message content is
 native text or a structured call's null content. Unsupported media/content
 parts and opaque objects fail input validation without coercion or omission.
 
+## Opt-in capped count proofs
+
+An exact token count always encodes the complete rendered request. For a caller
+that only needs to know whether a cap is exceeded, a verified source-width bound
+can sometimes avoid encoding. This is an explicit opt-in, and a width supplied
+by a caller is a claim requiring runtime attestation.
+
+Construct a `TokenizerWidthClaim` with a positive native integer
+`max_source_characters_per_token`, the artifact SHA256, model/tokenizer revisions
+and `LocalTokenizerConfig.count_settings_sha256`. The supported method is
+`bytelevel-bpe-complete-alphabet-v1`. The settings digest includes the template,
+framing, limits, flags and tokenizer semantics; it omits the artifact's path.
+Recompute the claim when any of these settings changes. Configuration can supply
+the same fields in `tokens.source_width`, alongside `tokens.local`; remote
+adapters, incomplete claims and mismatched settings are rejected during parsing.
+Omitting `source_width` preserves prior configuration/cache/policy identities.
+
+`LocalTokenizerAdapter.attest_width(config, claim)` loads the pinned artifact off
+the caller loop and returns detached verified metadata, or `None` when the
+claimed width cannot be proved. The verifier checks the actual pinned native
+version and state. Its supported pipeline has no normalizer, one byte-level
+pretokenizer, complete model coverage of all 256 byte symbols, unique dense
+vocabulary IDs and concatenating BPE merges. Density is checked before native
+serialization, whose work otherwise depends on the largest ID. Added literal tokens contribute their own
+source width and must not consume surrounding whitespace. Unknown-token loss,
+ID aliasing, destructive splitting, normalization, truncation, padding and
+unmodeled settings cannot authorize a proof. Artifact padding/truncation and
+post-processors remain disabled by the canonical local loader.
+
+`count_request_capped(config, claim, messages, tools, cap=...)` returns an
+immutable `CappedTokenCount`. `exact_count` contains the canonical count when
+encoding was required. Otherwise it is `None`, and `lower_bound` is a proved
+strict lower bound above `cap`, with an attestation fingerprint. A lower bound
+must never be used as an exact count, subtracted from a budget, or used to pick
+token coordinates. Unsupported or insufficient claims use canonical encoding.
+The cap is a native integer from zero through `2**63 - 1`.
+
+The capped path snapshots and renders every message and offered tool before
+proving overflow. It preserves original ordering, structured field coverage,
+input validation, work admission and framing. A proof also needs conservative
+admission to guarantee the configured output-token limit; otherwise encoding
+runs and preserves that limit failure. Each worker retains at most two bounded
+attestation records, with no request text, encodings or native artifact references.
+
+When configured, native trim fit comparisons may use capped counts. The whole
+selected result still receives a canonical exact count before a cut is returned.
+Trim budgets above the capped integer range, and model aliases outside the
+1-to-256 printable-character binding range, use canonical counting throughout.
+Implicit score requests with custom message builders, ordinary `input_tokens`,
+split arithmetic and downstream model validation keep canonical counts. Cached
+capped replies have their own method namespace and bind the actual adapter
+lifetime, alias, revisions, full settings and cap. Complete native reply shape
+and binding are checked before retention and again on reads. Token-count cache
+retention policy still applies; fingerprints contain no request text or digest.
+
 ## Ownership, limits and offline behavior
 
 Snapshotting, whole-request rendering, artifact loading and native encoding run

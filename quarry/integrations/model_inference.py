@@ -436,6 +436,7 @@ _REQUEST_SECTIONS = {
     "complete": "complete",
     "complete_message": "complete",
     "tokenize": "tokens",
+    "tokenize_capped": "tokens",
 }
 
 
@@ -4358,6 +4359,77 @@ class ModelInferenceBackend:
             local=tokens_config.local is not None,
         )
 
+    async def _count_messages_capped(
+        self,
+        model_id: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        cap: int,
+        key: tuple[Any, ...],
+        timeout: float | None = None,
+    ):
+        """Use native attested overflow with full reply validation before retention."""
+        from quarry.integrations.local_tokenizer import LocalTokenizerAdapter
+        from quarry.types.tokenizer_width import CappedTokenCount
+
+        model = self._model(model_id)
+        tokens = model.tokens
+        if tokens is None or tokens.source_width is None:
+            actual = await self._count_messages(model_id, messages, tools, key=key, timeout=timeout)
+            return CappedTokenCount(cap, actual, exact_count=actual)
+        adapter = self.adapters[tokens.adapter]
+        if type(adapter) is not LocalTokenizerAdapter or tokens.local is None:
+            raise LocalTokenizerInvalidOutputError("Capped token count requires its native adapter")
+        local_config = tokens.local
+        expected = adapter.capped_fingerprint(model, alias=model_id, cap=cap)
+
+        def payload():
+            _require_inline_media(messages)
+            return messages, tools
+
+        def validate(raw):
+            if type(raw) is not CappedTokenCount:
+                raise LocalTokenizerInvalidOutputError("Invalid capped token count response")
+            try:
+                checked = replace(raw)
+            except (TypeError, ValueError):
+                raise LocalTokenizerInvalidOutputError(
+                    "Invalid capped token count response"
+                ) from None
+            # Only a fully validated native request can produce this response.
+            # In particular, computing framing before dispatch would mask the
+            # canonical invalid-input failure for an oversized message list.
+            maximum = local_config.limits.max_tokens + local_config.framing.total(len(messages))
+            if (
+                checked.cap != cap
+                or checked.lower_bound > maximum
+                or (not checked.is_exact and checked.proof_fingerprint != expected)
+            ):
+                raise LocalTokenizerInvalidOutputError("Capped token count binding does not match")
+            return checked
+
+        async def dispatch(config, wire, offered, *, timeout):
+            return await adapter.tokenize_capped(
+                config, wire, offered, alias=model_id, cap=cap, timeout=timeout
+            )
+
+        return await self._call(
+            model_id,
+            tokens.model or model.model,
+            adapter,
+            "tokenize_capped",
+            model,
+            payload,
+            key=("verified-source-width-v1", model_id, cap, expected, *key),
+            timeout=timeout,
+            prepare=validate,
+            read=validate,
+            dispatch=dispatch,
+            cache_category="token_counts",
+            local=True,
+        )
+
     async def model_trim_messages(
         self,
         model_id: str,
@@ -4389,7 +4461,7 @@ class ModelInferenceBackend:
                     f"Inference model '{model_id}' {operation} needs max_input_tokens for trim()"
                 )
 
-        async def count(selected):
+        async def count(selected, *, canonical=False):
             with model_read(model_id, "input_tokens") as observation:
                 record_model_input(selected, tools=tools if implicit else None)
                 wire = selected.to_openai_messages()
@@ -4403,6 +4475,31 @@ class ModelInferenceBackend:
                         lambda: self._score_request(model_id, constitution, wire, offered, None)
                     )
                     offered = []  # The score builder already rendered its offered tools.
+                tokens = self._model(model_id).tokens
+                # Custom score builders keep canonical counts. A supported native
+                # whole-request renderer can prove overflow for written/other
+                # native selections, preserving every offered fragment. Capped
+                # bindings have narrower limits than canonical trim inputs.
+                if (
+                    not canonical
+                    and tokens is not None
+                    and tokens.source_width is not None
+                    and not (implicit and operation == "score")
+                    and type(size) is int
+                    and 0 <= size < 1 << 63
+                    and type(model_id) is str
+                    and 1 <= len(model_id) <= 256
+                    and model_id.isprintable()
+                ):
+                    capped = await self._count_messages_capped(
+                        model_id,
+                        wire,
+                        offered,
+                        cap=size,
+                        key=("trim", operation if implicit else "written", wire, offered),
+                        timeout=timeout,
+                    )
+                    return capped.lower_bound
                 return await self._count_messages(
                     model_id,
                     wire,
@@ -4411,8 +4508,17 @@ class ModelInferenceBackend:
                     timeout=timeout,
                 )
 
+        async def confirm(selected):
+            return await count(selected, canonical=True)
+
         return await trim_messages(
-            messages, size, context=context, direction=direction, cut_keep=cut_keep, count=count
+            messages,
+            size,
+            context=context,
+            direction=direction,
+            cut_keep=cut_keep,
+            count=count,
+            confirm=confirm,
         )
 
     async def model_split_messages(
