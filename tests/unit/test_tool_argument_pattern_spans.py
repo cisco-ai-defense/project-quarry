@@ -177,3 +177,49 @@ async def test_call_pattern_spans_reject_calls_from_another_conversation():
             await _span_source_texts(
                 expression, context, None, {"calls": foreign}, None, PURE_REGEX
             )
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_raw_and_decoded_argument_spans_compare_in_original_json(restored):
+    source = r"""rule "Read"
+strings:
+    $tail = "needle"
+    $encoded = ".ud83d.ude00 needle" regex
+    $decoded = "😀 needle"
+    $other = "other"
+condition:
+    (any s in $tail.spans(assistant_messages[0].tool_calls[0].arguments.q) where
+        s inside $encoded.spans(assistant_messages[0].tool_calls[0].raw_arguments) and
+        messages.extract(s, 2, 0) == "😀 needle") and
+    (any s in $encoded.spans(assistant_messages[0].tool_calls[0].raw_arguments) where
+        s inside $decoded.spans(assistant_messages[0].tool_calls[0].arguments.q)) and
+    (all s in $other.spans(assistant_messages[0].tool_calls[0].raw_arguments) where
+        not s inside $decoded.spans(assistant_messages[0].tool_calls[0].arguments.q)) and
+    (all s in $other.spans(assistant_messages[0].tool_calls[0].raw_arguments) where
+        s inside assistant_messages[0].tool_calls[0])
+"""
+    config = QuarryConfig(config_version=2, safety_limits=SafetyLimits(rule_timeout=None))
+    policy = compile_policy(source, runtime_config=config)
+    if restored:
+        policy = load_compiled_policy(policy.to_bytes(), runtime_config=config)
+    data = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "one",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": r'{"q":"other","z":"other","q":"\u00e9 \ud83d\ude00 needle"}',
+                        },
+                    },
+                ],
+            },
+        ]
+    }
+    result = policy.scan(data)
+    assert result.is_complete, result.evaluation_errors
+    assert result.rule_matches == ["Read"]
