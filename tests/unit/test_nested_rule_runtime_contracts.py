@@ -3,6 +3,7 @@
 
 """Nested calls retain selected messages, source clocks and model-input failures."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -268,3 +269,22 @@ condition:
             result = prepared.scan(CHAT)
             assert result.is_complete, result.evaluation_errors
             assert result.rule_matches == expected
+
+
+def test_saved_policy_uses_linked_source_hash(tmp_path):
+    entry = 'rule "Entry" imports: helper = "Helper" condition: helper(messages)'
+    helper_path = tmp_path / "helper.rule"
+    config = QuarryConfig(config_version=2, quarry_rules_paths=(helper_path,))
+    hashes = []
+    for text, expected in [("needle", ["Entry"]), ("other text", [])]:
+        helper_path.write_text(f'rule "Helper" condition: user_said("{text}")', encoding="utf-8")
+        policy = compile_policy(entry, entry_rule="Entry", runtime_config=config)
+        wire = policy.to_bytes()
+        hashes.append(json.loads(wire)["source_sha256"])
+        restored = load_compiled_policy(wire)
+        assert restored.to_bytes() == wire
+        for prepared in (policy, restored):
+            result = prepared.scan(CHAT)
+            assert result.is_complete, result.evaluation_errors
+            assert result.rule_matches == expected
+    assert hashes[0] != hashes[1]

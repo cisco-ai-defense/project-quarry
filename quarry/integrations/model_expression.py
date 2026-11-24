@@ -1102,14 +1102,29 @@ def _span_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
     return start, end
 
 
+def _containment_ends(span: Span) -> tuple[_SpanPoint, _SpanPoint]:
+    call = span._source
+    position = span.position
+    if isinstance(call, ToolCall) and position == span.end_position:
+        key = source_key(None)
+        if span._whole_call:
+            return (key, position, (-1, 0, ""), 0, 0), (key, position, (1, 0, ""), 0, math.inf)
+        if span.field.startswith("arguments.") and span.end_field.startswith("arguments."):
+            low, high = call._argument_bounds(span.field, span.start, span.end_field, span.end)
+            part = field_part(call, "raw_arguments", None)
+            found_start, found_end = span._found or (0, math.inf)
+            return (key, position, part, low, found_start), (key, position, part, high, found_end)
+    return _span_ends(span)
+
+
 def _cover_index(spans: Iterable[Span]) -> tuple[list[_SpanPoint], list[_SpanPoint]]:
-    ranges = sorted(_span_ends(span) for span in spans)
+    ranges = sorted(_containment_ends(span) for span in spans)
     return [start for start, _ in ranges], list(accumulate((end for _, end in ranges), max))
 
 
 def _is_covered(index: tuple[list[_SpanPoint], list[_SpanPoint]], inner: Span) -> bool:
     starts, furthest = index
-    start, end = _span_ends(inner)
+    start, end = _containment_ends(inner)
     position = bisect_right(starts, start) - 1
     return position >= 0 and furthest[position] >= end
 
@@ -1155,6 +1170,7 @@ def _view_spans(transcript: Messages, value: Any) -> CollectionResult[Span]:
                 len(texts[-1][1]),
                 source_field=texts[0][0],
                 end_source_field=texts[-1][0],
+                _whole_call=True,
                 place_position=positions[id(view)],
             )
             places.append(span._bind_to_source(view))
