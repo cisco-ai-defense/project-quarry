@@ -2855,12 +2855,11 @@ def test_reference_requires_compilation_to_verify_a_configured_model(tmp_path):
     ]
 
 
-async def test_the_server_warns_at_startup_about_each_model_without_credentials(tmp_path):
-    """A host learns at startup, before any scan, which configured models cannot be called.
+async def test_the_server_starts_without_checking_unused_model_credentials(tmp_path):
+    """Unused aliases need no credentials for startup or local tools.
 
-    The server names each alias and its missing variable on stderr and still starts, so tools
-    that do not use the model keep working. It writes nothing to stdout, where the host
-    expects JSON-RPC, and it exits normally when its input ends.
+    Missing credentials are checked only when preparing a rule that uses that alias.
+    Startup leaves stdout reserved for JSON-RPC and performs no eager model diagnostics.
     """
 
     pytest.importorskip("mcp")
@@ -2900,11 +2899,10 @@ async def test_the_server_warns_at_startup_about_each_model_without_credentials(
             await server.wait()
 
     assert server.returncode == 0
-    assert "Inference model 'judge' needs OPENAI_API_KEY in the environment" in stderr.decode()
-    assert (
-        "Inference model 'reviewer' needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"
-        in stderr.decode()
-    )
+    assert "Inference model 'judge'" not in stderr.decode()
+    assert "Inference model 'reviewer'" not in stderr.decode()
+    assert "OPENAI_API_KEY" not in stderr.decode()
+    assert "ANTHROPIC_API_KEY" not in stderr.decode()
     assert stdout == b""
 
 
