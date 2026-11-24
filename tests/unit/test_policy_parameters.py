@@ -27,12 +27,15 @@ import asyncio
 import json
 import re
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from quarry.config import QuarryConfig
+from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.policy import compile_policy
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner
@@ -472,11 +475,32 @@ def test_a_raising_timeout_contract_is_kept_and_a_zero_deadline_bounds_the_batch
 _SLOW_GATE = 'rule "Batch"\ncondition:\n    model("judge").score(messages, "c") >= 0.5\n'
 
 
-async def test_a_batch_keeps_results_finished_before_its_deadline(tmp_path) -> None:
-    results = await _policy(tmp_path, _SLOW_GATE).scan_many_async(
-        [_user("fast"), _user("slow"), _user("fast")], deadline_seconds=0.2
+async def test_a_batch_keeps_results_finished_before_its_deadline(tmp_path, monkeypatch) -> None:
+    config, backend, adapter, _ = _runtime(tmp_path)
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    now = timer.time.monotonic()
+
+    def clock():
+        return now
+
+    async def score(_config, messages, *, timeout=None):
+        nonlocal now
+        adapter.calls += 1
+        if any(message.get("content") == "slow" for message in messages):
+            deadline = timer.current_evaluation_deadline()
+            assert deadline is not None
+            now = deadline.expires_at
+        return 0.8
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(adapter, "score", score)
+
+    results = await policy.scan_many_async(
+        [_user("fast"), _user("slow"), _user("fast")], deadline_seconds=10
     )
 
+    assert adapter.calls == 2
     assert [(r.rule_matches, r.completion_state, r.timed_out_rules) for r in results] == [
         (["Batch"], "complete", None),
         ([], "incomplete", ["Batch"]),
