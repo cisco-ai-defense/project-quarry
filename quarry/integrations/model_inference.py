@@ -4697,33 +4697,6 @@ class ModelInferenceBackend:
         if budget <= 0:
             raise too_large("Split context leaves no room within max_input_tokens")
 
-        async def cut(ordinal: int, start: int, end: int, tokens: int) -> list[_ChunkPart]:
-            """Cut ``[start, end)`` of one message until every range fits the budget.
-
-            Ranges have equal length, end at the last whitespace before their cut point,
-            and are sized from the text they cover, never from a neighbouring range. A
-            single character cannot be cut, so it stays whole for ``confirm`` to judge.
-            """
-
-            if tokens <= budget or end - start == 1:
-                return [_ChunkPart(ordinal, (start, end), tokens)]
-            text = text_of(ordinal)
-            parts = min(end - start, math.ceil(tokens / (0.9 * budget)))
-            bounds = [start]
-            for index in range(1, parts):
-                target = start + (end - start) * index // parts
-                boundary = max(text.rfind(space, bounds[-1] + 1, target + 1) for space in " \n\t")
-                bounds.append(boundary if boundary > bounds[-1] else target)
-            bounds.append(end)
-            ranges = list(zip(bounds, bounds[1:], strict=False))
-            counts = await gather_split_tasks(
-                count_piece(ordinal, low, high) for low, high in ranges
-            )
-            nested = await gather_split_tasks(
-                cut(ordinal, low, high, n) for (low, high), n in zip(ranges, counts, strict=True)
-            )
-            return [part for parts_of in nested for part in parts_of]
-
         async def parts_of(ordinal: int, tokens: int) -> list[_ChunkPart]:
             if tokens <= budget:
                 return [_ChunkPart(ordinal, None, tokens)]
@@ -4737,7 +4710,9 @@ class ModelInferenceBackend:
                 # only the exact count of its chunk in ``confirm`` can reject it.
                 return [_ChunkPart(ordinal, None, tokens)]
             await range_index(ordinal)
-            return await cut(ordinal, 0, len(message.content), tokens)
+            return await _cut_message_ranges(
+                ordinal, 0, len(message.content), tokens, budget, text_of, count_piece
+            )
 
         split_messages = await gather_split_tasks(
             parts_of(ordinal, tokens) for ordinal, tokens in zip(body, message_tokens, strict=True)
@@ -5063,3 +5038,32 @@ class ModelInferenceBackend:
                 )
                 for positions in chunks
             ]
+
+
+async def _cut_message_ranges(
+    ordinal: int, start: int, end: int, tokens: int, budget: int, text_of, count_piece
+) -> list[_ChunkPart]:
+    """Cut ``[start, end)`` of one message until every range fits the budget.
+
+    Ranges have equal length, end at the last whitespace before their cut point,
+    and are sized from the text they cover, never from a neighbouring range. A
+    single character cannot be cut, so it stays whole for ``confirm`` to judge.
+    """
+
+    if tokens <= budget or end - start == 1:
+        return [_ChunkPart(ordinal, (start, end), tokens)]
+    text = text_of(ordinal)
+    parts = min(end - start, math.ceil(tokens / (0.9 * budget)))
+    bounds = [start]
+    for index in range(1, parts):
+        target = start + (end - start) * index // parts
+        boundary = max(text.rfind(space, bounds[-1] + 1, target + 1) for space in " \n\t")
+        bounds.append(boundary if boundary > bounds[-1] else target)
+    bounds.append(end)
+    ranges = list(zip(bounds, bounds[1:], strict=False))
+    counts = await gather_split_tasks(count_piece(ordinal, low, high) for low, high in ranges)
+    nested = await gather_split_tasks(
+        _cut_message_ranges(ordinal, low, high, n, budget, text_of, count_piece)
+        for (low, high), n in zip(ranges, counts, strict=True)
+    )
+    return [part for parts_of in nested for part in parts_of]

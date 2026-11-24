@@ -1735,6 +1735,9 @@ def _same_message_variant(left: Message, right: Message) -> bool:
     )
 
 
+_SELF_MESSAGE_ROOT = object()
+
+
 @dsl_surface(
     name="messages",
     public_type="collection<message>",
@@ -1763,8 +1766,8 @@ class Messages(Sequence[MessageType]):
     )
 
     __slots__ = (
-        "_root",
-        "_source_root",
+        "_root_owner",
+        "_source_root_owner",
         "_items",
         "_ordinals",
         "_ordinal_set",
@@ -1809,6 +1812,30 @@ class Messages(Sequence[MessageType]):
         self._origins: tuple[Origin | None, ...] = ()
         self._positions: tuple[int, ...] = ()
         self._sealed = True
+
+    @property
+    def _root(self) -> Messages:
+        """Resolve the canonical root without making a root own itself."""
+
+        owner = self._root_owner
+        return self if owner is None else owner
+
+    @_root.setter
+    def _root(self, value: Messages) -> None:
+        object.__setattr__(self, "_root_owner", None if value is self else value)
+
+    @property
+    def _source_root(self) -> Messages | None:
+        """Keep absent and self-owned source roots distinct without a self-cycle."""
+
+        owner = self._source_root_owner
+        return self if owner is _SELF_MESSAGE_ROOT else cast("Messages | None", owner)
+
+    @_source_root.setter
+    def _source_root(self, value: Messages | None) -> None:
+        object.__setattr__(
+            self, "_source_root_owner", _SELF_MESSAGE_ROOT if value is self else value
+        )
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Reject changes after the collection graph has been constructed."""

@@ -1530,6 +1530,23 @@ def _record_check(run: _Run, atom_id: str, where, value: bool, oracle) -> None:
     _record(run, atom_id, where, value, check=True, evidence=evidence)
 
 
+def _visit_tool_body_layout(formula, path, specs, leaves, indices, orders):
+    match formula:
+        case T.Atom(name):
+            indices[path] = len(leaves)
+            leaves.append(name)
+            return specs[name].cost.rank
+        case T.Not(child):
+            return _visit_tool_body_layout(child, (*path, 0), specs, leaves, indices, orders)
+        case T.And(left, right) | T.Or(left, right) | T.Implies(left, right):
+            left_cost = _visit_tool_body_layout(left, (*path, 0), specs, leaves, indices, orders)
+            right_cost = _visit_tool_body_layout(right, (*path, 1), specs, leaves, indices, orders)
+            orders[path] = (0, 1) if left_cost <= right_cost else (1, 0)
+            return min(left_cost, right_cost)
+        case _:
+            return -1
+
+
 def _tool_body_layout(body, specs):
     """Index authored leaves and choose cheap-first order in one formula walk."""
 
@@ -1537,23 +1554,7 @@ def _tool_body_layout(body, specs):
     indices = {}
     orders = {}
 
-    def visit(formula, path):
-        match formula:
-            case T.Atom(name):
-                indices[path] = len(leaves)
-                leaves.append(name)
-                return specs[name].cost.rank
-            case T.Not(child):
-                return visit(child, (*path, 0))
-            case T.And(left, right) | T.Or(left, right) | T.Implies(left, right):
-                left_cost = visit(left, (*path, 0))
-                right_cost = visit(right, (*path, 1))
-                orders[path] = (0, 1) if left_cost <= right_cost else (1, 0)
-                return min(left_cost, right_cost)
-            case _:
-                return -1
-
-    visit(body, ())
+    _visit_tool_body_layout(body, (), specs, leaves, indices, orders)
     return leaves, indices, orders
 
 
@@ -1575,73 +1576,84 @@ def _skipped_tool_body_evaluations(plan, specs):
     ]
 
 
-async def _eval_tool_body_async(plan, run: _Run, oracle, tool, layout):
+async def _tool_body_value_async(state, formula, path=()):
+    run, oracle, tool, indices, orders, observed, visited = state
     specs = run.artifact.atom_specs
+    match formula:
+        case T.TrueConst():
+            return True, set()
+        case T.FalseConst():
+            return False, set()
+        case T.Atom(name):
+            if name not in observed:
+                spec = specs[name]
+                if run.is_derived(name):
+                    observed[name] = await _ground_derived_async(run, name, oracle)
+                elif _is_per_tool_static(spec):
+                    grounded = await oracle.ground_tool_async(spec, tool, run.binding)
+                    observed[name] = grounded.value
+                else:
+                    observed[name] = await oracle.value_async(spec, BOOT, run.binding)
+                if run.record is not None:
+                    # A body value is static, so it is kept without a position.
+                    run.record.add(name, None, observed[name], run.origin)
+            occurrence = indices[path]
+            visited[occurrence] = observed[name]
+            return observed[name], {occurrence}
+        case T.Not(child):
+            result, proof = await _tool_body_value_async(state, child, (*path, 0))
+            return not result, proof
+        case T.And():
+            children = (formula.left, formula.right)
+            first, second = orders[path]
+            first_value, first_proof = await _tool_body_value_async(
+                state, children[first], (*path, first)
+            )
+            if not first_value:
+                return False, first_proof
+            second_value, second_proof = await _tool_body_value_async(
+                state, children[second], (*path, second)
+            )
+            if second_value:
+                first_proof.update(second_proof)
+                return True, first_proof
+            return False, second_proof
+        case T.Or():
+            children = (formula.left, formula.right)
+            first, second = orders[path]
+            first_value, first_proof = await _tool_body_value_async(
+                state, children[first], (*path, first)
+            )
+            if first_value:
+                return True, first_proof
+            second_value, second_proof = await _tool_body_value_async(
+                state, children[second], (*path, second)
+            )
+            if second_value:
+                return True, second_proof
+            first_proof.update(second_proof)
+            return False, first_proof
+        case T.Implies(left, right):
+            left_value, left_proof = await _tool_body_value_async(state, left, (*path, 0))
+            if not left_value:
+                return True, left_proof
+            right_value, right_proof = await _tool_body_value_async(state, right, (*path, 1))
+            if right_value:
+                return True, right_proof
+            left_proof.update(right_proof)
+            return False, left_proof
+        case _:
+            raise UnsupportedExecution("non-Boolean tool quantifier body")
+
+
+async def _eval_tool_body_async(plan, run: _Run, oracle, tool, layout):
     body = plan.body
     leaves, indices, orders = layout
     observed: dict[str, bool] = {}
     visited: dict[int, bool] = {}
 
-    async def value(formula, path=()):
-        match formula:
-            case T.TrueConst():
-                return True, set()
-            case T.FalseConst():
-                return False, set()
-            case T.Atom(name):
-                if name not in observed:
-                    spec = specs[name]
-                    if run.is_derived(name):
-                        observed[name] = await _ground_derived_async(run, name, oracle)
-                    elif _is_per_tool_static(spec):
-                        grounded = await oracle.ground_tool_async(spec, tool, run.binding)
-                        observed[name] = grounded.value
-                    else:
-                        observed[name] = await oracle.value_async(spec, BOOT, run.binding)
-                    if run.record is not None:
-                        # A body value is static, so it is kept without a position.
-                        run.record.add(name, None, observed[name], run.origin)
-                occurrence = indices[path]
-                visited[occurrence] = observed[name]
-                return observed[name], {occurrence}
-            case T.Not(child):
-                result, proof = await value(child, (*path, 0))
-                return not result, proof
-            case T.And():
-                children = (formula.left, formula.right)
-                first, second = orders[path]
-                first_value, first_proof = await value(children[first], (*path, first))
-                if not first_value:
-                    return False, first_proof
-                second_value, second_proof = await value(children[second], (*path, second))
-                if second_value:
-                    first_proof.update(second_proof)
-                    return True, first_proof
-                return False, second_proof
-            case T.Or():
-                children = (formula.left, formula.right)
-                first, second = orders[path]
-                first_value, first_proof = await value(children[first], (*path, first))
-                if first_value:
-                    return True, first_proof
-                second_value, second_proof = await value(children[second], (*path, second))
-                if second_value:
-                    return True, second_proof
-                first_proof.update(second_proof)
-                return False, first_proof
-            case T.Implies(left, right):
-                left_value, left_proof = await value(left, (*path, 0))
-                if not left_value:
-                    return True, left_proof
-                right_value, right_proof = await value(right, (*path, 1))
-                if right_value:
-                    return True, right_proof
-                left_proof.update(right_proof)
-                return False, left_proof
-            case _:
-                raise UnsupportedExecution("non-Boolean tool quantifier body")
-
-    matched, proof_occurrences = await value(body)
+    state = (run, oracle, tool, indices, orders, observed, visited)
+    matched, proof_occurrences = await _tool_body_value_async(state, body)
     evaluations = [
         AtomEvaluation(
             atom_id=atom_id,

@@ -707,7 +707,12 @@ class AsyncFunctionCache:
                 # A caller whose own deadline has passed does not start the call again.
                 raise_if_evaluation_expired()
             finally:
-                await self._leave(pending)
+                try:
+                    await self._leave(pending)
+                finally:
+                    # A shared failure retains this frame through its traceback.
+                    # Do not let that frame own the future holding the same failure.
+                    pending = value = error = None
 
     def response_reader(self, key: bytes) -> ResponseReader:
         """Read one model reply with this scan's explicit acceptance lifetime."""
@@ -767,13 +772,10 @@ class AsyncFunctionCache:
                     "the shared call was cancelled before it finished"
                 )
             else:
-                try:
-                    result = task.result()
-                except BaseException as exc:
-                    result = None
-                    failure = exc
-                else:
-                    failure = None
+                # Reading an exception avoids adding this completion callback's
+                # frame (and its pending future) to the shared traceback.
+                failure = task.exception()
+                result = task.result() if failure is None else None
 
             try:
                 with self._lock:
@@ -835,16 +837,19 @@ class AsyncFunctionCache:
         deadline = current_evaluation_deadline()
         remaining = remaining_evaluation_time()
         result = asyncio.wrap_future(pending.future)
-        if remaining is None:
-            return await result
-        timeout = asyncio.timeout(remaining)
         try:
-            async with timeout:
+            if remaining is None:
                 return await result
-        except TimeoutError as exc:
-            if timeout.expired() and deadline is not None:
-                raise QuarryTimeoutError(deadline.error_message) from exc
-            raise
+            timeout = asyncio.timeout(remaining)
+            try:
+                async with timeout:
+                    return await result
+            except TimeoutError as exc:
+                if timeout.expired() and deadline is not None:
+                    raise QuarryTimeoutError(deadline.error_message) from exc
+                raise
+        finally:
+            del pending, result
 
 
 async def call_async_or_sync(func: Callable, *args, **kwargs) -> Any:

@@ -33,3 +33,17 @@ Worker generations drain before replacement. A forked child starts a fresh worke
 does not acquire inherited worker locks. Ordinary transferred exceptions retain their
 identity, cause, and notes. Nonstandard `BaseException` exits are translated into bounded
 runtime failures at the loop boundary.
+
+Completed tool-quantifier evaluations and recursive token splitting release their local
+callbacks after their owned work joins, including failure and cancellation paths. Message
+collections preserve canonical root identity without storing strong references to themselves;
+a live derived view still owns its source until the view is released. Shared cache failures
+keep the same exception available to every waiter, while finished wait frames release their
+references to the futures carrying that failure. These changes do not alter verdicts, request
+counts, cache acceptance or prepared-policy versions.
+
+This is not a universal reference-count-only lifetime guarantee. Native tool calls and their
+responses retain their bidirectional links, and a host retaining an exception may retain its
+traceback. Such graphs can require Python's cyclic collector after their external owners are
+released. Completed scan contexts, plain message roots and joined split callbacks do not need
+those cycles to remain alive.
