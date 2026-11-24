@@ -21,6 +21,7 @@ from functools import partial
 from typing import Any, TypeVar
 
 from quarry.engine.dispatch import _DispatchQueue, install_dispatch
+from quarry.engine.local_work import current_local_work, local_work_scope
 
 T = TypeVar("T")
 
@@ -301,19 +302,39 @@ async def run_engine(factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
         del factory, bridge, context
 
 
+async def _unmetered_host(factory: Callable[[], Any]) -> Any:
+    value = None
+    try:
+        with local_work_scope(None):
+            value = factory()
+            return await value if inspect.isawaitable(value) else value
+    finally:
+        del factory, value
+
+
 async def call_host(factory: Callable[[], Any]) -> Any:
     """Invoke and await an extension on the loop/thread that submitted its scan."""
     bridge = None
+    context = None
     try:
         session = _session.get()
         if session is None or asyncio.get_running_loop() is session.host_loop:
+            if current_local_work() is not None:
+                return await _unmetered_host(factory)
             value = factory()
             return await value if inspect.isawaitable(value) else value
-        bridge = _Bridge(session.host_loop, factory, copy_context())
+        if current_local_work() is None:
+            context = copy_context()
+        else:
+            # A provider callback is host work. Keep the other copied contexts
+            # (rule/read ownership, deadlines), without charging its internals.
+            with local_work_scope(None):
+                context = copy_context()
+        bridge = _Bridge(session.host_loop, factory, context)
         session.dispatch.submit(bridge.start)
         return await bridge.wait()
     finally:
-        del factory, bridge
+        del factory, bridge, context
 
 
 def _sync_value(factory):

@@ -8,6 +8,7 @@ from __future__ import annotations
 from weakref import ref
 
 from quarry.cache.message_values import MAX_MESSAGE_VALUES, MessageValueBudget
+from quarry.engine.local_work import ensure_local_work_authoritative
 from quarry.integrations.read_usage import replay_read_usage
 from quarry.safety.timer import raise_if_evaluation_expired
 
@@ -31,6 +32,7 @@ class ImmediateValueMemo:
         if self.closed:
             raise RuntimeError("immediate value frame has been released")
         raise_if_evaluation_expired()
+        ensure_local_work_authoritative()
 
     def _drop(self, table, key):
         entry = table.pop(key)
@@ -50,6 +52,7 @@ class ImmediateValueMemo:
             self._require_open()
         try:
             raise_if_evaluation_expired()
+            ensure_local_work_authoritative()
         except BaseException:
             lease.close()
             raise

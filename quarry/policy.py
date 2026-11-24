@@ -40,6 +40,7 @@ from quarry.integrations.read_results import collect_read_reports, transfer_resu
 from quarry.integrations.resources import requirements_from_artifact
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
+from quarry.safety.local_work_reporting import aggregate_local_match_work
 from quarry.safety.timer import (
     EvaluationDeadline,
     QuarryTimeoutError,
@@ -544,6 +545,15 @@ class CompiledPolicy:
         # one bounded time and model-call budget per conversation.
         finishers: list[tuple[int, _DeferredEvidence]] = []
         deferred: list[_DeferredEvidence] = []
+
+        def close_deferred() -> None:
+            # Closing refreshes the reports attached to completed conversations.
+            # Aggregate timeout snapshots only after those owners are finalized.
+            for finish in deferred:
+                finish.close()
+            deferred.clear()
+            finishers.clear()
+
         try:
             with absolute_scan_deadline(batch_deadline):
                 for index, conversation in enumerate(conversations):
@@ -553,6 +563,7 @@ class CompiledPolicy:
                             try:
                                 raise_if_evaluation_expired()
                             except QuarryTimeoutError as error:
+                                close_deferred()
                                 error.with_scan_result(
                                     self._aggregate_timeout_result(results, self._timeout_result())
                                 )
@@ -582,6 +593,7 @@ class CompiledPolicy:
                             deferred_evidence=deferred,
                         )
                     except QuarryTimeoutError as error:
+                        close_deferred()
                         current = error.scan_result or self._timeout_result()
                         error.with_scan_result(self._aggregate_timeout_result(results, current))
                         raise
@@ -593,6 +605,7 @@ class CompiledPolicy:
                             try:
                                 raise_if_evaluation_expired()
                             except QuarryTimeoutError as error:
+                                close_deferred()
                                 error.with_scan_result(
                                     self._aggregate_timeout_result(results, timeout)
                                 )
@@ -625,10 +638,7 @@ class CompiledPolicy:
             return [self._attach_provenance(result, digest, evidence) for result in results]
         finally:
             # Includes owners produced immediately before a post-await timeout or failure.
-            for finish in deferred:
-                finish.close()
-            deferred.clear()
-            finishers.clear()
+            close_deferred()
 
     def _timeout_result(self, result: ScanResult | None = None) -> ScanResult:
         """Represent a timed-out item while retaining its already observed telemetry."""
@@ -648,6 +658,7 @@ class CompiledPolicy:
                 if result is not None
                 else empty_model_usage()
             ),
+            local_match_work=result.local_match_work if result is not None else None,
         )
 
     def _aggregate_timeout_result(
@@ -673,6 +684,9 @@ class CompiledPolicy:
             timed_out_rules=[self._rule_name],
             rule_timings=averaged_timings or None,
             model_usage=merge_model_usage([result.model_usage for result in observed]),
+            local_match_work=aggregate_local_match_work(
+                result.local_match_work for result in observed
+            ),
         )
 
     def _attach_provenance(
