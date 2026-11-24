@@ -111,11 +111,8 @@ def test_runtime_before_input_span_counts_rejects_the_saved_policy(monkeypatch):
         load_compiled_policy(wire)
 
 
-@pytest.mark.parametrize("quantifier,predicate", [("any", "true"), ("all", "false")])
 @pytest.mark.parametrize("enforce", [False, True])
-def test_span_quantifier_checks_the_combined_input_before_evaluating(
-    quantifier, predicate, enforce
-):
+def test_materialized_span_union_checks_the_combined_size(enforce):
     from quarry.safety.limits import SafetyLimits
 
     config = QuarryConfig(
@@ -124,7 +121,7 @@ def test_span_quantifier_checks_the_combined_input_before_evaluating(
     )
     source = (
         'rule "Read" strings: $a="a" $b="b" condition: '
-        f"{quantifier} s in union($a.spans(messages), $b.spans(messages)) where {predicate}"
+        "len(union($a.spans(messages), $b.spans(messages))) == 4"
     )
     policy = compile_policy(source, runtime_config=config)
     result = policy.scan({"messages": [{"role": "user", "content": "aabb"}]})
@@ -134,4 +131,4 @@ def test_span_quantifier_checks_the_combined_input_before_evaluating(
         assert "max_comprehension_size=2" in result.evaluation_errors["Read"]
     else:
         assert result.is_complete
-        assert result.rule_matches == (["Read"] if quantifier == "any" else [])
+        assert result.rule_matches == ["Read"]
