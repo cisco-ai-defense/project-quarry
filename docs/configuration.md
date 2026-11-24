@@ -24,6 +24,13 @@ Quarry sorts discovered rule files and rejects duplicate names. A directory load
 
 The scanner validates and compiles selected rules before it accepts scans. The compiler also applies its own work and state limits to prevent rules with excessive automaton construction cost. A compile failure blocks the candidate rule generation. Input limits and scan deadlines apply when conversations arrive. `max_total_size` measures the aggregate in-memory footprint that validation and canonicalization materialize: each repeated container occurrence is charged separately, while shared immutable scalars may be identity-deduplicated. Use the message, tool-call, and per-item limits alongside it. Breaching an input limit always fails the scan. Keep limits enabled for input you do not control, and call `ScanResult.raise_for_status()` before using matches.
 
+With `enforce_limits: true`, a span `any` or `all` checks its complete input against
+`max_comprehension_size` before evaluating its predicate. The same bound applies to
+direct span sources, filters, `outermost()`, and the distinct result of `union()`;
+combining individually permitted sources cannot bypass it. With limits disabled,
+pattern-derived quantifiers can stream and short-circuit without materializing
+the complete collection. Rule deadlines still apply in either mode.
+
 Raw conversation objects must use exact built-in `dict` and `list` containers and exact string object keys. Mapping wrappers and container subclasses are rejected without invoking their accessors. Tool schemas receive JSON type, cycle, depth and aggregate-work validation before canonicalization. An input rejected before scanning has no verdict or conversation digest and is never hashed for exploration. Declared sections are validated only when read by a selected rule; see [inputs](inputs.md).
 
 ## Named text

@@ -1010,21 +1010,26 @@ async def _stream_quantifier_spans(
     children = expression.children
     arguments = (context, event, environment, trace, regex_backend)
     raise_if_evaluation_expired()
-    if kind == "string_spans":
+    # Enabled collection limits apply to the complete input before any predicate
+    # runs, including inputs assembled from individually bounded span sources.
+    # Streaming can short-circuit before discovering an oversized collection, so
+    # retain it only when the host explicitly disables collection enforcement.
+    streaming = not context.limits.enforce_limits
+    if streaming and kind == "string_spans":
         async for span in _pattern_spans(expression, *arguments, ordered=ordered):
             yield span
         return
-    if kind == "span_filter":
+    if streaming and kind == "span_filter":
         async for span in _stream_quantifier_spans(children[0], *arguments, ordered=ordered):
             if await _span_filter_holds(expression, span, *arguments):
                 yield span
         return
-    if kind == "union" and _can_stream_in_order(expression):
+    if streaming and kind == "union" and _can_stream_in_order(expression):
         streams = [_stream_quantifier_spans(child, *arguments, ordered=True) for child in children]
         async for span in _merge_span_streams(streams):
             yield span
         return
-    if kind == "outermost" and _can_stream_in_order(expression):
+    if streaming and kind == "outermost" and _can_stream_in_order(expression):
         spans = _stream_quantifier_spans(children[0], *arguments, ordered=True)
         async for span in _outermost_stream(spans):
             yield span

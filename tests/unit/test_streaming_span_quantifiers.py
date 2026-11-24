@@ -39,7 +39,10 @@ def test_quantifiers_stream_past_the_collection_limit(
     monkeypatch, restored, source, quantifier, comparison, matched, exhausted
 ):
     config = QuarryConfig(
-        config_version=2, safety_limits=SafetyLimits(rule_timeout=None, max_comprehension_size=2)
+        config_version=2,
+        safety_limits=SafetyLimits(
+            rule_timeout=None, max_comprehension_size=2, enforce_limits=False
+        ),
     )
     rule = (
         'rule "Read" strings: $a="a" $b="a" regex condition: '
@@ -84,7 +87,10 @@ def test_materializing_the_same_pattern_spans_exceeds_the_collection_limit():
 @pytest.mark.asyncio
 async def test_pattern_stream_checks_deadline_after_matching(monkeypatch, kind):
     messages = Messages.from_openai([{"role": "user", "content": "aaaa"}])
-    context = SimpleNamespace(conversation=SimpleNamespace(messages=messages))
+    context = SimpleNamespace(
+        conversation=SimpleNamespace(messages=messages),
+        limits=SafetyLimits(enforce_limits=False),
+    )
     matches = E(
         "string_spans", "$a", (E("messages"), E("string_patterns", "0000", (E("literal", "a"),)))
     )
