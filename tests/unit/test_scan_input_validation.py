@@ -813,6 +813,27 @@ def test_argument_preflight_does_not_retain_decoded_trees(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("fail_on_timeout", [False, True])
+def test_conversation_preparation_respects_fail_on_timeout(monkeypatch, fail_on_timeout):
+    scanner = _scanner(
+        'rule "Read"\ncondition: called_tool("lookup")',
+        limits=SafetyLimits(fail_on_timeout=fail_on_timeout),
+    )
+
+    def expired():
+        raise QuarryTimeoutError("Scan deadline exceeded")
+
+    monkeypatch.setattr(canonical_messages, "_raise_if_combine_expired", expired)
+    data = {"messages": [_call("lookup", "c")]}
+    if fail_on_timeout:
+        with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded"):
+            scanner.scan_data(data)
+    else:
+        result = scanner.scan_data(data)
+        assert result.completion_state == "incomplete"
+        assert result.error_category == "timeout"
+
+
+@pytest.mark.parametrize("fail_on_timeout", [False, True])
 def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     monkeypatch, fail_on_timeout: bool
 ) -> None:
