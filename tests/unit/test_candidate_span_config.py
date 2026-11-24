@@ -135,3 +135,46 @@ def test_unchanged_model_identity_has_no_candidate_fields_or_absent_options(tmp_
         "spans": None,
         "complete": None,
     }
+
+
+def test_candidate_aliases_share_a_template_and_override_only_their_channels(tmp_path):
+    doc = mapping(limits={"max_work": 1234})
+    template = doc["models"]["reader"]
+    del template["spans"]["channel"]
+    doc["model_templates"] = {
+        "candidates": template,
+        "bounded": {
+            "extends": "candidates",
+            "spans": {"limits": {"max_parts": 12, "max_ranges_per_channel": 4}},
+        },
+    }
+    doc["models"] = {
+        name: {"extends": "bounded", "spans": {"channel": name}} for name in ("left", "right")
+    }
+
+    config = QuarryConfig.from_mapping(doc, tmp_path, require_rules=False)
+
+    for name in ("left", "right"):
+        assert config.models[name].spans == CandidateSpanConfig(
+            batch="heads",
+            channel=name,
+            settings_digest="0" * 64,
+            limits=CandidateBatchLimits(max_work=1234, max_parts=12, max_ranges_per_channel=4),
+        )
+
+
+@pytest.mark.parametrize(
+    "spans,reason",
+    [
+        ({"batch": "../unregistered"}, "bounded ASCII identifiers"),
+        ({"settings_digest": "bad"}, "invalid candidate request digest"),
+        ({"limits": {"max_parts": 4097}}, "invalid candidate limits"),
+        ({"backend": "candidates", "limits": {"max_spans": 1}}, "max_spans"),
+    ],
+)
+def test_unused_candidate_template_fragments_keep_candidate_validation(tmp_path, spans, reason):
+    doc = mapping()
+    doc["model_templates"] = {"unused": {"spans": spans}}
+
+    with pytest.raises(ConfigurationError, match=reason):
+        QuarryConfig.from_mapping(doc, tmp_path, require_rules=False)
