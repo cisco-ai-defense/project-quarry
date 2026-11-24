@@ -332,6 +332,22 @@ class TestCLIEdgeCases:
         assert orjson.loads(rows[0]["model_usage"]) == result.model_usage
         assert orjson.loads(rows[0]["models_called"]) == ["judge"]
 
+    def test_csv_keeps_rule_timings_on_their_own_rows(self):
+        names = [f"rule_{index}" for index in range(1_000)]
+        timings = {name: index / 1_000 for index, name in enumerate(names)}
+        timings["unmatched"] = 0.01
+        result = ScanResult(Path("conversation.json"), names, 1.0, rule_timings=timings)
+
+        csv_output = format_results([result], "csv")
+        rows = list(csv.DictReader(StringIO(csv_output)))
+        assert [row["rule"] for row in rows] == names
+        assert all(
+            orjson.loads(row["timings"]) == {"total_seconds": 1.0, "rules": {name: timings[name]}}
+            for row, name in zip(rows, names, strict=True)
+        )
+        assert len(csv_output) < 250_000
+        assert orjson.loads(format_results([result], "json"))[0]["timings"]["rules"] == timings
+
     def test_mixed_directory_timeout_takes_exit_precedence(
         self, tmp_path, temp_config_file, monkeypatch, capsys
     ):

@@ -1915,7 +1915,7 @@ class DSLScanner:
         all_matches = []
         all_outputs = {}
         all_evidence = []
-        usage_reports = []
+        model_usage = ModelUsageLedger()
         total_scan_time = 0.0
         errors = []
         aggregated_timings = {}
@@ -1966,7 +1966,7 @@ class DSLScanner:
                 for rule_name, output in result.outputs.items():
                     all_outputs[f"{label}:{rule_name}"] = output
                 total_scan_time += result.scan_time
-                usage_reports.append(result.model_usage)
+                model_usage.merge(result.model_usage)
 
                 if result.rule_timings:
                     for rule_name, timing in result.rule_timings.items():
@@ -2023,7 +2023,7 @@ class DSLScanner:
                 )
                 if partial is not None:
                     total_scan_time += partial.scan_time
-                    usage_reports.append(partial.model_usage)
+                    model_usage.merge(partial.model_usage)
                     for rule_name, timing in (partial.rule_timings or {}).items():
                         aggregated_timings.setdefault(rule_name, []).append(timing)
                 # An unexpected per-conversation failure is a non-authoritative result; make sure
@@ -2053,7 +2053,7 @@ class DSLScanner:
             rule_timings=avg_timings if avg_timings else None,
             evaluation_warnings=agg_evaluation_warnings or None,
             explanations=all_evidence or None,
-            model_usage=merge_model_usage(usage_reports),
+            model_usage=model_usage.snapshot(),
         )
 
     def scan_file(self, json_path: Path, enable_explain: ExplainLevel = False) -> ScanResult:

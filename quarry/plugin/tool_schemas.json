@@ -1815,8 +1815,6 @@
           "completion_state",
           "failures",
           "timings",
-          "model_usage",
-          "models_called",
           "diagnostics",
           "decision_scores"
         ],

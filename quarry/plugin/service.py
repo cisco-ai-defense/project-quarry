@@ -708,7 +708,7 @@ class QuarryPlugin:
         request_scan_seconds = elapsed_seconds(scan_started)
 
         provenance = results[0]
-        aggregate_usage = merge_model_usage([result.model_usage for result in results])
+        aggregate_usage = merge_model_usage(result.model_usage for result in results)
         response.update(
             {
                 "policy_digest": policy.policy_digest,
@@ -732,6 +732,7 @@ class QuarryPlugin:
                 node_ids=tree.ids,
                 details=verbosity == "full",
                 include_explanations=bool(explain) or verbosity == "full",
+                include_telemetry_details=conversation is not None or verbosity == "full",
             )
             if result.validation_error is not None:
                 report_input = None
@@ -789,6 +790,7 @@ class QuarryPlugin:
         node_ids: Mapping[str | None, str] | None = None,
         details: bool = True,
         include_explanations: bool = True,
+        include_telemetry_details: bool = True,
     ) -> dict[str, Any]:
         """Serialize one fail-closed scan result for either tool mode.
 
@@ -802,14 +804,13 @@ class QuarryPlugin:
         payload: dict[str, Any] = {
             "completion_state": result.completion_state,
             "failures": [failure.to_dict() for failure in result.failures],
-            "timings": {
-                "total_seconds": result.scan_time,
-                "rules": dict(sorted((result.rule_timings or {}).items())),
-            },
-            "model_usage": result.model_usage,
-            "models_called": models_called(result.model_usage),
+            "timings": {"total_seconds": result.scan_time},
             "diagnostics": self._scan_diagnostics(result),
         }
+        if include_telemetry_details:
+            payload["timings"]["rules"] = dict(sorted((result.rule_timings or {}).items()))
+            payload["model_usage"] = result.model_usage
+            payload["models_called"] = models_called(result.model_usage)
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,

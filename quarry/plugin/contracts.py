@@ -353,8 +353,8 @@ class ScanEntry(TypedDict):
     completion_state: CompletionState
     failures: list[FailureRecord]
     timings: TimingSummary
-    model_usage: ModelUsageSummary
-    models_called: ModelsCalled
+    model_usage: NotRequired[ModelUsageSummary]
+    models_called: NotRequired[ModelsCalled]
     diagnostics: list[Diagnostic]
     decision_scores: dict[str, JsonNumber | None]
     matched: NotRequired[bool]

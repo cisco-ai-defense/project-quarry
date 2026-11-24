@@ -550,7 +550,7 @@ class CompiledPolicy:
             scan_time=add_durations(*(result.scan_time for result in observed)),
             timed_out_rules=[self._rule_name],
             rule_timings=averaged_timings or None,
-            model_usage=merge_model_usage([result.model_usage for result in observed]),
+            model_usage=merge_model_usage(result.model_usage for result in observed),
         )
 
     def _attach_provenance(

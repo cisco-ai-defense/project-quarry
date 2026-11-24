@@ -47,7 +47,8 @@ from quarry.plugin.service import (
 )
 from quarry.policy import bind_prepared_policy
 from quarry.safety.limits import SafetyLimits
-from quarry.types.exceptions import ConfigurationError
+from quarry.safety.timer import QuarryTimeoutError
+from quarry.types.exceptions import ConfigurationError, LLMError
 from tests.conftest import EMAIL_SPAN_RULE, EmailSpanAdapter, email_span_models
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -439,8 +440,9 @@ async def test_local_scan_telemetry_is_present_in_single_and_batch_modes():
     assert batch["model_usage"] == {"calls": 0, "records": [], "truncated": False}
     assert batch["models_called"] == []
     assert all(
-        item["model_usage"] == {"calls": 0, "records": [], "truncated": False}
-        and item["models_called"] == []
+        "model_usage" not in item
+        and "models_called" not in item
+        and set(item["timings"]) == {"total_seconds"}
         for item in batch["results"]
     )
 
@@ -461,6 +463,8 @@ async def test_model_usage_counts_aliases_operations_and_cached_calls_once(tmp_p
     batch = await plugin.scan(
         rule_text=rule,
         conversations=[conversation, conversation],
+        verbosity="full",
+        explain=False,
     )
 
     assert batch["model_usage"] == {
@@ -474,6 +478,7 @@ async def test_model_usage_counts_aliases_operations_and_cached_calls_once(tmp_p
     assert batch["models_called"] == ["fail", "pass"]
     assert [item["model_usage"]["calls"] for item in batch["results"]] == [2, 0]
     assert batch["results"][1]["models_called"] == []
+    assert all(item["timings"]["rules"] for item in batch["results"])
 
 
 async def test_only_the_scan_that_starts_a_shared_call_counts_it(tmp_path, monkeypatch):
@@ -522,6 +527,63 @@ async def test_only_the_scan_that_starts_a_shared_call_counts_it(tmp_path, monke
     }
 
 
+async def test_timed_out_scan_marks_its_late_shared_retry_as_partial(tmp_path, monkeypatch):
+    class RetryAdapter(_SharedScoreAdapter):
+        async def score(self, _config, _messages, *, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await self.release.wait()
+                raise LLMError("Synthetic retry", {"code": "connection"})
+            return 0.8
+
+    adapter = RetryAdapter()
+    plugin = _plugin(
+        tmp_path, monkeypatch, adapter, {"judge": {**SCORE_MODEL, "model": "judge-v1"}}
+    )
+    arguments = {
+        "rule_text": _rule('model("judge").score(messages, "shared retry") > 0.5'),
+        "conversation": _users("synthetic retry sample"),
+        "explain": False,
+    }
+    owner_timed_out = asyncio.Event()
+    joined = asyncio.Event()
+    original_wait = result_cache._wait
+    waits = 0
+
+    async def wait(pending):
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            await owner_timed_out.wait()
+            raise QuarryTimeoutError("Synthetic owner deadline")
+        joined.set()
+        return await original_wait(pending)
+
+    monkeypatch.setattr(result_cache, "_wait", wait)
+
+    async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+        owner = tasks.create_task(plugin.scan(**arguments))
+        await adapter.started.wait()
+        waiter = tasks.create_task(plugin.scan(**arguments))
+        await joined.wait()
+        owner_timed_out.set()
+        owner_result = await owner
+        assert adapter.calls == 1
+        adapter.release.set()
+        waiter_result = await waiter
+
+    assert adapter.calls == 2
+    assert owner_result["completion_state"] == "incomplete"
+    assert owner_result["model_usage"] == {
+        "calls": 1,
+        "records": [{"model": "judge", "operation": "score", "calls": 1}],
+        "truncated": True,
+    }
+    assert waiter_result["completion_state"] == "complete"
+    assert waiter_result["model_usage"] == {"calls": 0, "records": [], "truncated": False}
+
+
 async def test_deferred_evidence_model_call_is_included_in_usage(tmp_path, monkeypatch):
     plugin = _plugin(
         tmp_path,
@@ -566,7 +628,8 @@ async def test_compact_batch_keeps_verdicts_and_full_restores_details():
         return {
             key: value
             for key, value in item.items()
-            if key not in {"decision_path", "explanations", "timings"}
+            if key
+            not in {"decision_path", "explanations", "timings", "model_usage", "models_called"}
         }
 
     assert [verdict(item) for item in compact["results"]] == [
@@ -3151,13 +3214,15 @@ async def test_a_model_call_that_cannot_be_sent_fails_the_stdio_scan_at_once(tmp
     assert after_exit == b""
 
 
-async def test_a_hundred_conversation_batch_stays_within_response_budget(monkeypatch):
+@pytest.mark.parametrize("call_model", [False, True])
+async def test_a_hundred_conversation_batch_stays_within_response_budget(
+    tmp_path, monkeypatch, call_model
+):
     import tiktoken
 
     from quarry.plugin import server as plugin_server
 
     service = QuarryPlugin(QuarryConfig(safety_limits=SafetyLimits(rule_timeout=None)))
-    monkeypatch.setattr(plugin_server, "_service", service)
     rule = _rule('any call in tool_calls where call.arguments.task contains "review"')
     conversations = [
         {
@@ -3189,6 +3254,21 @@ async def test_a_hundred_conversation_batch_stays_within_response_budget(monkeyp
         }
         for index in range(100)
     ]
+    if call_model:
+        adapter = _CountingScoreAdapter()
+        service = _plugin(
+            tmp_path,
+            monkeypatch,
+            adapter,
+            {"judge": {**SCORE_MODEL, "model": "judge-v1"}},
+            llm_rate_limits={"judge-v1": None},
+        )
+        rule = _rule('model("judge").score(messages, "synthetic batch") > 0.5')
+        conversations = [
+            _users(f"{'Send' if index % 2 else 'Keep'} synthetic sample {index}.")
+            for index in range(100)
+        ]
+    monkeypatch.setattr(plugin_server, "_service", service)
 
     result = await plugin_server.mcp.call_tool(
         "quarry_scan",
@@ -3204,6 +3284,12 @@ async def test_a_hundred_conversation_batch_stays_within_response_budget(monkeyp
     assert [item["matched"] for item in response["results"]] == [
         index % 2 == 1 for index in range(100)
     ]
+    assert response["model_usage"]["calls"] == (100 if call_model else 0)
+    if call_model:
+        assert adapter.calls == 100
+    assert all(
+        "model_usage" not in item and "models_called" not in item for item in response["results"]
+    )
     client_text = "".join(block.text for block in result.content if block.type == "text")
     spent = len(tiktoken.get_encoding("cl100k_base").encode(client_text))
     assert spent < 10_000, f"{spent} tokens for a 100-conversation batch scan"

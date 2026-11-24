@@ -221,10 +221,7 @@ def format_results(
         )
 
         for result in results:
-            timing_summary = {
-                "total_seconds": result.scan_time,
-                "rules": dict(sorted((result.rule_timings or {}).items())),
-            }
+            rule_timings = result.rule_timings or {}
             completion_cells = [
                 result.completion_state,
                 result.validation_error or "",
@@ -237,7 +234,8 @@ def format_results(
                 if result.evaluation_warnings
                 else "",
                 orjson.dumps([failure.to_dict() for failure in result.failures]).decode(),
-                orjson.dumps(timing_summary).decode(),
+            ]
+            usage_cells = [
                 orjson.dumps(result.model_usage).decode(),
                 orjson.dumps(models_called(result.model_usage)).decode(),
             ]
@@ -255,6 +253,9 @@ def format_results(
                     output_json = (
                         orjson.dumps(typed_output.to_dict()).decode() if typed_output else ""
                     )
+                    timing = (
+                        {rule_name: rule_timings[rule_name]} if rule_name in rule_timings else {}
+                    )
 
                     writer.writerow(
                         [
@@ -265,6 +266,10 @@ def format_results(
                             evidence_json,
                             output_json,
                             *completion_cells,
+                            orjson.dumps(
+                                {"total_seconds": result.scan_time, "rules": timing}
+                            ).decode(),
+                            *usage_cells,
                         ]
                     )
             else:
@@ -277,6 +282,8 @@ def format_results(
                         "",
                         "",
                         *completion_cells,
+                        orjson.dumps({"total_seconds": result.scan_time, "rules": {}}).decode(),
+                        *usage_cells,
                     ]
                 )
 

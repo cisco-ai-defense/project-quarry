@@ -832,7 +832,8 @@ deferred evidence adds only its own execution time, not time waiting for other b
 concurrent rule durations can overlap. A batch's top-level total is the monotonic elapsed time of
 the whole ordered batch scan. A request that fails before scanning keeps `timings` empty. Durations
 above 31,536,000 seconds saturate at that limit. The CLI JSON report uses the same `timings`,
-`model_usage`, and `models_called` objects. CSV appends deterministic JSON cells with those names.
+`model_usage`, and `models_called` objects. Each CSV row's `timings.rules` contains the row's
+rule timing when available. JSON retains the complete timing map.
 
 `model_usage.calls` counts physical adapter invocations attempted by the scan. Each retry counts;
 an invocation that times out or fails still counts. A completed cache hit and a caller that only
@@ -846,8 +847,12 @@ model content, endpoints, credentials, trace data, pricing, or unnormalized toke
 
 Usage saturates at 1,000,000 calls, 128 aliases, eight operation slots per alias, and 512 records;
 aliases are at most 200 characters. If detail is omitted, invalid, or saturated,
-`model_usage.truncated` is true; telemetry truncation does not make the scan incomplete. A
-local-only or fully cached scan reports zero calls, no records, and no models called.
+`model_usage.truncated` is true. The flag is also true when a scan returns while a model call
+it started can still retry for another scan. The returned snapshot counts the attempts
+observed by then. Telemetry truncation leaves the scan completion state unchanged.
+A local-only or fully cached scan reports zero calls, no records, and no models called.
+Compact batch output reports `model_usage` and `models_called` for the batch and the elapsed
+time for each conversation. Full batch output adds each conversation's usage and rule timings.
 
 Reference and compilation work run outside the MCP event loop. Scanning awaits Quarry's async
 engine directly so transport cancellation reaches the active scan. Conversation size and nesting

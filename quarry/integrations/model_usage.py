@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import sleep as _sleep
 from collections.abc import Awaitable, Callable, Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from time import monotonic
@@ -134,6 +134,14 @@ def model_call_budget(
         yield budget
     finally:
         _current_model_call_budget.reset(token)
+
+
+def track_model_call() -> AbstractContextManager[None]:
+    """Track pending attempts in the scan that owns the provider request."""
+    budget = _current_model_call_budget.get()
+    if budget is None or budget.telemetry is None:
+        return nullcontext()
+    return budget.telemetry.track_call()
 
 
 class ModelUsage:

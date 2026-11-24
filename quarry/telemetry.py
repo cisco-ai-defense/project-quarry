@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Generator, Iterable
+from contextlib import contextmanager
 from threading import Lock
 from time import monotonic
 from typing import Any, Final, Literal
@@ -83,10 +85,11 @@ def empty_model_usage() -> dict[str, Any]:
 class ModelUsageLedger:
     """Collect attempted physical model calls into a bounded deterministic summary."""
 
-    __slots__ = ("_calls", "_records", "_truncated", "_lock")
+    __slots__ = ("_active_calls", "_calls", "_records", "_truncated", "_lock")
 
     def __init__(self) -> None:
         self._lock = Lock()
+        self._active_calls = 0
         self._calls = 0
         self._records: dict[tuple[str, ModelOperation], int] = {}
         self._truncated = False
@@ -141,11 +144,39 @@ class ModelUsageLedger:
         if next_count != previous + charged:
             self._truncated = True
 
-    def mark_truncated(self) -> None:
-        """Record that some diagnostic detail could not be represented."""
-
+    @contextmanager
+    def track_call(self) -> Generator[None]:
+        """Track a logical call that can still add physical attempts."""
         with self._lock:
-            self._truncated = True
+            self._active_calls += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active_calls -= 1
+
+    def merge(self, report: dict[str, Any]) -> None:
+        """Fold a trusted scan summary into the bounded ledger."""
+        with self._lock:
+            represented_calls = 0
+            for record in report.get("records", ()):
+                if type(record) is not dict:
+                    self._truncated = True
+                    continue
+                operation = record.get("operation")
+                if operation not in _PUBLIC_OPERATIONS.values():
+                    self._truncated = True
+                    continue
+                count = record.get("calls")
+                self._record(record.get("model"), operation, count)
+                if type(count) is int and count > 0:
+                    represented_calls += count
+            reported_calls = report.get("calls")
+            if type(reported_calls) is int and reported_calls > represented_calls:
+                self._record("", "score", reported_calls - represented_calls)
+            elif reported_calls != represented_calls:
+                self._truncated = True
+            self._truncated |= report.get("truncated") is True
 
     def snapshot(self) -> dict[str, Any]:
         """Detach a summary while concurrent callers may be starting work."""
@@ -163,44 +194,17 @@ class ModelUsageLedger:
         return {
             "calls": self._calls,
             "records": records,
-            "truncated": self._truncated,
+            "truncated": self._truncated or self._active_calls > 0,
         }
 
 
-def merge_model_usage(reports: list[dict[str, Any]]) -> dict[str, Any]:
+def merge_model_usage(reports: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Merge trusted scan summaries while preserving all public bounds."""
 
     merged = ModelUsageLedger()
-    inherited_truncation = False
     for report in reports:
-        inherited_truncation = inherited_truncation or report.get("truncated") is True
-        represented_calls = 0
-        for record in report.get("records", ()):
-            if type(record) is not dict:
-                inherited_truncation = True
-                continue
-            operation = record.get("operation")
-            if operation not in _PUBLIC_OPERATIONS.values():
-                inherited_truncation = True
-                continue
-            count = record.get("calls")
-            merged.record(
-                record.get("model"),
-                operation,
-                count,
-            )
-            if type(count) is int and count > 0:
-                represented_calls += count
-        reported_calls = report.get("calls")
-        if type(reported_calls) is int and reported_calls > represented_calls:
-            merged.record("", "score", reported_calls - represented_calls)
-        elif reported_calls != represented_calls:
-            inherited_truncation = True
-    summary = merged.snapshot()
-    if inherited_truncation:
-        merged.mark_truncated()
-        summary = merged.snapshot()
-    return summary
+        merged.merge(report)
+    return merged.snapshot()
 
 
 def models_called(report: dict[str, Any]) -> list[str]:

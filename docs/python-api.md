@@ -71,9 +71,10 @@ contain prompts, model content, responses, endpoints, credentials, trace data, o
 Telemetry is diagnostic and never changes a verdict or completion state.
 
 When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
-`error.result`) carries the safe partial timing and model-usage snapshot recorded before the
-exception escaped. File and batch wrappers retain that telemetry in their returned incomplete
-results while preserving their existing failure categories and exception text.
+`error.result`) may carry a partial timing and model-usage snapshot. A timeout during
+clock-feed preflight can occur before a snapshot is attached. File and batch wrappers retain
+available telemetry in their returned incomplete results along with the failure category and
+exception text.
 For a `CompiledPolicy` batch, a timeout on a later item aggregates the completed prefix and the
 current timed-out item once: `scan_time` is their saturated sum, each `rule_timings` value is the
 average across observed items that started that rule, and `model_usage` is the bounded merge in
