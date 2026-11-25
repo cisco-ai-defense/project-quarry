@@ -1,0 +1,257 @@
+{
+  "scope": "Synthetic process-cache workloads; includes construction, transform, validation and provenance. cpu_digest deliberately models expensive deterministic CPU work. No general latency, RSS or provider claim.",
+  "python": "3.13.11 (main, Dec 17 2025, 20:55:16) [Clang 21.1.4 ]",
+  "platform": "macOS-27.2-arm64-arm-64bit-Mach-O",
+  "parameters": {
+    "samples": 3,
+    "parts": 32,
+    "instances": 4,
+    "unique": 8,
+    "rounds": 2000
+  },
+  "workloads": [
+    {
+      "workload": "uppercase",
+      "samples": {
+        "unversioned": [
+          {
+            "seconds": 0.005980749992886558,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.005479582992848009,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.005583749996731058,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 0
+          }
+        ],
+        "versioned_shared": [
+          {
+            "seconds": 0.009092791995499283,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 4656
+          },
+          {
+            "seconds": 0.00882524999906309,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 4656
+          },
+          {
+            "seconds": 0.008589166012825444,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "afa4aba04158bf0cbed53e57b06d8953685cdccfb8f66d1e0151f355eeb0f045",
+              "b99d659b86be9e717616188fe97cd0266755c92493bc7e4bcf22a722389b2d47",
+              "b7846e9bb343b8eca95f2653e37350f4ccb6476a017d731ab8f27130df2f4d51",
+              "0a97bbdaaf7157264f553f57a3ab5d51a20f979c230902e738766a247bc6ce89"
+            ],
+            "retained_result_bytes": 4656
+          }
+        ]
+      },
+      "median_seconds": {
+        "unversioned": 0.005583749996731058,
+        "versioned_shared": 0.00882524999906309
+      },
+      "unversioned_over_shared_ratio": 0.6327016228802405,
+      "output_and_current_origins_equal": true
+    },
+    {
+      "workload": "json_projection",
+      "samples": {
+        "unversioned": [
+          {
+            "seconds": 0.03469674999359995,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.03302716702455655,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.03256158300791867,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 0
+          }
+        ],
+        "versioned_shared": [
+          {
+            "seconds": 0.036051750008482486,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 4808
+          },
+          {
+            "seconds": 0.034791958023561165,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 4808
+          },
+          {
+            "seconds": 0.03391116700368002,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "04823aeb16a399a35cfc4e0723f263c1724e68793a40cb559acae8b05b6aee8b",
+              "a67f798d67b14587f336c37858b55fcc85b713e49e30879e0523cc78e252616b",
+              "98f9f81dd4cf8d208b7f25d2c82113089f26237d604d89ecbd2f76f134ed9083",
+              "99846c42283df3c7d89fc62adff4a6c9340dcda2023321fa3bc3e15e2d820f76"
+            ],
+            "retained_result_bytes": 4808
+          }
+        ]
+      },
+      "median_seconds": {
+        "unversioned": 0.03302716702455655,
+        "versioned_shared": 0.034791958023561165
+      },
+      "unversioned_over_shared_ratio": 0.9492758930724883,
+      "output_and_current_origins_equal": true
+    },
+    {
+      "workload": "cpu_digest",
+      "samples": {
+        "unversioned": [
+          {
+            "seconds": 0.0546210830216296,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.05552650001482107,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 0
+          },
+          {
+            "seconds": 0.05370483300066553,
+            "adapter_calls": 128,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 0
+          }
+        ],
+        "versioned_shared": [
+          {
+            "seconds": 0.012964916008058935,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 5288
+          },
+          {
+            "seconds": 0.013744291005423293,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 5288
+          },
+          {
+            "seconds": 0.012731625000014901,
+            "adapter_calls": 8,
+            "output_and_current_origin_digests": [
+              "75922cd93882d971c5fef73e3793f09e3658873e7f784e88f5b8fac53f103f5c",
+              "ed46c3b245b76f189b846ad32c7e6b5cb2dd53d50591022b67d71d66bcfefbdd",
+              "fc9c85f779ae1cc5535490981199846c6cef95ab08b92835efc90c31cc8ea1de",
+              "c9b1cb681e852e878a87dac1ff694bc95420fdcb5e25499f8ea3db4c0d7b86f5"
+            ],
+            "retained_result_bytes": 5288
+          }
+        ]
+      },
+      "median_seconds": {
+        "unversioned": 0.0546210830216296,
+        "versioned_shared": 0.012964916008058935
+      },
+      "unversioned_over_shared_ratio": 4.2129916605458435,
+      "output_and_current_origins_equal": true
+    }
+  ]
+}

@@ -59,6 +59,15 @@ from quarry.integrations.model_usage import (
     ModelUsage,
 )
 from quarry.integrations.rate_limiter import LLMRateLimiter
+from quarry.integrations.shared_transforms import (
+    TRANSFORM_BATCH_SIZE,
+    InvalidSharedTransform,
+    gather_transform_batch,
+    read_shared_transform,
+    registered_cache_identity,
+    shared_record,
+    transform_input_size,
+)
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import (
     QuarryTimeoutError,
@@ -69,6 +78,7 @@ from quarry.types.adapter_transforms import (
     DecodeLimitError,
     LocalTransformConfig,
     ModelTransformConfig,
+    TransformCacheIdentity,
     TransformResult,
     checked_transform_parts,
 )
@@ -2149,6 +2159,8 @@ class ModelInferenceBackend:
         parts = definition.parts if definition.parts is not None else supported
         if not set(parts) <= set(supported):
             raise ConfigurationError(f"Transform {name!r} selects parts its adapter cannot read")
+        if local:
+            registered_cache_identity(adapter, name)
         return adapter, settings, parts
 
     def require_transforms(self, names: Collection[str]) -> None:
@@ -2161,6 +2173,70 @@ class ModelInferenceBackend:
         """The selected supported wire part types; other part types pass through unchanged."""
 
         return self._transform_adapter(name)[2]
+
+    def transform_cache_identity(self, name: str) -> TransformCacheIdentity | None:
+        """Return the host's explicit deterministic part-transform cache declaration."""
+        adapter, settings, parts = self._transform_adapter(name)
+        return (
+            registered_cache_identity(adapter, name)
+            if type(settings) is LocalTransformConfig and parts
+            else None
+        )
+
+    async def transform_units(
+        self,
+        name: str,
+        units: Sequence[dict[str, Any]],
+        *,
+        timeout: float | None = None,
+        _message_value: bool = False,
+    ) -> list[TransformResult]:
+        """Execute at most 16 ordered parts; only explicitly versioned local work overlaps.
+
+        Aggregate input, output and mapping bounds apply to each batch. All owned children
+        finish or cancel before a failure escapes. Valid completed items may remain cached.
+        """
+        from quarry.types.transforms import (
+            MAX_TRANSFORM_INPUT_CHARACTERS,
+            MAX_TRANSFORM_MAPPING_SEGMENTS,
+            MAX_TRANSFORM_OUTPUT_CHARACTERS,
+        )
+
+        shared = self.transform_cache_identity(name) is not None
+        if type(units) not in (list, tuple) or len(units) > TRANSFORM_BATCH_SIZE:
+            raise transform_error(name, "invalid_input", "transform batch exceeds its part limit")
+        try:
+            snapshots = [transform_unit_snapshot(unit, _check_unicode=False) for unit in units]
+        except (TypeError, ValueError) as exc:
+            raise transform_error(name, "invalid_input", "invalid transform batch input") from exc
+        size = sum(map(transform_input_size, snapshots))
+        if size > MAX_TRANSFORM_INPUT_CHARACTERS:
+            raise transform_error(name, "invalid_input", "transform batch exceeds its input limit")
+        output = segments = 0
+
+        async def one(unit):
+            nonlocal output, segments
+            call = self.transform_message_unit if _message_value else self.transform_unit
+            result = (
+                await call(name, unit)
+                if timeout is None
+                else await call(name, unit, timeout=timeout)
+            )
+            result = read_transform(keep_transform(result, unit, name), unit)
+            output += len(result.text)
+            segments += len(result.runs)
+            if (
+                output > MAX_TRANSFORM_OUTPUT_CHARACTERS
+                or segments > MAX_TRANSFORM_MAPPING_SEGMENTS
+            ):
+                raise transform_error(
+                    name, "invalid_output", "transform batch exceeds its output limit"
+                )
+            return result
+
+        if shared:
+            return await gather_transform_batch(one(unit) for unit in snapshots)
+        return [await one(unit) for unit in snapshots]
 
     async def transform_messages(self, name: str, messages: Messages) -> Messages:
         """Apply one local uncached, text-preserving rewrite of an ordered message selection."""
@@ -2225,10 +2301,11 @@ class ModelInferenceBackend:
     async def transform_message_unit(
         self, name: str, unit: dict[str, Any], *, timeout: float | None = None
     ) -> TransformResult:
-        """Compute a message value's part, keeping only model-backed request caching.
+        """Compute a part with the enclosing message value's local-cache policy.
 
-        Local adapter results belong to their enclosing transformed message expression.
-        Equal raw parts in separate messages must still be processed separately.
+        Unversioned local adapters process equal parts in separate messages independently.
+        Explicitly versioned deterministic adapters may share validated relative outputs;
+        model-backed work retains its existing physical request caching.
         """
 
         # Keep the existing injected/subclassed transform_unit hook in the dispatch path.
@@ -2259,6 +2336,11 @@ class ModelInferenceBackend:
             raise transform_error(name, "invalid_input", "part is outside the selected part types")
         require_media_part(None, snapshot)
         definition = self.config.transforms[name]
+        cache_identity = (
+            registered_cache_identity(adapter, name)
+            if type(definition) is LocalTransformConfig
+            else None
+        )
 
         async def local_request(*, timeout):
             try:
@@ -2300,9 +2382,36 @@ class ModelInferenceBackend:
             provider_timeout = (
                 wait_timeout if wait_timeout is not None else clamp_to_evaluation_deadline(None)
             )
-            if not cache_local:
+            if not cache_local and cache_identity is None:
                 async with asyncio.timeout(wait_timeout):
                     return read_transform(await local_request(timeout=provider_timeout), snapshot)
+            if cache_identity is not None:
+                key = input_key(
+                    "shared-local-transform-v1", cache_identity, settings, parts, snapshot
+                )
+
+                async def shared_request(*, timeout):
+                    return shared_record(key, await local_request(timeout=timeout))
+
+                async with asyncio.timeout(wait_timeout):
+                    for attempt in range(2):
+                        record = await result_cache.call(
+                            key,
+                            shared_request,
+                            retry_on=_starters_limit,
+                            timeout=provider_timeout,
+                        )
+                        try:
+                            return read_shared_transform(record, key, snapshot, name)
+                        except InvalidSharedTransform as exc:
+                            result_cache.forget(key, expected=record)
+                            if attempt:
+                                raise transform_error(
+                                    name,
+                                    "invalid_output",
+                                    "shared transform cache returned invalid data",
+                                ) from exc
+                raise AssertionError("shared transform retry exhausted")
             key = input_key("local-transform-v1", object_identity(adapter), settings, snapshot)
             async with asyncio.timeout(wait_timeout):
                 kept = await result_cache.call(

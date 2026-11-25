@@ -47,11 +47,12 @@ def _unicode(text: str) -> None:
             raise ValueError("text must contain valid Unicode")
 
 
-def transform_unit_snapshot(unit: object) -> dict:
+def transform_unit_snapshot(unit: object, *, _check_unicode: bool = True) -> dict:
     """Copy one exact wire part, bounding its graph before any cache-key encoding.
 
-    Only the three public content part shapes are accepted. The adapter may mutate its
-    payload, so the cache key and result validation use a separate private snapshot.
+    Only the three public content part shapes are accepted. Batch preflight may defer
+    Unicode checking until each part's mandatory admission check, before hashing or dispatch.
+    The adapter may mutate its payload, so cache keys and validation use a private snapshot.
     """
 
     if type(unit) is not dict:
@@ -64,7 +65,8 @@ def transform_unit_snapshot(unit: object) -> dict:
         text = unit["text"]
         if type(text) is not str or len(text) > MAX_TRANSFORM_INPUT_CHARACTERS:
             raise ValueError("transform text input exceeds its character limit or is not text")
-        _unicode(text)
+        if _check_unicode:
+            _unicode(text)
         return {"type": "text", "text": text}
     if part_type == "image_url" and set(unit) == {"type", "image_url"}:
         image = unit["image_url"]
@@ -80,8 +82,9 @@ def transform_unit_snapshot(unit: object) -> dict:
             raise ValueError("transform image detail must be auto, low or high")
         if sum(map(len, values)) > MAX_TRANSFORM_INPUT_CHARACTERS:
             raise ValueError("transform image input exceeds its character limit")
-        for value in values:
-            _unicode(value)
+        if _check_unicode:
+            for value in values:
+                _unicode(value)
         return {"type": "image_url", "image_url": dict(image)}
     if part_type == "input_audio" and set(unit) == {"type", "input_audio"}:
         audio = unit["input_audio"]
@@ -92,8 +95,9 @@ def transform_unit_snapshot(unit: object) -> dict:
         values = cast(tuple[str, ...], tuple(audio.values()))
         if sum(map(len, values)) > MAX_TRANSFORM_INPUT_CHARACTERS:
             raise ValueError("transform audio input exceeds its character limit")
-        for value in values:
-            _unicode(value)
+        if _check_unicode:
+            for value in values:
+                _unicode(value)
         return {"type": "input_audio", "input_audio": dict(audio)}
     raise ValueError("transform input must be a supported text, image_url or input_audio part")
 
