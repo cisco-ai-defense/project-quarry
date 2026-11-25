@@ -611,7 +611,7 @@ class DSLScanner:
             # resource manager after a load failure. Preserve its completed analysis on
             # the original exception without changing the exception type.
             # Exceptions accept ad hoc attributes at runtime; ty models no such attribute.
-            exc.requirements = requirements  # ty: ignore[unresolved-attribute]
+            exc.requirements = requirements  # ty: ignore[missing-attribute]
             raise
 
         if self.verbose:

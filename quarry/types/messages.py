@@ -230,7 +230,7 @@ class ContentPart(OpenAIObject):
 class TextPart(ContentPart):
     """OpenAI text content part."""
 
-    type: Literal["text"]  # ty: ignore[invalid-mutable-override]
+    type: Literal["text"]  # ty: ignore[incompatible-mutable-override]
     text: str
     DSL_FIELDS: ClassVar[frozenset[str]] = ContentPart.DSL_FIELDS | {"text"}
 
@@ -245,7 +245,7 @@ class ImageURL(OpenAIObject):
 class ImagePart(ContentPart):
     """OpenAI image content part."""
 
-    type: Literal["image_url"]  # ty: ignore[invalid-mutable-override]
+    type: Literal["image_url"]  # ty: ignore[incompatible-mutable-override]
     image_source: ImageURL = Field(alias="image_url")
     DSL_FIELDS: ClassVar[frozenset[str]] = ContentPart.DSL_FIELDS | {"image_url"}
 
@@ -266,7 +266,7 @@ class InputAudio(OpenAIObject):
 class AudioPart(ContentPart):
     """OpenAI input-audio content part."""
 
-    type: Literal["input_audio"]  # ty: ignore[invalid-mutable-override]
+    type: Literal["input_audio"]  # ty: ignore[incompatible-mutable-override]
     audio_source: InputAudio = Field(alias="input_audio")
     DSL_FIELDS: ClassVar[frozenset[str]] = ContentPart.DSL_FIELDS | {"input_audio"}
 
@@ -454,21 +454,21 @@ class Message(OpenAIObject):
 class SystemMessage(Message):
     """System instruction message."""
 
-    role: Literal["system"]  # ty: ignore[invalid-mutable-override]
+    role: Literal["system"]  # ty: ignore[incompatible-mutable-override]
     source_content: str | tuple[Any, ...] = Field(alias="content")
 
 
 class DeveloperMessage(Message):
     """Developer instruction message."""
 
-    role: Literal["developer"]  # ty: ignore[invalid-mutable-override]
+    role: Literal["developer"]  # ty: ignore[incompatible-mutable-override]
     source_content: str | tuple[Any, ...] = Field(alias="content")
 
 
 class UserMessage(Message):
     """User message."""
 
-    role: Literal["user"]  # ty: ignore[invalid-mutable-override]
+    role: Literal["user"]  # ty: ignore[incompatible-mutable-override]
     source_content: str | tuple[Any, ...] = Field(alias="content")
 
 
@@ -586,7 +586,7 @@ class ToolCall(OpenAIObject):
 class AssistantMessage(Message):
     """Assistant message with optional refusal text and tool calls."""
 
-    role: Literal["assistant"]  # ty: ignore[invalid-mutable-override]
+    role: Literal["assistant"]  # ty: ignore[incompatible-mutable-override]
     source_content: str | tuple[Any, ...] | None = Field(default=None, alias="content")
     refusal: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
@@ -610,7 +610,7 @@ class AssistantMessage(Message):
 class ToolMessage(Message):
     """Canonical tool-result message linked to the call it answers."""
 
-    role: Literal["tool"]  # ty: ignore[invalid-mutable-override]
+    role: Literal["tool"]  # ty: ignore[incompatible-mutable-override]
     source_content: str = Field(alias="content")
     tool_call_id: str
     DSL_FIELDS: ClassVar[frozenset[str]] = Message.DSL_FIELDS | {
