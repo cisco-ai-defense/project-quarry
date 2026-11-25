@@ -51,6 +51,7 @@ from quarry.config import QuarryConfig
 from quarry.safety.quality import matchability_warning, quality_warnings, verify_matchability
 from quarry.safety.validator import Complexity, Severity, ValidationWarning, validate_rules
 from quarry.scanner import DSLScanner
+from quarry.telemetry import models_called
 from quarry.types.results import CollectionResult, Span
 from quarry.types.rules import ScanResult
 
@@ -165,6 +166,12 @@ def format_results(
                 "file": str(result.file_path),
                 "matches": matches,
                 "scan_time": result.scan_time,
+                "timings": {
+                    "total_seconds": result.scan_time,
+                    "rules": dict(sorted((result.rule_timings or {}).items())),
+                },
+                "model_usage": result.model_usage,
+                "models_called": models_called(result.model_usage),
                 "completion_state": result.completion_state,
                 "failures": [failure.to_dict() for failure in result.failures],
                 "complete": result.is_complete,
@@ -207,10 +214,14 @@ def format_results(
                 "skipped_rules",
                 "evaluation_warnings",
                 "failures",
+                "timings",
+                "model_usage",
+                "models_called",
             ]
         )
 
         for result in results:
+            rule_timings = result.rule_timings or {}
             completion_cells = [
                 result.completion_state,
                 result.validation_error or "",
@@ -223,6 +234,10 @@ def format_results(
                 if result.evaluation_warnings
                 else "",
                 orjson.dumps([failure.to_dict() for failure in result.failures]).decode(),
+            ]
+            usage_cells = [
+                orjson.dumps(result.model_usage).decode(),
+                orjson.dumps(models_called(result.model_usage)).decode(),
             ]
             if result.rule_matches:
                 evidence_by_rule = {}
@@ -238,6 +253,22 @@ def format_results(
                     output_json = (
                         orjson.dumps(typed_output.to_dict()).decode() if typed_output else ""
                     )
+                    timing_key = rule_name
+                    if result.batch_size is not None:
+                        prefix, separator, original_name = rule_name.partition(":")
+                        index = prefix.removeprefix("conv_")
+                        if (
+                            separator
+                            and prefix.startswith("conv_")
+                            and index.isascii()
+                            and index.isdigit()
+                            and index[0] != "0"
+                        ):
+                            # Remove only the generated prefix. A rule may itself contain one.
+                            timing_key = original_name
+                    timing = (
+                        {timing_key: rule_timings[timing_key]} if timing_key in rule_timings else {}
+                    )
 
                     writer.writerow(
                         [
@@ -248,6 +279,10 @@ def format_results(
                             evidence_json,
                             output_json,
                             *completion_cells,
+                            orjson.dumps(
+                                {"total_seconds": result.scan_time, "rules": timing}
+                            ).decode(),
+                            *usage_cells,
                         ]
                     )
             else:
@@ -260,6 +295,13 @@ def format_results(
                         "",
                         "",
                         *completion_cells,
+                        orjson.dumps(
+                            {
+                                "total_seconds": result.scan_time,
+                                "rules": dict(sorted(rule_timings.items())),
+                            }
+                        ).decode(),
+                        *usage_cells,
                     ]
                 )
 
