@@ -135,6 +135,73 @@ def test_legacy_pickle_without_telemetry_receives_independent_defaults() -> None
     assert second.model_usage["records"] == []
 
 
+@pytest.mark.parametrize(
+    "missing_observations",
+    [
+        ("logical_reads",),
+        ("window_observations",),
+        ("logical_reads", "window_observations"),
+    ],
+    ids=["before-read-reports", "before-window-reports", "before-both-reports"],
+)
+@pytest.mark.parametrize("before_telemetry", [False, True])
+def test_older_pickles_restore_optional_reports_without_losing_results(
+    missing_observations, before_telemetry
+) -> None:
+    usage = {
+        "calls": 2,
+        "records": [{"model": "judge", "operation": "score", "calls": 2}],
+        "truncated": False,
+    }
+    state = dict(
+        result_with(
+            rule_matches=["Read"],
+            rule_timings={"Read": 0.005},
+            model_usage=usage,
+            logical_reads={"synthetic_read": 1},
+            window_observations={"synthetic_window": 2},
+            local_match_work={"synthetic_work": 3},
+        ).__dict__
+    )
+    for name in missing_observations:
+        state.pop(name)
+    if before_telemetry:
+        state.pop("model_usage")
+        state.pop("local_match_work")
+    wire = pickle.dumps(_LegacyScanResultPickle(state))
+
+    first = pickle.loads(wire)
+    second = pickle.loads(wire)
+
+    expected_usage = {"calls": 0, "records": [], "truncated": False} if before_telemetry else usage
+    for restored in (first, second):
+        assert restored.rule_matches == ["Read"]
+        assert restored.is_complete
+        assert restored.rule_timings == {"Read": 0.005}
+        assert restored.model_usage == expected_usage
+        assert restored.logical_reads == (
+            None if "logical_reads" in missing_observations else {"synthetic_read": 1}
+        )
+        assert restored.window_observations == (
+            None if "window_observations" in missing_observations else {"synthetic_window": 2}
+        )
+        assert restored.local_match_work == (None if before_telemetry else {"synthetic_work": 3})
+    first.model_usage["records"].append({"model": "other", "operation": "score", "calls": 1})
+    assert second.model_usage == expected_usage
+
+
+@pytest.mark.parametrize("missing_required", ["rule_matches", "error", "validation_error"])
+def test_older_pickles_still_require_verdict_and_failure_fields(missing_required) -> None:
+    state = dict(result_with().__dict__)
+    for name in ("logical_reads", "window_observations", "local_match_work", "model_usage"):
+        state.pop(name)
+    state.pop(missing_required)
+    wire = pickle.dumps(_LegacyScanResultPickle(state))
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        pickle.loads(wire)
+
+
 def test_direct_legacy_state_rejects_unknown_fields() -> None:
     state = dict(result_with().__dict__)
     state.pop("model_usage")
