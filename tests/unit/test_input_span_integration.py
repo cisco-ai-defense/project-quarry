@@ -109,3 +109,26 @@ def test_runtime_before_input_span_counts_rejects_the_saved_policy(monkeypatch):
     monkeypatch.setattr(policy_serialization, "COMPILER_VERSION", "compiler-8")
     with pytest.raises(ValueError, match=r"compiler_version .*unsupported.*compiler-8"):
         load_compiled_policy(wire)
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_materialized_span_union_checks_the_combined_size(enforce):
+    from quarry.safety.limits import SafetyLimits
+
+    config = QuarryConfig(
+        config_version=2,
+        safety_limits=SafetyLimits(max_comprehension_size=2, enforce_limits=enforce),
+    )
+    source = (
+        'rule "Read" strings: $a="a" $b="b" condition: '
+        "len(union($a.spans(messages), $b.spans(messages))) == 4"
+    )
+    policy = compile_policy(source, runtime_config=config)
+    result = policy.scan({"messages": [{"role": "user", "content": "aabb"}]})
+
+    if enforce:
+        assert result.completion_state == "incomplete"
+        assert "max_comprehension_size=2" in result.evaluation_errors["Read"]
+    else:
+        assert result.is_complete
+        assert result.rule_matches == ["Read"]
