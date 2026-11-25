@@ -137,7 +137,17 @@ class ScanResult:
         unknown = set(state) - field_names
         if unknown:
             raise ValueError("ScanResult pickle state contains unknown fields")
-        missing = field_names - set(state) - {"model_usage", "rule_timings", "local_match_work"}
+        missing = (
+            field_names
+            - set(state)
+            - {
+                "model_usage",
+                "rule_timings",
+                "logical_reads",
+                "window_observations",
+                "local_match_work",
+            }
+        )
         if missing:
             raise ValueError("ScanResult pickle state is missing required fields")
         for name, value in state.items():
@@ -146,6 +156,10 @@ class ScanResult:
             object.__setattr__(self, "rule_timings", None)
         if "model_usage" not in state:
             object.__setattr__(self, "model_usage", empty_model_usage())
+        if "logical_reads" not in state:
+            object.__setattr__(self, "logical_reads", None)
+        if "window_observations" not in state:
+            object.__setattr__(self, "window_observations", None)
         if "local_match_work" not in state:
             object.__setattr__(self, "local_match_work", None)
 

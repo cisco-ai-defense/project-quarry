@@ -80,7 +80,7 @@ adapter-attempt counts:
 The `model` value is the configured public alias, never a provider model name. Records use only
 the generic operations `score`, `classify`, `complete`, and `input_tokens`. The summary does not
 contain prompts, model content, responses, endpoints, credentials, trace data, or pricing.
-Telemetry is diagnostic and never changes a verdict or completion state.
+Telemetry is diagnostic and never changes a verdict or completion state. Older results restore absent `logical_reads`, `window_observations`, and `local_match_work` reports as `None`.
 Window token encoding and token-count requests use `input_tokens`; a window classifier batch
 uses one `classify` attempt per adapter invocation, regardless of the number of windows.
 Model-backed transforms use `complete`; local transforms and span decoders add no attempts.
