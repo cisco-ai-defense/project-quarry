@@ -27,10 +27,11 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from inspect import getattr_static
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Literal, Self, overload
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self, overload
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from quarry.engine.matchers import field_access, field_parts, value_texts
 from quarry.language.metadata import (
     DSLParameter,
     SurfaceFieldExclusion,
@@ -40,7 +41,30 @@ from quarry.language.metadata import (
     dsl_surface,
 )
 from quarry.types.exceptions import ConversationValidationError, EvaluationError
-from quarry.types.results import Span
+from quarry.types.json_source import JSONSource
+from quarry.types.results import InputText, Span
+
+if TYPE_CHECKING:
+    from quarry.types.origins import Origin
+
+
+def _input_span_text(span: Span, left: int, right: int) -> str:
+    """Cut a span from its input item's ordered content fields."""
+
+    source, owner = span.source, span._source
+    assert isinstance(source, InputText)
+    fields = source.fields[
+        source.fields.index(span.field) : source.fields.index(span.end_field) + 1
+    ]
+    covered: list[str] = []
+    for name in fields:
+        value = owner.get(name) if isinstance(owner, Mapping) else getattr(owner, name, None)
+        covered.append(value if isinstance(value, str) else "")
+    if len(covered) == 1:
+        return covered[0][max(0, span.start - left) : span.end + right]
+    covered[0] = covered[0][max(0, span.start - left) :]
+    covered[-1] = covered[-1][: span.end + right]
+    return "".join(covered)
 
 
 def wire_digest(wire: Mapping[str, Any]) -> bytes:
@@ -516,6 +540,7 @@ class ToolCall(OpenAIObject):
     function: ToolCallFunction
 
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
+    _argument_source: tuple[JSONSource, dict[str, str]] | None = PrivateAttr(default=None)
     _message_index: int = PrivateAttr(default=-1)
     _max_nesting_depth: int = PrivateAttr(default=100)
     _response: ToolMessage | None = PrivateAttr(default=None)
@@ -531,6 +556,47 @@ class ToolCall(OpenAIObject):
         """Return the original JSON argument string."""
 
         return self.function.arguments
+
+    def argument_texts(self, field: str) -> list[tuple[str, str]]:
+        """Return each scalar argument value with its own field path."""
+
+        if field == "raw_arguments":
+            return [(field, self.raw_arguments)]
+        head, _, path = field.partition(".")
+        if head != "arguments" or not path:
+            return []
+        if path == "*":
+            return value_texts(self.arguments, "arguments")
+        if path.endswith(".*"):
+            root = field[:-2]
+            return value_texts(field_access(self.arguments, path[:-2]), root)
+        return value_texts(field_access(self.arguments, path), field)
+
+    def argument_text(self, field: str) -> str | None:
+        """Return one scalar argument text by its exact path."""
+
+        if field == "raw_arguments":
+            return self.raw_arguments
+        return dict(value_texts(self.arguments, "arguments")).get(field)
+
+    def texts(self) -> tuple[tuple[str, str], ...]:
+        """Return argument texts in written order, or freeform argument text."""
+
+        try:
+            values = self.argument_texts("arguments.*")
+        except EvaluationError:
+            values = []
+        if values:
+            return tuple(values)
+        raw = self.raw_arguments
+        return (("raw_arguments", raw),) if raw.strip() not in ("", "{}") else ()
+
+    def field_rank(self, field: str) -> int:
+        """Order one text among the call's arguments."""
+
+        if field == "raw_arguments":
+            return -1
+        return next((index for index, (name, _) in enumerate(self.texts()) if name == field), -1)
 
     @property
     def arguments(self) -> dict[str, Any]:
@@ -565,10 +631,38 @@ class ToolCall(OpenAIObject):
             object.__setattr__(self, "_arguments_cache", frozen)
         return _project_json(self._arguments_cache)
 
+    def _argument_bounds(self, field: str, start: int, end_field: str, end: int) -> tuple[int, int]:
+        """Return the original JSON bounds of a span in decoded arguments."""
+        cached = self._argument_source
+        if cached is None:
+            leaves = dict(value_texts(self.arguments, "arguments"))
+            cached = JSONSource(self.raw_arguments), leaves
+            object.__setattr__(self, "_argument_source", cached)
+        source, leaves = cached
+        if field == end_field:
+            return source.bounds(field_parts(field)[1:], leaves[field], start, end)
+
+        # A span over several values covers the encoded portions of all those values.
+        # Repeated JSON keys retain their last value, which can move a field in the raw text.
+        bounds = []
+        active = False
+        for name, value in leaves.items():
+            if name == field:
+                active = True
+            if not active:
+                continue
+            low = start if name == field else 0
+            high = end if name == end_field else len(value)
+            bounds.append(source.bounds(field_parts(name)[1:], value, low, high))
+            if name == end_field:
+                break
+        return min(low for low, _ in bounds), max(high for _, high in bounds)
+
     def _discard_decoded_arguments(self) -> None:
         """Drop a tree decoded only for input preflight; rule reads stay lazy."""
 
         object.__setattr__(self, "_arguments_cache", None)
+        object.__setattr__(self, "_argument_source", None)
 
     @property
     def message_index(self) -> int:
@@ -754,6 +848,8 @@ class Messages(Sequence[MessageType]):
         "_tool_call_types",
         "_segments",
         "_chunk",
+        "_origins",
+        "_positions",
         "_sealed",
     )
 
@@ -773,6 +869,8 @@ class Messages(Sequence[MessageType]):
         self._segments: Mapping[int, MessageType] = MappingProxyType({})
         # Whether this view is a ``split`` chunk (see ``_select_ranges``).
         self._chunk = False
+        self._origins: tuple[Origin | None, ...] = ()
+        self._positions: tuple[int, ...] = ()
         self._sealed = True
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -850,6 +948,7 @@ class Messages(Sequence[MessageType]):
         object.__setattr__(root, "_ordinals", tuple(range(len(items))))
         object.__setattr__(root, "_max_nesting_depth", max_nesting_depth)
         object.__setattr__(root, "_tool_call_types", MappingProxyType(registry))
+        object.__setattr__(root, "_origins", (None,) * len(items))
         cls._build_indices(root, max_nesting_depth)
         return root
 
@@ -859,6 +958,7 @@ class Messages(Sequence[MessageType]):
         items: tuple[MessageType, ...],
         tool_call_types: ToolCallTypeRegistry | None,
         max_nesting_depth: int,
+        origins: tuple[Origin | None, ...] | None = None,
     ) -> Messages:
         """Build a root from EXISTING, already-validated ``Message`` objects, reusing them (and
         their cached ``ContentPart``s, ``ToolCall``s, and ``ToolMessage``s) BY IDENTITY.
@@ -875,6 +975,7 @@ class Messages(Sequence[MessageType]):
         object.__setattr__(root, "_ordinals", tuple(range(len(items))))
         object.__setattr__(root, "_max_nesting_depth", max_nesting_depth)
         object.__setattr__(root, "_tool_call_types", MappingProxyType(registry))
+        object.__setattr__(root, "_origins", origins or (None,) * len(items))
         cls._build_indices(root, max_nesting_depth)
         return root
 
@@ -934,6 +1035,12 @@ class Messages(Sequence[MessageType]):
                 {name: tuple(responses) for name, responses in responses_by_name.items()}
             ),
         )
+        position = 0
+        positions = []
+        for message in root._items:
+            positions.append(position)
+            position += 1 + len(getattr(message, "tool_calls", ()))
+        object.__setattr__(root, "_positions", tuple(positions))
 
     @staticmethod
     def _validate_nesting_limit(max_nesting_depth: int) -> None:
@@ -1109,6 +1216,8 @@ class Messages(Sequence[MessageType]):
         view._calls_by_name = self._root._calls_by_name
         view._responses_by_name = self._root._responses_by_name
         view._tool_call_types = self._root._tool_call_types
+        view._origins = self._root._origins
+        view._positions = self._root._positions
         view._segments = MappingProxyType(
             {ordinal: self._segments[ordinal] for ordinal in selected if ordinal in self._segments}
         )
@@ -1196,14 +1305,83 @@ class Messages(Sequence[MessageType]):
             for value in (left, right)
         ):
             raise ValueError("extract() context bounds must be non-negative integers")
+        if span.source is not None:
+            return _input_span_text(span, left, right)
+        if isinstance(span._source, ToolCall):
+            call = span._source
+            if not any(known is call for known in self._root._all_calls):
+                raise ValueError("span source call is not present in these messages")
+            texts = (
+                {"raw_arguments": call.raw_arguments}
+                if span.field == "raw_arguments"
+                else dict(call.texts())
+            )
+            order = list(texts)
+            if span.field not in texts or span.end_field not in texts:
+                raise ValueError("span is outside the call's argument texts")
+            selected = order[order.index(span.field) : order.index(span.end_field) + 1]
+            if not selected:
+                raise ValueError("span ends before it starts")
+            covered = [texts[name] for name in selected]
+            if span.start > len(covered[0]) or span.end > len(covered[-1]):
+                raise ValueError("span is outside the call's argument texts")
+            if len(covered) == 1:
+                return covered[0][max(0, span.start - left) : span.end + right]
+            covered[0] = covered[0][max(0, span.start - left) :]
+            covered[-1] = covered[-1][: span.end + right]
+            return "".join(covered)
+        if isinstance(span._source, Message):
+            if not span.within_one_text:
+                return self._extract_across_texts(span, left, right)
+            message = self._span_message(span, require_bound=False)
+            if span._source is not message:
+                raise ValueError("span source message is not present in these messages")
+            content = message.content
+            return content[max(0, span.start - left) : min(len(content), span.end + right)]
         message = self._span_message(span, require_bound=True)
         content = message.content
         return content[max(0, span.start - left) : min(len(content), span.end + right)]
 
+    def _extract_across_texts(self, span: Span, left: int, right: int) -> str:
+        """Read a bound range across consecutive chat and call texts."""
+
+        texts: list[tuple[int, str, str, object]] = []
+        for ordinal, message in enumerate(self._root._items):
+            position = self._root._positions[ordinal]
+            texts.append((position, "", message.content, message))
+            for number, call in enumerate(getattr(message, "tool_calls", ())):
+                texts.extend(
+                    (position + number + 1, field, text, call) for field, text in call.texts()
+                )
+        places = [(position, field) for position, field, _, _ in texts]
+        start, end = (span.position, span.field), (span.end_position, span.end_field)
+        if start not in places or end not in places:
+            raise ValueError("span is outside the texts of these messages")
+        first, last = places.index(start), places.index(end)
+        if first > last or texts[first][3] is not span._source:
+            raise ValueError("span source is not present in these messages")
+        covered = [text for _, _, text, _ in texts[first : last + 1]]
+        if span.start > len(covered[0]) or span.end > len(covered[-1]):
+            raise ValueError("span is outside the texts it covers")
+        if len(covered) == 1:
+            return covered[0][max(0, span.start - left) : span.end + right]
+        covered[0] = covered[0][max(0, span.start - left) :]
+        covered[-1] = covered[-1][: span.end + right]
+        return "".join(covered)
+
     def _bind_span(self, span: Span) -> Span:
         """Validate coordinates and bind a producer span to its canonical message."""
 
-        segment = self._segments.get(span.message_index)
+        index = span.message_index
+        if index < len(self._ordinals):
+            ordinal = self._ordinals[index]
+        elif self._contains_root_ordinal(index):
+            # Accept an existing adapter that reports the root ordinal of a selected view.
+            ordinal = index
+        else:
+            raise ValueError("span message index is outside the messages the model was sent")
+        span = replace(span, message_index=ordinal, end_message_index=ordinal)
+        segment = self._segments.get(ordinal)
         if segment is not None:
             # A span over a segment is relative to the segment's text; report it in the
             # coordinates of the whole message.
@@ -1212,7 +1390,17 @@ class Messages(Sequence[MessageType]):
                 raise ValueError("span is outside message content")
             span = replace(span, start=span.start + start, end=span.end + start)
         message = self._span_message(span, require_bound=False)
-        return span._bind_to_message(message)
+        origin = self._root._origins[ordinal]
+        if origin is not None:
+            from quarry.types.origins import SourceText
+
+            mapped = SourceText(message.content, origin, span.message_index).span(
+                span.start, span.end
+            )
+            return replace(mapped, score=span.score, label=span.label)
+        return replace(span, place_position=self._root._positions[ordinal])._bind_to_message(
+            message
+        )
 
     def _span_message(self, span: Span, *, require_bound: bool) -> MessageType:
         """Return the selected canonical message after validating one span."""
@@ -1568,7 +1756,25 @@ class Messages(Sequence[MessageType]):
             (*self._items, new_message),
             self._root._tool_call_types,
             self._root._max_nesting_depth,
+            (*self._root._origins, None),
         )
+
+    @classmethod
+    def message_parts(cls, role: str, texts: Sequence[str], origin: Origin) -> Messages:
+        """Build one message from input text parts and retain their source places."""
+
+        content: str | list[dict[str, str]] = (
+            texts[0] if len(texts) == 1 else [{"type": "text", "text": text} for text in texts]
+        )
+        message_class: type[MessageType] = {
+            "system": SystemMessage,
+            "developer": DeveloperMessage,
+            "user": UserMessage,
+            "assistant": AssistantMessage,
+        }[role]
+        message = message_class.model_validate({"role": role, "content": content}, strict=True)
+        object.__setattr__(message, "_message_index", 0)
+        return cls._from_items((message,), None, 100, (origin,))
 
     def to_openai_messages(self) -> list[dict[str, Any]]:
         """Return selected messages as fresh OpenAI-compatible dictionaries."""
