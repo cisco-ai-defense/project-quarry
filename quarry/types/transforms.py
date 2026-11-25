@@ -239,6 +239,28 @@ class ContentSourceRange:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentSourcePart:
+    """An original message/content part that has no claimed character coordinates."""
+
+    message_index: int
+    part_index: int | None
+
+    def __post_init__(self) -> None:
+        if type(self.message_index) is not int or self.message_index < 0:
+            raise ValueError("source part message_index must be a non-negative integer")
+        if self.part_index is not None and (
+            type(self.part_index) is not int or self.part_index < 0
+        ):
+            raise ValueError("source part part_index must be a non-negative integer or null")
+
+    def to_dict(self) -> dict[str, int]:
+        value = {"message_index": self.message_index}
+        if self.part_index is not None:
+            value["part_index"] = self.part_index
+        return value
+
+
+@dataclass(frozen=True, slots=True)
 class ProvenanceSegment:
     """One transformed output range and the source ranges it represents."""
 
@@ -246,6 +268,7 @@ class ProvenanceSegment:
     end: int
     sources: tuple[ContentSourceRange, ...]
     kind: MappingKind = "linear"
+    parts: tuple[ContentSourcePart, ...] = ()
 
     def __post_init__(self) -> None:
         if not 0 <= self.start < self.end:
@@ -256,6 +279,10 @@ class ProvenanceSegment:
             not isinstance(source, ContentSourceRange) for source in self.sources
         ):
             raise TypeError("provenance segment sources must be ContentSourceRange values")
+        if not isinstance(self.parts, tuple) or any(
+            type(part) is not ContentSourcePart for part in self.parts
+        ):
+            raise TypeError("provenance segment parts must be ContentSourcePart values")
 
 
 def slice_provenance(
@@ -287,8 +314,30 @@ def slice_provenance(
                     source.message_start + offset + length,
                 ),
             )
-        sliced.append(ProvenanceSegment(low - start, high - start, sources, segment.kind))
+        sliced.append(
+            ProvenanceSegment(low - start, high - start, sources, segment.kind, segment.parts)
+        )
     return tuple(sliced)
+
+
+def source_part_mapping_for(
+    segments: tuple[ProvenanceSegment, ...], start: int, end: int
+) -> tuple[tuple[ContentSourcePart, ...], bool]:
+    """Return part-only origins and whether every character has some source context."""
+
+    parts: dict[ContentSourcePart, None] = {}
+    cursor = start
+    located = True
+    for segment in segments:
+        low, high = max(start, segment.start), min(end, segment.end)
+        if low >= high:
+            continue
+        if low > cursor or not (segment.sources or segment.parts):
+            located = False
+        cursor = max(cursor, high)
+        for part in segment.parts:
+            parts[part] = None
+    return tuple(parts), located and cursor == end
 
 
 def source_mapping_for(

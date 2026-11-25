@@ -191,7 +191,7 @@ _HELLO = {"role": "user", "content": "hello"}
         ),
         pytest.param(
             {"messages": [{"role": "tool", "tool_call_id": "call_1", "content": ["result"]}]},
-            "Tool message at index 0 must have string 'content'",
+            "Message at index 0 content[0] must be an object",
             id="tool-content-parts",
         ),
         pytest.param(

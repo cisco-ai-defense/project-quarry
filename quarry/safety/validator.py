@@ -630,10 +630,9 @@ def validate_conversation(
             )
 
         if role == "tool":
-            if "content" not in msg or type(msg["content"]) is not str:
-                raise ConversationValidationError(
-                    f"Tool message at index {i} must have string 'content'"
-                )
+            if "content" not in msg:
+                raise ConversationValidationError(f"Tool message at index {i} must have 'content'")
+            _validate_message_content(msg["content"], i, max_nesting_depth)
             if type(msg.get("tool_call_id")) is not str or not msg["tool_call_id"]:
                 raise ConversationValidationError(
                     f"Tool message at index {i} must have a non-empty string 'tool_call_id'"

@@ -812,6 +812,7 @@ async def test_tool_relink_deadline_interrupts_index_and_clone_work(
 ) -> None:
     source = _many_tool_call_messages(16_000)
     indexing = messages_module._CombineMetrics()
+    original_expiry_check = messages_module._raise_if_combine_expired
 
     def expire_index() -> None:
         if indexing.canonical_call_visits >= 512:
@@ -821,6 +822,7 @@ async def test_tool_relink_deadline_interrupts_index_and_clone_work(
     with pytest.raises(RuntimeError, match="index deadline reached"):
         Messages.combine((source.assistant_messages,), _metrics=indexing)
     assert 512 <= indexing.canonical_call_visits <= 768
+    monkeypatch.setattr(messages_module, "_raise_if_combine_expired", original_expiry_check)
 
     transformed = await apply_content_transform(
         source.assistant_messages,

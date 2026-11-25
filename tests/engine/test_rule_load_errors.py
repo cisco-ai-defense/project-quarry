@@ -290,22 +290,22 @@ _REJECTED = [
     ),
     pytest.param(
         _rule("[c.name for c in tool_calls]"),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-as-a-condition",
     ),
     pytest.param(
         _rule("len([c.name for c in tool_calls]) > 1"),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="length-of-a-map-comprehension",
     ),
     pytest.param(
         _rule("[c.name for c in messages[-1].tool_calls]"),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-over-the-newest-message-as-a-condition",
     ),
     pytest.param(
         _rule("len([c.name for c in messages[-1].tool_calls]) > 1"),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="length-of-a-map-comprehension-over-the-newest-message",
     ),
     pytest.param(
@@ -313,7 +313,7 @@ _REJECTED = [
             'model("judge").score(message("user", [c.name for c in messages[-1].tool_calls]), '
             '"policy") > 0.9'
         ),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-as-message-content",
     ),
     pytest.param(
@@ -326,19 +326,19 @@ _REJECTED = [
     ),
     pytest.param(
         _rule('any m in [c.name for c in messages[-1].tool_calls] where m contains "a"'),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-as-the-collection-of-any",
     ),
     pytest.param(
         _rule('all m in [c.name for c in messages[-1].tool_calls] where m contains "a"'),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-as-the-collection-of-all",
     ),
     pytest.param(
         _rule(
             'count([m for m in [c.name for c in messages[-1].tool_calls] if m contains "a"]) > 0'
         ),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="map-comprehension-as-the-collection-of-a-filter",
     ),
     pytest.param(
@@ -346,7 +346,7 @@ _REJECTED = [
             "any m in [c.arguments.command for c in messages[-1].tool_calls] where "
             'model("judge").score(message("user", m), "policy") > 0.9'
         ),
-        "a map comprehension is supported only as the first argument of join()",
+        "a map comprehension outside join() must produce message values",
         id="a-judge-of-each-value-of-a-map-comprehension",
     ),
     pytest.param(

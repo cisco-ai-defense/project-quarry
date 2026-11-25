@@ -22,6 +22,7 @@ from typing import Any
 
 import orjson
 
+from quarry.cache.message_values import MessageValueMemo
 from quarry.core.conversation import Conversation
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConversationValidationError
@@ -171,6 +172,7 @@ class ScanContext:
         self.evaluation_warnings: list[str] = []
         # Map comprehension filters are memoized by item within one rule evaluation.
         self.map_filter_results: dict = {}
+        self.message_value_memo = MessageValueMemo()
 
     def _enforce_limits(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
@@ -337,6 +339,7 @@ class ScanContext:
         new_ctx.ordered_timeline = self.ordered_timeline
         new_ctx.evaluation_warnings = []
         new_ctx.map_filter_results = {}
+        new_ctx.message_value_memo = MessageValueMemo()
         return new_ctx
 
     @property

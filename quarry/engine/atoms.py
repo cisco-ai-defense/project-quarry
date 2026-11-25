@@ -137,6 +137,8 @@ MAX_MODEL_EXPRESSION_FANOUT = 256
 MAX_CONSTRUCTED_MESSAGES = 256
 MAX_CONSTRUCTED_TEXT_CHARACTERS = 1_000_000
 MAX_CONSTRUCTED_TEXT_BYTES = 4_000_000
+MAX_MESSAGE_MAP_ITEMS = 10_000
+MAX_MESSAGE_MAP_CHARACTERS = 2_000_000
 
 _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "absent": (0, 0),
@@ -154,12 +156,15 @@ _MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
     "index": (1, 1),
     "join": (1, 1),
     "literal": (0, 0),
+    "local_transform": (1, 1),
     "map": (3, 3),
     "message": (2, 2),
+    "message_map": (3, 3),
     "message_select": (2, 2),
     "message_view": (0, 0),
     "messages": (0, 0),
     "model_call": (0, 16),
+    "model_transform": (1, 1),
     "not": (1, 1),
     "or": (2, 2),
     "parameter": (0, 0),
@@ -207,6 +212,7 @@ def validate_model_expression(expression: ModelExpression) -> None:
     if not isinstance(expression, ModelExpression):
         raise TypeError("model expression root must be a ModelExpression")
     count = 0
+    message_maps: list[ModelExpression] = []
     active: set[int] = set()
     stack: list[tuple[ModelExpression, int, bool]] = [(expression, 1, False)]
     while stack:
@@ -250,9 +256,14 @@ def validate_model_expression(expression: ModelExpression) -> None:
             "tool_responses",
         }:
             raise ValueError(f"invalid message selector {node.value!r}")
-        if node.kind in {"binding", "map", "message_select", "parameter", "split_any"} and (
-            not isinstance(node.value, str) or not node.value.isidentifier()
-        ):
+        if node.kind in {
+            "binding",
+            "map",
+            "message_map",
+            "message_select",
+            "parameter",
+            "split_any",
+        } and (not isinstance(node.value, str) or not node.value.isidentifier()):
             raise ValueError(f"invalid {node.kind} name {node.value!r}")
         if node.kind == "text_ref" and (not isinstance(node.value, str) or not node.value):
             raise ValueError("model text reference name must be a non-empty string")
@@ -289,10 +300,90 @@ def validate_model_expression(expression: ModelExpression) -> None:
             "matches",
         }:
             raise ValueError(f"invalid model string comparison {node.value!r}")
+        if node.kind == "message_map":
+            message_maps.append(node)
 
         active.add(identity)
         stack.append((node, depth, True))
         stack.extend((child, depth + 1, False) for child in reversed(node.children))
+
+    for mapped in message_maps:
+        # Validate after the whole graph has passed its arity, cycle and size checks.
+        # Prepared policies receive the same model-free-body contract as parsed rules.
+        pending = list(mapped.children[1:])
+        while pending:
+            child = pending.pop()
+            if child.kind in {"model_call", "split_any", "model_transform"}:
+                raise ValueError("a message map cannot call a model in its filter or value")
+            pending.extend(child.children)
+        pending = [mapped.children[1]]
+        while pending:
+            predicate = pending.pop()
+            if predicate.kind == "literal":
+                if type(predicate.value) is not bool:
+                    raise ValueError("a message map filter must be Boolean")
+            elif predicate.kind in {"not", "and", "or", "conditional"}:
+                pending.extend(predicate.children)
+            elif predicate.kind not in {
+                "compare",
+                "string_compare",
+                "text_equals",
+                "field",
+                "index",
+            }:
+                raise ValueError("a message map filter must be Boolean")
+        pending = [mapped.children[2]]
+        while pending:
+            child = pending.pop()
+            if child.kind == "conditional":
+                pending.extend(child.children[1:])
+            elif child.kind == "concat":
+                pending.extend(child.children)
+            elif child.kind in {"transform", "local_transform"}:
+                pending.append(child.children[0])
+            elif child.kind not in {
+                "messages",
+                "message_view",
+                "message",
+                "add_message",
+                "message_select",
+                "message_map",
+                "as_messages",
+                "binding",
+                "slice",
+                "field",
+            }:
+                raise ValueError("a message map must produce message values")
+
+    # These predicates and per-item values have the same model-free contract when loaded
+    # from a prepared policy as when compiled from source.
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        local = (
+            node.children[1:]
+            if node.kind == "map"
+            else node.children[1:2]
+            if node.kind == "message_select"
+            else node.children[:1]
+            if node.kind == "conditional"
+            else ()
+        )
+        if any(model_expression_requires_model(child) for child in local):
+            raise ValueError(f"a {node.kind} local predicate or value cannot call a model")
+        pending.extend(node.children)
+
+
+def model_expression_requires_model(expression: ModelExpression) -> bool:
+    """Whether a validated expression can dispatch paid or remote work."""
+
+    pending = [expression]
+    while pending:
+        node = pending.pop()
+        if node.kind in {"model_call", "split_any", "model_transform"}:
+            return True
+        pending.extend(node.children)
+    return False
 
 
 def validate_transform_expression_graph(
@@ -300,6 +391,7 @@ def validate_transform_expression_graph(
     *,
     maximum: int,
     validate_plan: Callable[[str], object],
+    validate_reference: Callable[[str, bool], object] | None = None,
     additional_roots: tuple[ModelExpression, ...] = (),
 ) -> None:
     """Validate every transform occurrence across finalized model-expression roots.
@@ -322,7 +414,7 @@ def validate_transform_expression_graph(
             continue
         if identity in active:
             raise ValueError("model expression contains a cycle")
-        if node.kind == "transform":
+        if node.kind in {"transform", "local_transform", "model_transform"}:
             count += 1
             if count > maximum:
                 raise ValueError(
@@ -330,7 +422,12 @@ def validate_transform_expression_graph(
                 )
             if not isinstance(node.value, str):
                 raise TypeError("compiled content transform must be a string")
-            validate_plan(node.value)
+            if node.kind == "transform":
+                validate_plan(node.value)
+            elif validate_reference is None:
+                raise ValueError("adapter transforms require reference validation")
+            else:
+                validate_reference(node.value, node.kind == "model_transform")
         active.add(identity)
         stack.append((node, True))
         stack.extend((child, False) for child in reversed(node.children))

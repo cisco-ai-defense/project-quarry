@@ -40,6 +40,11 @@ from quarry.inputs import (
     parse_inputs,
 )
 from quarry.safety.limits import SafetyLimits
+from quarry.types.adapter_transforms import (
+    LocalTransformConfig,
+    ModelTransformConfig,
+    TransformConfig,
+)
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
@@ -381,8 +386,8 @@ def _parse_model_cache(document: dict) -> ModelCacheConfig:
     )
 
 
-def _parse_content_transforms(value: object) -> dict[str, ContentTransform]:
-    """Parse the strict local content-transform registry."""
+def _parse_content_transforms(value: object) -> dict[str, TransformConfig]:
+    """Parse operations, registered local adapters, or configured model transforms."""
 
     if value is None:
         return {}
@@ -392,7 +397,7 @@ def _parse_content_transforms(value: object) -> dict[str, ContentTransform]:
         raise ConfigurationError(
             f"Configuration supports at most {MAX_TRANSFORM_DEFINITIONS} content transforms"
         )
-    transforms: dict[str, ContentTransform] = {}
+    transforms: dict[str, TransformConfig] = {}
     for name, definition in value.items():
         if (
             not isinstance(name, str)
@@ -405,6 +410,23 @@ def _parse_content_transforms(value: object) -> dict[str, ContentTransform]:
         owner = f"Transform {name!r}"
         if not isinstance(definition, dict):
             raise ConfigurationError(f"{owner} must be a mapping")
+        if "adapter" in definition or "model" in definition:
+            try:
+                if "adapter" in definition:
+                    _reject_unknown_fields(definition, {"adapter", "settings", "parts"}, owner)
+                    transforms[name] = LocalTransformConfig(
+                        adapter=definition["adapter"],
+                        settings=definition.get("settings", {}),
+                        parts=definition.get("parts"),
+                    )
+                else:
+                    _reject_unknown_fields(definition, {"model", "parts"}, owner)
+                    transforms[name] = ModelTransformConfig(
+                        model=definition["model"], parts=definition.get("parts")
+                    )
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(f"{owner}: {exc}") from exc
+            continue
         _reject_unknown_fields(definition, {"operations"}, owner)
         operations = definition.get("operations")
         if not isinstance(operations, list) or not operations:
@@ -485,8 +507,8 @@ class QuarryConfig:
     # closed at load unless a real backend is registered; True opts into the dependency-free
     # keyword/lexical STUBS (local dev/testing only, never a production model).
     allow_stub_probers: bool = False
-    # Named reviewed local transforms used by ``messages.transform("name")``.
-    transforms: Mapping[str, ContentTransform] = field(default_factory=dict)
+    # Named reviewed transform definitions; adapters are supplied by the trusted host.
+    transforms: Mapping[str, TransformConfig] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Detach caller-provided containers into immutable form and pick timeout defaults."""
@@ -573,9 +595,18 @@ class QuarryConfig:
                 raise ConfigurationError(
                     f"Invalid transform name {name!r}: use only letters, digits, '_', '.' and '-'"
                 )
-            if type(transform) is not ContentTransform:
+            if type(transform) not in {
+                ContentTransform,
+                LocalTransformConfig,
+                ModelTransformConfig,
+            }:
                 raise ConfigurationError(
-                    f"Transform {name!r} must be a ContentTransform immutable value"
+                    f"Transform {name!r} must be a ContentTransform immutable value "
+                    "or a LocalTransformConfig or ModelTransformConfig value"
+                )
+            if type(transform) is ModelTransformConfig and transform.model not in self.models:
+                raise ConfigurationError(
+                    f"Transform {name!r} references unconfigured model {transform.model!r}"
                 )
             checked_transforms[name] = transform
         object.__setattr__(self, "transforms", _frozen_mapping(checked_transforms))
