@@ -558,7 +558,7 @@ async def test_combining_independent_equal_tool_transforms_rejects_repeated_unit
 
     with pytest.raises(ValueError, match="duplicate tool-call"):
         Messages.combine((first.assistant_messages, second.assistant_messages))
-    with pytest.raises(ValueError, match="duplicate tool-call"):
+    with pytest.raises(ValueError, match="different content variants"):
         different = await apply_content_transform(
             source.assistant_messages,
             _transform(TransformOperation("casefold")),
@@ -748,12 +748,12 @@ async def test_duplicate_variant_projection_rejects_incompatible_alternation_and
         _transform(TransformOperation("casefold")),
     )
     incompatible = messages_module._CombineMetrics()
-    with pytest.raises(ValueError, match="duplicate tool-call"):
+    with pytest.raises(ValueError, match="different content variants"):
         Messages.combine(
             tuple((first, different)[index % 2] for index in range(256)),
             _metrics=incompatible,
         )
-    assert incompatible.selection_visits == 256
+    assert incompatible.selection_visits == 2
     assert incompatible.work_units == _charged_combine_work(incompatible)
 
     multipart = Messages.from_openai(
