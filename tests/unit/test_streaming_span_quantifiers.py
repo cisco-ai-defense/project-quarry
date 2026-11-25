@@ -40,9 +40,7 @@ def test_quantifiers_stream_past_the_collection_limit(
 ):
     config = QuarryConfig(
         config_version=2,
-        safety_limits=SafetyLimits(
-            rule_timeout=None, max_comprehension_size=2, enforce_limits=False
-        ),
+        safety_limits=SafetyLimits(rule_timeout=None, max_comprehension_size=2),
     )
     rule = (
         'rule "Read" strings: $a="a" $b="a" regex condition: '
@@ -83,13 +81,39 @@ def test_materializing_the_same_pattern_spans_exceeds_the_collection_limit():
     assert "max_comprehension_size=2" in result.evaluation_errors["Read"]
 
 
+@pytest.mark.parametrize(
+    ("clause", "materialized"),
+    [
+        ('condition: any s in {spans} where messages.extract(s) == "b"', False),
+        ("condition: all s in {spans} where true", False),
+        ("condition: true collect: [s for s in {spans} if true]", True),
+    ],
+    ids=["any", "all", "collect"],
+)
+def test_combined_span_limit_applies_when_building_a_list(clause, materialized):
+    config = QuarryConfig(
+        config_version=2, safety_limits=SafetyLimits(rule_timeout=None, max_comprehension_size=2)
+    )
+    rule = 'rule "Read" strings: $a="a" $b="b" ' + clause.format(
+        spans="union($a.spans(messages), $b.spans(messages))"
+    )
+    policy = compile_policy(rule, runtime_config=config)
+    result = policy.scan({"messages": [{"role": "user", "content": "aabb"}]})
+    if materialized:
+        assert result.completion_state == "incomplete"
+        assert "max_comprehension_size=2" in result.evaluation_errors["Read"]
+    else:
+        assert result.is_complete, result.evaluation_errors
+        assert result.rule_matches == ["Read"]
+
+
 @pytest.mark.parametrize("kind", ["span_any", "span_all"])
 @pytest.mark.asyncio
 async def test_pattern_stream_checks_deadline_after_matching(monkeypatch, kind):
     messages = Messages.from_openai([{"role": "user", "content": "aaaa"}])
     context = SimpleNamespace(
         conversation=SimpleNamespace(messages=messages),
-        limits=SafetyLimits(enforce_limits=False),
+        limits=SafetyLimits(),
     )
     matches = E(
         "string_spans", "$a", (E("messages"), E("string_patterns", "0000", (E("literal", "a"),)))
