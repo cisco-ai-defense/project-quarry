@@ -47,8 +47,9 @@ if TYPE_CHECKING:
 # Compiler-8 records per-flow clocks so extension events cannot change a
 # conversation-only bounded flow. Saved compiler-7 artifacts must be recompiled
 # from rule source; the loader cannot migrate their serialized automata.
-# Located-input span counts add a runtime atom absent from compiler-8.
-COMPILER_VERSION = "compiler-9-rule-calls"
+# Compiler-9 adds located-input span counts. Compiler-10 permits new-name
+# forward aliases while preserving existing bindings.
+COMPILER_VERSION = "compiler-10"
 
 
 @dataclass(frozen=True, slots=True)
