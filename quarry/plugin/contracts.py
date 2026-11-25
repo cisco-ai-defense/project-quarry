@@ -27,7 +27,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal, NotRequired
 
-from pydantic import Field, StrictStr, TypeAdapter, with_config
+from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr, TypeAdapter, with_config
 from typing_extensions import TypedDict
 
 from quarry.decision_schema import (
@@ -36,6 +36,14 @@ from quarry.decision_schema import (
     DecisionTreePayload,
     JsonNumber,
     Sha256Digest,
+)
+from quarry.telemetry import (
+    MAX_MODEL_ALIAS_CHARS,
+    MAX_MODEL_OPERATION_CHARS,
+    MAX_MODEL_USAGE_ALIASES,
+    MAX_MODEL_USAGE_CALLS,
+    MAX_MODEL_USAGE_RECORDS,
+    MAX_SCAN_SECONDS,
 )
 from quarry.types.parameters import ParameterBinding
 
@@ -55,6 +63,19 @@ FailureCategory = Literal[
     "truncated_input",
     "evaluation_limit",
     "unknown",
+]
+DurationSeconds = Annotated[
+    StrictFloat,
+    Field(ge=0.0, le=MAX_SCAN_SECONDS, allow_inf_nan=False),
+]
+UsageCount = Annotated[StrictInt, Field(ge=0, le=MAX_MODEL_USAGE_CALLS)]
+TelemetryModelAlias = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=MAX_MODEL_ALIAS_CHARS),
+]
+TelemetryOperation = Annotated[
+    Literal["score", "classify", "complete", "input_tokens"],
+    Field(max_length=MAX_MODEL_OPERATION_CHARS),
 ]
 
 
@@ -240,8 +261,32 @@ class FailureRecord(TypedDict):
 class TimingSummary(TypedDict):
     """Bounded scan and per-rule timing values."""
 
-    total_seconds: NotRequired[float]
-    rules: NotRequired[dict[str, float]]
+    total_seconds: NotRequired[DurationSeconds]
+    rules: NotRequired[dict[str, DurationSeconds]]
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class ModelUsageRecord(TypedDict):
+    """Attempted physical calls for one public model alias and operation."""
+
+    model: TelemetryModelAlias
+    operation: TelemetryOperation
+    calls: UsageCount
+
+
+@with_config(EXTENSIBLE_SCHEMA)
+class ModelUsageSummary(TypedDict):
+    """Bounded provider-neutral model usage for one scan or ordered batch."""
+
+    calls: UsageCount
+    records: Annotated[list[ModelUsageRecord], Field(max_length=MAX_MODEL_USAGE_RECORDS)]
+    truncated: StrictBool
+
+
+ModelsCalled = Annotated[
+    list[TelemetryModelAlias],
+    Field(max_length=MAX_MODEL_USAGE_ALIASES),
+]
 
 
 @with_config(EXTENSIBLE_SCHEMA)
@@ -308,6 +353,8 @@ class ScanEntry(TypedDict):
     completion_state: CompletionState
     failures: list[FailureRecord]
     timings: TimingSummary
+    model_usage: NotRequired[ModelUsageSummary]
+    models_called: NotRequired[ModelsCalled]
     diagnostics: list[Diagnostic]
     decision_scores: dict[str, JsonNumber | None]
     matched: NotRequired[bool]
@@ -326,6 +373,8 @@ class ScanResponse(VersionEnvelope):
     verbosity: ResponseVerbosity
     compilation: CompileResponse
     completion_state: CompletionState
+    model_usage: ModelUsageSummary
+    models_called: ModelsCalled
     diagnostics: NotRequired[list[Diagnostic]]
     timings: NotRequired[TimingSummary]
     failures: NotRequired[list[FailureRecord]]
@@ -372,6 +421,8 @@ __all__ = [
     "CompileResponse",
     "DecisionFlowResponse",
     "DecisionTreeResponse",
+    "ModelUsageRecord",
+    "ModelUsageSummary",
     "ReferenceResponse",
     "ScanEntry",
     "ScanResponse",

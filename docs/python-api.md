@@ -45,6 +45,44 @@ booleans, floats, strings and `None` raise `ValueError` at construction. Zero is
 that rejects nonempty input. To disable limit enforcement for trusted input, set
 `enforce_limits=False` with a valid budget.
 
+### Scan timing and model usage
+
+`ScanResult.scan_time` is the bounded, finite, nonnegative monotonic duration for the scan.
+`ScanResult.rule_timings` is either `None` or a map from each started rule to its monotonic
+evaluation duration; concurrent rule durations can overlap and therefore need not sum to
+`scan_time`. `scan_batch_data` reports the monotonic elapsed time of the whole ordered batch and
+the average duration of each rule across child results that started it. Validation or selection
+failures before rule execution have no rule timings.
+
+`ScanResult.model_usage` is always present. It contains bounded provider-neutral physical
+adapter-attempt counts:
+
+```python
+{
+    "calls": 1,
+    "records": [{"model": "judge", "operation": "score", "calls": 1}],
+    "truncated": False,
+}
+```
+
+The `model` value is the configured public alias, never a provider model name. Records use only
+the generic operations `score`, `classify`, `complete`, and `input_tokens`. The summary does not
+contain prompts, model content, responses, endpoints, credentials, trace data, or pricing.
+Telemetry is diagnostic and never changes a verdict or completion state. `ScanResult.batch_size` records the submitted conversation count for batch scans (zero for an empty batch), and is `None` for individual scans and older saved results. CSV match rows retain only their original rule's timing, including batch averages; a result without matches retains its complete timing map in its single CSV row.
+
+When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
+`error.result`) may carry a partial timing and model-usage snapshot. A timeout during
+clock-feed preflight can occur before a snapshot is attached. File and batch wrappers retain
+available telemetry in their returned incomplete results along with the failure category and
+exception text.
+For a `CompiledPolicy` batch, a timeout on a later item aggregates the completed prefix and the
+current timed-out item once: `scan_time` is their saturated sum, each `rule_timings` value is the
+average across observed items that started that rule, and `model_usage` is the bounded merge in
+input order. An unstarted current item contributes zero.
+
+See [scan telemetry](PLUGIN.md#scan-telemetry) for exact retry, cache, shared-call, cancellation,
+batch, saturation, and CLI/plugin serialization semantics.
+
 ## Typed scan failures
 
 `result.failures` is an immutable tuple of `ScanFailure` records. Each record has a
