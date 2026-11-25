@@ -436,6 +436,8 @@ _DATA_TYPES = (
     "quarry.language.runtime",
     # Pure schema-to-type rules with no quarry imports; the compiler types `.json` reads by it.
     "quarry.types.response_schema",
+    # Pure immutable values; the import-purity test below guards this boundary.
+    "quarry.types.transforms",
 )
 _AST_TYPES = ("quarry.types.dsl", "quarry.language.metadata", "quarry.rule_versioning")
 
@@ -466,3 +468,9 @@ def test_the_engine_depends_only_on_data_types_and_never_on_the_parser_or_scanne
         if outside:
             offenders[path.name] = sorted(outside)
     assert offenders == {}
+
+
+def test_the_approved_transform_contract_boundary_remains_pure():
+    contract = _ENGINE.parent / "types" / "transforms.py"
+
+    assert _quarry_imports(contract) == set()

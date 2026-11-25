@@ -1789,8 +1789,8 @@ async def test_a_judge_of_fixed_messages_is_scored_once_and_reported(tmp_path) -
         (
             'message("user", assistant_messages[-1].content)',
             _after_go({**_exec_turn(_RM), "content": None}),
-            ([], True),
-            [],
+            (["R"], True),
+            [_user("")],
         ),
         (_FIXED_INPUTS["join"][0], no_command, ([], True), []),
         (_FIXED_INPUTS["two-indexes"][0], no_command, (["R"], True), [_user("go")]),
@@ -1917,3 +1917,47 @@ def test_a_message_is_accepted_where_a_model_input_is_expected(
 def test_a_model_reply_is_not_a_model_input(tmp_path) -> None:
     with pytest.raises(RuleValidationError, match="must be model_input or a message of the"):
         _judge_policy(tmp_path, _V2_SCORE.format('model("judge").complete(messages)'))
+
+
+@pytest.mark.parametrize(
+    "model_input",
+    [
+        "messages",
+        "messages[-1:]",
+        "user_messages",
+        "messages.user_messages",
+        "messages.user_messages[-1:]",
+        "messages[:3].user_messages",
+        "messages.user_messages[:3]",
+        'message("system", "policy text").add_message("user", "hello")',
+        'message("user", messages[0].content)',
+    ],
+)
+def test_legacy_and_typed_model_input_selectors_have_the_same_provider_input(
+    tmp_path, v1_config, model_input
+) -> None:
+    conversation = _FIVE
+    legacy_adapter = FakeAdapter()
+    legacy_input = []
+    legacy_policy = compile_policy(
+        f'rule "R"\ncondition: llm_score("gemma4", "policy", {model_input}) > 0.5\n',
+        runtime_config=v1_config,
+        model_inference_backend=v1_backend(v1_config, legacy_adapter, legacy_input),
+    )
+    legacy_result = legacy_policy.scan(conversation)
+
+    v2_root = tmp_path / "v2"
+    v2_root.mkdir()
+    typed_adapter = ModelAdapter()
+    typed_scanner = v2_scanner(
+        v2_root,
+        {"R": f'model("judge").score({model_input}, "policy") > 0.5'},
+        {"judge": model_entry(score=True)},
+        typed_adapter,
+    )
+    typed_result = typed_scanner.scan_data(conversation)
+
+    assert (legacy_result.rule_matches, legacy_result.is_complete) == (["R"], True)
+    assert (typed_result.rule_matches, typed_result.is_complete) == (["R"], True)
+    assert len(legacy_input) == len(typed_adapter.score_messages) == 1
+    assert legacy_input[0] == typed_adapter.score_messages[0]

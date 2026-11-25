@@ -32,6 +32,11 @@ Rules read canonical `messages`, role-filtered message collections, `tool_calls`
 
 Use `any` and `all` comprehensions to inspect collections. String declarations support literal, whole-word, Base64, and RE2 matching. Arithmetic, numeric comparison, field access, array indexing, and `as` capture are available where the compiler can type and lower them. A condition must produce a Boolean verdict.
 
+Use `chosen if predicate else fallback` to choose between compatible static types. The predicate
+must be Boolean and cannot call a model; only the selected branch is evaluated. A Boolean
+conditional can be a rule verdict, while numbers, text, and message values can feed another typed
+expression.
+
 An `as` capture name cannot also be declared in the same rule's `variables:` block. Quarry rejects that ambiguity when the rule loads.
 
 ```text
@@ -61,5 +66,13 @@ The compiler rejects combinations it cannot represent faithfully. It also limits
 `model("alias")` calls an alias from `config_version: 2` configuration. Supported operations include scoring, classification, completion, token counting, splitting, and spans, subject to adapter capabilities. `collect:` currently accepts a direct `model(...).spans(...)` source with a typed filter and returns a collection on a match. See [model-inference.md](model-inference.md).
 
 A conversation message can stand in for a model input. For example, `user_messages[-1]` supplies only the newest user message. If that message does not exist, the input is empty and the model call is skipped. For a model input built from several values, `join([value for item in collection if test], "\n")` can supply the content of `message(...)`. A joined input with no content also skips the model call. See the [joined tool-command example](../quarry/language/examples/joined-tool-commands.rule).
+
+Typed model inputs can also select existing messages with
+`[item for item in messages if test]`, combine source-backed selections with `+`, and choose
+one of two compatible values with `chosen if predicate else fallback`. Selection predicates and
+conditional predicates cannot call a model. Only the chosen conditional branch is evaluated.
+Composition keeps written order, immutable values, content, provenance, transcript indexes, and
+tool identities. It normally reuses message objects, but may create relinked immutable tool
+variants; object identity is not guaranteed. An empty result skips the model call.
 
 Rule metadata can contain an optional `requires_quarry = ">=0.1.0"` or `requires_quarry = ">=0.1.0,<0.2.0"` declaration. Quarry rejects an explicit incompatible requirement before compiling the rule. The declaration does not replace behavioral tests for a ruleset.

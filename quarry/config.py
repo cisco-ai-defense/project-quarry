@@ -32,10 +32,24 @@ from quarry.cache.constants import (
     RESULT_CACHE_MAX_ENTRIES,
     RESULT_CACHE_TTL_SECONDS,
 )
+from quarry.inputs import (
+    AdapterConfig,
+    InputDeclaration,
+    parse_adapters,
+    parse_declaration,
+    parse_inputs,
+)
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConfigurationError
 from quarry.types.rate_limit import RateLimitConfig
 from quarry.types.response_schema import response_schema_text
+from quarry.types.transforms import (
+    MAX_TRANSFORM_DEFINITIONS,
+    MAX_TRANSFORM_NAME_CHARACTERS,
+    MAX_TRANSFORM_OPERATIONS,
+    ContentTransform,
+    TransformOperation,
+)
 
 # Text resource names are referenced from rules as text_ref("<name>"), so each name has to be
 # unambiguous: no colons, no whitespace.
@@ -71,6 +85,8 @@ _CONFIG_FIELDS = frozenset(
         "rules",
         "config_version",
         "models",
+        "inputs",
+        "adapters",
         "model_templates",
         "texts",
         "judge_prompts",
@@ -89,6 +105,7 @@ _CONFIG_FIELDS = frozenset(
         "max_comprehension_size",
         "max_model_calls",
         "model_cache",
+        "transforms",
         "enforce_limits",
         "fail_on_timeout",
         "fail_on_limit",
@@ -364,6 +381,73 @@ def _parse_model_cache(document: dict) -> ModelCacheConfig:
     )
 
 
+def _parse_content_transforms(value: object) -> dict[str, ContentTransform]:
+    """Parse the strict local content-transform registry."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigurationError("Configuration field 'transforms' must be a mapping")
+    if len(value) > MAX_TRANSFORM_DEFINITIONS:
+        raise ConfigurationError(
+            f"Configuration supports at most {MAX_TRANSFORM_DEFINITIONS} content transforms"
+        )
+    transforms: dict[str, ContentTransform] = {}
+    for name, definition in value.items():
+        if (
+            not isinstance(name, str)
+            or len(name) > MAX_TRANSFORM_NAME_CHARACTERS
+            or not JUDGE_PROMPT_NAME_PATTERN.fullmatch(name)
+        ):
+            raise ConfigurationError(
+                f"Invalid transform name {name!r}: use only letters, digits, '_', '.' and '-'"
+            )
+        owner = f"Transform {name!r}"
+        if not isinstance(definition, dict):
+            raise ConfigurationError(f"{owner} must be a mapping")
+        _reject_unknown_fields(definition, {"operations"}, owner)
+        operations = definition.get("operations")
+        if not isinstance(operations, list) or not operations:
+            raise ConfigurationError(f"{owner} operations must be a non-empty list")
+        if len(operations) > MAX_TRANSFORM_OPERATIONS:
+            raise ConfigurationError(
+                f"{owner} supports at most {MAX_TRANSFORM_OPERATIONS} operations"
+            )
+        parsed = []
+        for index, operation in enumerate(operations):
+            operation_owner = f"{owner} operation {index}"
+            if not isinstance(operation, dict):
+                raise ConfigurationError(f"{operation_owner} must be a mapping")
+            kind = operation.get("op")
+            try:
+                if isinstance(kind, str) and kind in {"strip", "casefold"}:
+                    _reject_unknown_fields(operation, {"op"}, operation_owner)
+                    parsed.append(TransformOperation(kind))
+                elif isinstance(kind, str) and kind in {"prefix", "suffix"}:
+                    _reject_unknown_fields(operation, {"op", "text"}, operation_owner)
+                    text = operation.get("text")
+                    if not isinstance(text, str):
+                        raise ConfigurationError(f"{operation_owner} text must be a string")
+                    parsed.append(TransformOperation(kind, text))
+                elif kind == "replace":
+                    _reject_unknown_fields(operation, {"op", "old", "new"}, operation_owner)
+                    old, new = operation.get("old"), operation.get("new")
+                    if not isinstance(old, str) or not isinstance(new, str):
+                        raise ConfigurationError(f"{operation_owner} old and new must be strings")
+                    parsed.append(TransformOperation("replace", old, new))
+                else:
+                    raise ConfigurationError(
+                        f"{operation_owner} op must be strip, casefold, replace, prefix, or suffix"
+                    )
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(f"{operation_owner} is invalid: {exc}") from exc
+        try:
+            transforms[name] = ContentTransform(tuple(parsed))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"{owner} is invalid: {exc}") from exc
+    return transforms
+
+
 @dataclass(frozen=True)
 class QuarryConfig:
     """Configuration for rules and integrations.
@@ -391,6 +475,8 @@ class QuarryConfig:
     # Human-facing purpose of each alias. Kept outside ``models`` so rewording does not change
     # provider requests, cache keys, or a compiled policy's model digest.
     model_descriptions: Mapping[str, str] = field(default_factory=dict)
+    inputs: Mapping[str, InputDeclaration] = field(default_factory=dict)
+    adapters: Mapping[str, AdapterConfig] = field(default_factory=dict)
     model_cache: ModelCacheConfig = field(default_factory=ModelCacheConfig)
 
     quarry_rule_texts: tuple[str, ...] = ()
@@ -399,6 +485,8 @@ class QuarryConfig:
     # closed at load unless a real backend is registered; True opts into the dependency-free
     # keyword/lexical STUBS (local dev/testing only, never a production model).
     allow_stub_probers: bool = False
+    # Named reviewed local transforms used by ``messages.transform("name")``.
+    transforms: Mapping[str, ContentTransform] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Detach caller-provided containers into immutable form and pick timeout defaults."""
@@ -428,8 +516,69 @@ class QuarryConfig:
                     f"Inference model '{model_name}' description must be at most "
                     f"{MAX_MODEL_DESCRIPTION_LENGTH} characters"
                 )
+        for section, declaration in self.inputs.items():
+            if isinstance(declaration, InputDeclaration) and declaration.section != section:
+                raise ConfigurationError(
+                    f"inputs {section!r} holds the declaration of {declaration.section!r}"
+                )
+        object.__setattr__(
+            self,
+            "inputs",
+            _frozen_mapping(
+                {
+                    section: parse_declaration(
+                        section,
+                        {
+                            key: value
+                            for key, value in declaration.describe().items()
+                            if key != "section"
+                        },
+                    )
+                    if isinstance(declaration, InputDeclaration)
+                    else parse_declaration(section, declaration)
+                    for section, declaration in self.inputs.items()
+                }
+            ),
+        )
+        for key, entry in self.adapters.items():
+            if isinstance(entry, AdapterConfig) and entry.key != key:
+                raise ConfigurationError(f"adapters {key!r} holds the entry of {entry.key!r}")
+        object.__setattr__(
+            self,
+            "adapters",
+            _frozen_mapping(
+                parse_adapters(
+                    {
+                        key: {"adapter": entry.adapter}
+                        if isinstance(entry, AdapterConfig)
+                        else entry
+                        for key, entry in self.adapters.items()
+                    }
+                )
+            ),
+        )
         object.__setattr__(self, "judge_prompts", _frozen_mapping(self.judge_prompts))
         object.__setattr__(self, "llm_rate_limits", _frozen_mapping(self.llm_rate_limits))
+        if len(self.transforms) > MAX_TRANSFORM_DEFINITIONS:
+            raise ConfigurationError(
+                f"Configuration supports at most {MAX_TRANSFORM_DEFINITIONS} content transforms"
+            )
+        checked_transforms = {}
+        for name, transform in self.transforms.items():
+            if (
+                not isinstance(name, str)
+                or len(name) > MAX_TRANSFORM_NAME_CHARACTERS
+                or not JUDGE_PROMPT_NAME_PATTERN.fullmatch(name)
+            ):
+                raise ConfigurationError(
+                    f"Invalid transform name {name!r}: use only letters, digits, '_', '.' and '-'"
+                )
+            if type(transform) is not ContentTransform:
+                raise ConfigurationError(
+                    f"Transform {name!r} must be a ContentTransform immutable value"
+                )
+            checked_transforms[name] = transform
+        object.__setattr__(self, "transforms", _frozen_mapping(checked_transforms))
 
         if self.safety_limits is None:
             object.__setattr__(
@@ -612,11 +761,14 @@ class QuarryConfig:
             quarry_rules_paths=rules_paths,
             models=models,
             model_descriptions=model_descriptions,
+            inputs=parse_inputs(document.get("inputs")),
+            adapters=parse_adapters(document.get("adapters")),
             judge_prompts=judge_prompts,
             llm_rate_limits=llm_rate_limits,
             safety_limits=safety_limits,
             model_cache=_parse_model_cache(document),
             allow_stub_probers=allow_stub_probers,
+            transforms=_parse_content_transforms(document.get("transforms")),
         )
 
     def get_safety_limits(self) -> SafetyLimits:

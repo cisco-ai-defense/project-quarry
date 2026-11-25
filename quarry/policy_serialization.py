@@ -33,7 +33,19 @@ import orjson
 
 from quarry.config import QuarryConfig
 from quarry.engine import temporal as T
-from quarry.engine.atoms import AtomDomain, AtomSpec, Cost, ModelExpression, StringSemantics
+from quarry.engine.atoms import (
+    MAX_MODEL_EXPRESSION_DEPTH,
+    MAX_MODEL_EXPRESSION_FANOUT,
+    MAX_MODEL_EXPRESSION_NODES,
+    AtomDomain,
+    AtomSpec,
+    Cost,
+    ModelExpression,
+    StringSemantics,
+    validate_constructed_message_graph,
+    validate_model_expression,
+    validate_transform_expression_graph,
+)
 from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, ElementPlan
 from quarry.engine.collect import CollectPlan
 from quarry.engine.contracts import (
@@ -41,6 +53,8 @@ from quarry.engine.contracts import (
     ClosedPlan,
     CompiledRuleArtifact,
     DecisionTree,
+    FlowCandidate,
+    FlowRequirement,
     ToolQuantifierPlan,
     TreeNode,
 )
@@ -54,12 +68,13 @@ from quarry.scanner import DSLScanner
 from quarry.types.exceptions import RuleCompatibilityError
 from quarry.types.parameters import ParameterSpec, validate_parameter_values
 from quarry.types.rules import DSLRule
+from quarry.types.transforms import MAX_TRANSFORM_CHAIN, ContentTransform
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 FORMAT_KIND = "quarry.compiled-policy"
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 _WIRE_SCHEMAS: list[tuple[type[DataclassInstance], set[str]]] = []
 _RESOURCE_REQUIREMENT_KEYS = frozenset(
     {
@@ -115,10 +130,12 @@ _ARTIFACT_KEYS = _wire_fields(
     CompiledRuleArtifact,
     "rule_name dfa dfa_hash compiler_version atom_specs temporal notes "
     "capture_plan parameter_schema collect_plan tool_quantifiers closed_conditions "
-    "full_trace_proof decision_tree",
-    # Source provenance serves compile-time visualization of the authored AST, which a
-    # loaded policy does not carry.
+    "full_trace_proof decision_tree flow_requirements",
     unserialized="node_atom_ids",
+)
+_FLOW_REQUIREMENT_FIELDS = _wire_fields(
+    FlowRequirement,
+    "candidates ambient_surfaces static_formula static_sustained clock_surfaces",
 )
 _TOOL_QUANTIFIER_FIELDS = _wire_fields(ToolQuantifierPlan, "body kind body_source_nodes")
 _CLOSED_PLAN_FIELDS = _wire_fields(ClosedPlan, "dfa")
@@ -304,7 +321,69 @@ def _artifact_to_wire(artifact: CompiledRuleArtifact) -> dict[str, Any]:
         "full_trace_proof": artifact.full_trace_proof,
         "decision_tree": _decision_tree_to_wire(artifact.decision_tree),
         "dfa": _dfa_to_wire(artifact.dfa),
+        "flow_requirements": [
+            _flow_requirement_to_wire(requirement) for requirement in artifact.flow_requirements
+        ],
     }
+
+
+def _flow_requirement_to_wire(requirement: FlowRequirement) -> dict[str, Any]:
+    def optional(formula: T.Formula | None) -> dict[str, Any] | None:
+        return None if formula is None else _boolean_formula_to_wire(formula)
+
+    return {
+        "candidates": [
+            [candidate.surface, optional(candidate.formula)] for candidate in requirement.candidates
+        ],
+        "ambient_surfaces": list(requirement.ambient_surfaces),
+        "static_formula": optional(requirement.static_formula),
+        "static_sustained": [
+            _boolean_formula_to_wire(formula) for formula in requirement.static_sustained
+        ],
+        "clock_surfaces": list(requirement.clock_surfaces),
+    }
+
+
+def _flow_requirements_from_wire(raw: object) -> tuple[FlowRequirement, ...]:
+    requirements = []
+    for index, item in enumerate(_list(raw, "rule.artifact.flow_requirements")):
+        name = f"rule.artifact.flow_requirements[{index}]"
+        value = _mapping(item, name)
+        _exact_keys(value, _FLOW_REQUIREMENT_FIELDS, name)
+
+        def optional(raw_formula: object, where: str) -> T.Formula | None:
+            return None if raw_formula is None else _boolean_formula_from_wire(raw_formula, where)
+
+        candidates = []
+        for position, candidate in enumerate(_list(value["candidates"], f"{name}.candidates")):
+            pair = _list(candidate, f"{name}.candidates[{position}]")
+            if len(pair) != 2:
+                raise _fail(f"{name}.candidates[{position}] must be [surface, formula]")
+            candidates.append(
+                FlowCandidate(
+                    _string(pair[0], f"{name}.candidates[{position}][0]"),
+                    optional(pair[1], f"{name}.candidates[{position}][1]"),
+                )
+            )
+        requirements.append(
+            FlowRequirement(
+                candidates=tuple(candidates),
+                ambient_surfaces=tuple(
+                    _string(surface, f"{name}.ambient_surfaces")
+                    for surface in _list(value["ambient_surfaces"], f"{name}.ambient_surfaces")
+                ),
+                static_formula=optional(value["static_formula"], f"{name}.static_formula"),
+                static_sustained=tuple(
+                    _boolean_formula_from_wire(formula, f"{name}.static_sustained")
+                    for formula in _list(value["static_sustained"], f"{name}.static_sustained")
+                ),
+                clock_surfaces=tuple(
+                    _string(surface, f"{name}.clock_surfaces")
+                    for surface in _list(value["clock_surfaces"], f"{name}.clock_surfaces")
+                ),
+            )
+        )
+    return tuple(requirements)
 
 
 def _decision_tree_to_wire(tree: DecisionTree | None) -> dict[str, Any] | None:
@@ -422,23 +501,60 @@ def serialize_compiled_policy(policy: CompiledPolicy) -> bytes:
             "artifact": _artifact_to_wire(artifact),
         },
     }
+    if policy._input_hashes:
+        payload["inputs"] = dict(policy._input_hashes)
+    if policy._adapter_hashes:
+        payload["adapters"] = dict(policy._adapter_hashes)
     return orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
 
 
 def _model_expression_from_wire(raw: object, name: str) -> ModelExpression | None:
     if raw is None:
         return None
-    value = _mapping(raw, name)
-    _exact_keys(value, _MODEL_EXPRESSION_FIELDS, name)
-    children = tuple(
-        _required_model_expression(child, f"{name}.children[{index}]")
-        for index, child in enumerate(_list(value["children"], f"{name}.children"))
-    )
-    return ModelExpression(
-        kind=_string(value["kind"], f"{name}.kind"),
-        value=value["value"],
-        children=children,
-    )
+
+    count = 0
+
+    def load(value_raw: object, path: str, depth: int) -> ModelExpression:
+        nonlocal count
+        if depth > MAX_MODEL_EXPRESSION_DEPTH:
+            raise _fail(
+                f"{name} exceeds {MAX_MODEL_EXPRESSION_DEPTH} nested model-expression levels"
+            )
+        count += 1
+        if count > MAX_MODEL_EXPRESSION_NODES:
+            raise _fail(f"{name} exceeds {MAX_MODEL_EXPRESSION_NODES} model-expression nodes")
+        value = _mapping(value_raw, path)
+        _exact_keys(value, _MODEL_EXPRESSION_FIELDS, path)
+        raw_children = _list(value["children"], f"{path}.children")
+        if len(raw_children) > MAX_MODEL_EXPRESSION_FANOUT:
+            raise _fail(
+                f"{path}.children exceeds {MAX_MODEL_EXPRESSION_FANOUT} model-expression children"
+            )
+        scalar = value["value"]
+        if scalar is not None and not isinstance(scalar, str | int | float | bool):
+            raise _fail(f"{path}.value must be a string, number, Boolean, or null")
+        children = tuple(
+            load(child, f"{path}.children[{index}]", depth + 1)
+            for index, child in enumerate(raw_children)
+        )
+        return ModelExpression(
+            kind=_string(value["kind"], f"{path}.kind"),
+            value=scalar,
+            children=children,
+        )
+
+    expression = load(raw, name, 1)
+    try:
+        validate_model_expression(expression)
+        validate_constructed_message_graph(expression)
+        validate_transform_expression_graph(
+            expression,
+            maximum=MAX_TRANSFORM_CHAIN,
+            validate_plan=ContentTransform.from_canonical_json,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(f"{name} is invalid: {exc}") from exc
+    return expression
 
 
 def _required_model_expression(raw: object, name: str) -> ModelExpression:
@@ -454,6 +570,9 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
     _exact_keys(value, _ATOM_FIELDS, name)
     semantics = _mapping(value["string_semantics"], f"{name}.string_semantics")
     _exact_keys(semantics, _STRING_SEMANTICS_FIELDS, f"{name}.string_semantics")
+    model_expression = _model_expression_from_wire(
+        value["model_expression"], f"{name}.model_expression"
+    )
 
     kwargs = dict(value)
     try:
@@ -471,9 +590,7 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
             tuple(_list(turn, f"{name}.constructed_input[]"))
             for turn in _list(value["constructed_input"], f"{name}.constructed_input")
         )
-        kwargs["model_expression"] = _model_expression_from_wire(
-            value["model_expression"], f"{name}.model_expression"
-        )
+        kwargs["model_expression"] = model_expression
         return AtomSpec(**kwargs)
     except (TypeError, ValueError) as exc:
         raise _fail(f"{name} is incompatible with format_version {FORMAT_VERSION}") from exc
@@ -574,16 +691,36 @@ def _collect_from_wire(raw: object) -> CollectPlan | None:
         return None
     value = _mapping(raw, "rule.artifact.collect_plan")
     _exact_keys(value, _COLLECT_PLAN_FIELDS, "rule.artifact.collect_plan")
+    source = _required_model_expression(value["source"], "rule.artifact.collect_plan.source")
+    local_predicate = _required_model_expression(
+        value["local_predicate"], "rule.artifact.collect_plan.local_predicate"
+    )
+    model_predicate = _model_expression_from_wire(
+        value["model_predicate"], "rule.artifact.collect_plan.model_predicate"
+    )
+    try:
+        additional_roots = (
+            local_predicate,
+            *((model_predicate,) if model_predicate is not None else ()),
+        )
+        validate_constructed_message_graph(
+            source,
+            additional_roots=additional_roots,
+        )
+        validate_transform_expression_graph(
+            source,
+            maximum=MAX_TRANSFORM_CHAIN,
+            validate_plan=ContentTransform.from_canonical_json,
+            additional_roots=additional_roots,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(f"rule.artifact.collect_plan is invalid: {exc}") from exc
     return CollectPlan(
         variable=_string(value["variable"], "rule.artifact.collect_plan.variable"),
         item_type=_string(value["item_type"], "rule.artifact.collect_plan.item_type"),
-        source=_required_model_expression(value["source"], "rule.artifact.collect_plan.source"),
-        local_predicate=_required_model_expression(
-            value["local_predicate"], "rule.artifact.collect_plan.local_predicate"
-        ),
-        model_predicate=_model_expression_from_wire(
-            value["model_predicate"], "rule.artifact.collect_plan.model_predicate"
-        ),
+        source=source,
+        local_predicate=local_predicate,
+        model_predicate=model_predicate,
         has_external_work=_boolean(
             value["has_external_work"], "rule.artifact.collect_plan.has_external_work"
         ),
@@ -805,7 +942,7 @@ def _check_closed_conditions(artifact: CompiledRuleArtifact) -> None:
         visit(atom_id, ())
 
 
-def _artifact_from_wire(raw: object) -> CompiledRuleArtifact:
+def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
     _exact_keys(value, _ARTIFACT_KEYS, "rule.artifact")
     compiler_version = _string(value["compiler_version"], "rule.artifact.compiler_version")
@@ -834,11 +971,12 @@ def _artifact_from_wire(raw: object) -> CompiledRuleArtifact:
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
+        flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),
     )
     missing_specs = sorted(artifact.automaton_atoms - set(artifact.atom_specs))
     if missing_specs:
         raise _fail("DFA atoms lack specifications: " + ", ".join(missing_specs))
-    _check_capture_plan(artifact)
+    _check_capture_plan(artifact, inputs)
     tool_body_atoms = {
         atom_id for plan in artifact.tool_quantifiers.values() for atom_id in T.atoms_of(plan.body)
     }
@@ -860,7 +998,7 @@ def _artifact_from_wire(raw: object) -> CompiledRuleArtifact:
     return artifact
 
 
-def _check_capture_plan(artifact: CompiledRuleArtifact) -> None:
+def _check_capture_plan(artifact: CompiledRuleArtifact, inputs: frozenset[str]) -> None:
     """Reject a capture plan that does not describe the artifact's parameterized atoms.
 
     The executor binds candidates only into the plan's atoms, so a plan naming a missing atom,
@@ -879,7 +1017,7 @@ def _check_capture_plan(artifact: CompiledRuleArtifact) -> None:
         raise _fail("rule.artifact.capture_plan does not name exactly the parameterized atoms")
     name = "rule.artifact.capture_plan"
     if isinstance(plan, ElementPlan):
-        if plan.surface not in surface_names(domain="event"):
+        if plan.surface not in surface_names(domain="event") | inputs:
             raise _fail(f"{name}.surface must be an event surface")
         at = specs[plan.at_atom_id]
         if (at.predicate, at.selector, at.parameter_names) != (
@@ -948,12 +1086,57 @@ def _runtime_models(
     return {name: _canonical_sha256(configured[name].identity_dict()) for name in sorted(required)}
 
 
+def _checked_inputs(value, artifact, config, input_adapters):
+    """Check every compiled input and adapter fingerprint against the runtime."""
+
+    from quarry.inputs import adapter_fingerprints, load_input_adapters
+    from quarry.types.exceptions import ConfigurationError
+
+    inputs = {
+        name: _sha256(digest, f"inputs.{name}")
+        for name, digest in _mapping(value.get("inputs", {}), "inputs").items()
+    }
+    adapters = {
+        name: _sha256(digest, f"adapters.{name}")
+        for name, digest in _mapping(value.get("adapters", {}), "adapters").items()
+    }
+    if set(inputs) != {surface for surface in artifact.read_surfaces if "." in surface}:
+        raise _fail("input fingerprints do not match the compiled artifact")
+    try:
+        runtime_adapters, declarations = load_input_adapters(
+            config.adapters, config.inputs, input_adapters
+        )
+    except ConfigurationError as exc:
+        raise _fail(f"runtime input configuration: {exc}") from exc
+    missing = sorted(set(inputs) - set(declarations))
+    if missing:
+        raise _fail("runtime configuration is missing inputs: " + ", ".join(missing))
+    differing = sorted(
+        name
+        for name, digest in inputs.items()
+        if _canonical_sha256(declarations[name].describe()) != digest
+    )
+    if differing:
+        raise _fail(
+            "runtime input declarations differ from the compiled policy for: "
+            + ", ".join(differing)
+        )
+    expected = adapter_fingerprints(runtime_adapters, artifact.read_surfaces)
+    differing = sorted(
+        key for key in expected.keys() | adapters.keys() if expected.get(key) != adapters.get(key)
+    )
+    if differing:
+        raise _fail("runtime adapters differ from the compiled policy for: " + ", ".join(differing))
+    return inputs, adapters
+
+
 def load_compiled_policy(
     data: bytes | bytearray | memoryview,
     *,
     runtime_config: QuarryConfig | None = None,
     model_inference_backend=None,
     llm_rate_limiter=None,
+    input_adapters=None,
 ) -> CompiledPolicy:
     """Hydrate one authenticated compiled policy without parsing or compiling source."""
 
@@ -965,7 +1148,7 @@ def load_compiled_policy(
     except orjson.JSONDecodeError as exc:
         raise _fail(f"malformed JSON: {exc}") from exc
     value = _mapping(decoded, "document")
-    _exact_keys(value, _TOP_LEVEL_KEYS, "document")
+    _exact_keys(value, _TOP_LEVEL_KEYS | ({"inputs", "adapters"} & value.keys()), "document")
     if value["kind"] != FORMAT_KIND:
         raise _fail(f"kind must be {FORMAT_KIND!r}")
     format_version = _integer(value["format_version"], "format_version")
@@ -979,7 +1162,8 @@ def load_compiled_policy(
     _exact_keys(rule_value, _RULE_KEYS, "rule")
     metadata = _string_mapping(rule_value["metadata"], "rule.metadata")
     try:
-        artifact = _artifact_from_wire(rule_value["artifact"])
+        recorded_inputs = _mapping(value.get("inputs", {}), "inputs")
+        artifact = _artifact_from_wire(rule_value["artifact"], frozenset(recorded_inputs))
         requirements = requirements_from_artifact(artifact)
     except RecursionError as exc:
         raise _fail("compiled artifact exceeds the supported nesting depth") from exc
@@ -1034,6 +1218,7 @@ def load_compiled_policy(
         raise _fail(
             f"runtime config_version {config.config_version} does not match {config_version}"
         )
+    input_hashes, adapter_hashes = _checked_inputs(value, artifact, config, input_adapters)
     missing_texts = sorted(set(text_resources) - set(config.judge_prompts))
     if missing_texts:
         raise _fail("runtime configuration is missing text resources: " + ", ".join(missing_texts))
@@ -1052,6 +1237,7 @@ def load_compiled_policy(
         resource_requirements=requirements,
         model_inference_backend=model_inference_backend,
         llm_rate_limiter=llm_rate_limiter,
+        input_adapters=input_adapters,
     )
     return CompiledPolicy(
         _rule_name=artifact.rule_name,
@@ -1062,4 +1248,6 @@ def load_compiled_policy(
         _source_sha256=source_sha256,
         _text_resource_hashes=MappingProxyType(text_resources),
         _model_hashes=MappingProxyType(models),
+        _input_hashes=MappingProxyType(input_hashes),
+        _adapter_hashes=MappingProxyType(adapter_hashes),
     )

@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-7",
+  "compiler_version": "compiler-10",
   "examples": [
     {
       "checks": [],
@@ -74,6 +74,15 @@
       "id": "example:compatibility-model-split",
       "requires_backend": true,
       "rule_path": "examples/compatibility-model-split.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:messages.transform"
+      ],
+      "id": "example:content-transform",
+      "requires_backend": true,
+      "rule_path": "examples/content-transform.rule"
     },
     {
       "checks": [
@@ -211,6 +220,17 @@
       "id": "example:language-basics",
       "requires_backend": false,
       "rule_path": "examples/language-basics.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "construct:addition",
+        "construct:conditional-value",
+        "construct:filter-comprehension"
+      ],
+      "id": "example:message-composition",
+      "requires_backend": true,
+      "rule_path": "examples/message-composition.rule"
     },
     {
       "checks": [
@@ -668,7 +688,7 @@
       "allowed_uses": [],
       "compiler_tags": [],
       "deprecated": false,
-      "description": "Build a one-message model input from a role and literal or field-backed content.\n\nIn a version 2 model expression, `content` can also be the text that `join()` gives.",
+      "description": "Build a one-message model input from a role and literal or field-backed content.\n\nIn a version 2 model expression, `content` can also be the text that `join()` gives.\nUse `+` to place the constructed message before, after, or between source selections.",
       "id": "compiler_form:message",
       "implicit_receiver_count": 0,
       "kind": "compiler_form",
@@ -715,6 +735,39 @@
       "source": "quarry.engine.compiler._Compiler._compile_message",
       "summary": "Build a one-message model input from a role and literal or field-backed content.",
       "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Apply one reviewed configured transform to message text.\n\nThe result keeps message roles, tool links, and source provenance. Transforms may be\nchained, filtered, sliced, composed, or passed directly to a model operation.",
+      "id": "compiler_form:messages.transform",
+      "implicit_receiver_count": 1,
+      "kind": "compiler_form",
+      "name": "messages.transform",
+      "parameters": [
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": true,
+          "maximum": null,
+          "minimum": null,
+          "name": "name",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_input",
+      "signature": "messages.transform(name: string) -> model_input",
+      "source": "quarry.engine.compiler._Compiler._bind_content_transform",
+      "summary": "Apply one reviewed configured transform to message text.",
+      "syntax": "messages.transform(\"name\")"
     },
     {
       "allowed_uses": [],
@@ -958,7 +1011,7 @@
       ],
       "compiler_tags": [],
       "deprecated": false,
-      "description": "Return original-conversation spans from the alias-configured span operation.\n\n`messages` must be the root conversation or one of its views. Quarry reuses the raw\nclassifier response cached for the same model input. The adapter owns span decoding and\nhow the required `threshold` is applied.",
+      "description": "Return spans from the alias-configured typed message input.\n\nSource-backed characters retain exact original ranges. Constructed characters are\nexplicitly unmapped. Quarry reuses the raw classifier response cached for the same model\ninput. The adapter owns span decoding and how the required `threshold` is applied.",
       "id": "compiler_form:model.spans",
       "implicit_receiver_count": 1,
       "kind": "compiler_form",
@@ -998,7 +1051,7 @@
       "return_type": "collection<span>",
       "signature": "model.spans(messages: model_input, threshold: number) -> collection<span>",
       "source": "quarry.engine.compiler._Compiler._bind_model_spans",
-      "summary": "Return original-conversation spans from the alias-configured span operation.",
+      "summary": "Return spans from the alias-configured typed message input.",
       "syntax": "model(\"alias\").spans(messages, threshold)"
     },
     {
@@ -1211,13 +1264,13 @@
       "syntax": null
     },
     {
-      "description": "Add two numeric values.",
+      "description": "Add numbers or combine source-backed message selections in written order.\n\nMessage combination is available in typed model inputs. It preserves immutable values,\ncontent, provenance, written order, transcript indexes, and tool identities. It normally\nreuses message objects, but may return immutable relinked tool variants when independent\nviews must form one self-contained call/result graph; object identity is not guaranteed.",
       "handler": "add_op",
       "id": "construct:addition",
       "kind": "construct",
       "name": "addition",
       "source": "quarry.dsl.transformer.DSLTransformer.add_op",
-      "summary": "Add two numeric values.",
+      "summary": "Add numbers or combine source-backed message selections in written order.",
       "syntax": "arith_expr: arith_expr \"+\" product_expr"
     },
     {
@@ -1301,6 +1354,16 @@
       "syntax": "in_expr: arith_expr \"in\" arith_expr \"as\" IDENTIFIER"
     },
     {
+      "description": "Choose one of two compatible values using a Boolean predicate.\n\nOnly the selected branch is evaluated. Both branches must have compatible static\ntypes. A Boolean conditional can be a rule condition; other values can feed a typed\ncomparison or model input.",
+      "handler": "conditional_value",
+      "id": "construct:conditional-value",
+      "kind": "construct",
+      "name": "conditional-value",
+      "source": "quarry.dsl.transformer.DSLTransformer.conditional_value",
+      "summary": "Choose one of two compatible values using a Boolean predicate.",
+      "syntax": "conditional_expr: or_expr \"if\" or_expr \"else\" conditional_expr"
+    },
+    {
       "description": "Test whether text or a collection contains a supplied value.\n\nText comparison is case-sensitive. To match text regardless of letter case, declare the\nvalue in a `strings:` block with the `nocase` modifier and reference it here.",
       "handler": "contains_op",
       "id": "construct:contains",
@@ -1348,7 +1411,7 @@
       "name": "filter-comprehension",
       "source": "quarry.dsl.transformer.DSLTransformer.filter_comp",
       "summary": "Keep collection items that satisfy a condition.",
-      "syntax": "filter_comp: \"[\" IDENTIFIER \"for\" IDENTIFIER \"in\" expr \"if\" expr \"]\""
+      "syntax": "filter_comp: \"[\" IDENTIFIER \"for\" IDENTIFIER \"in\" or_expr \"if\" or_expr \"]\""
     },
     {
       "description": "Match when the left event occurs sometime after the right event.",
@@ -1478,7 +1541,7 @@
       "name": "map-comprehension",
       "source": "quarry.dsl.transformer.DSLTransformer.map_comp",
       "summary": "Project each selected item for use as the first argument of `join()`.",
-      "syntax": "map_comp: \"[\" expr \"for\" IDENTIFIER \"in\" expr \"]\" | \"[\" expr \"for\" IDENTIFIER \"in\" expr \"if\" expr \"]\""
+      "syntax": "map_comp: \"[\" expr \"for\" IDENTIFIER \"in\" or_expr \"]\" | \"[\" expr \"for\" IDENTIFIER \"in\" or_expr \"if\" or_expr \"]\""
     },
     {
       "description": "Test whether a value or text pattern occurs in another value.",
@@ -1756,7 +1819,7 @@
       "allowed_uses": [],
       "compiler_tags": [],
       "deprecated": false,
-      "description": "Append one text message to a model input created with `message(...)`.\n\nUse this only after a model-input value, for example\n`message(\"user\", \"hello\").add_message(\"assistant\", \"hi\")`.",
+      "description": "Append one allowlisted text message to an immutable model input.\n\nIn rules, use this after a `message(...)` constructor, for example\n`message(\"user\", \"hello\").add_message(\"assistant\", \"hi\")`.\nPython integrations may also append to a source selection; its source messages retain\nidentity and the new message has separate scan-local identity with unmapped text.",
       "id": "function:add_message",
       "implicit_receiver_count": 1,
       "kind": "function",
@@ -1801,7 +1864,7 @@
       "return_type": "model_input",
       "signature": "add_message(role: string, content: string) -> model_input",
       "source": "quarry.types.messages.Messages.add_message",
-      "summary": "Append one text message to a model input created with `message(...)`.",
+      "summary": "Append one allowlisted text message to an immutable model input.",
       "syntax": ".add_message(\"role\", content)"
     },
     {
@@ -2789,7 +2852,7 @@
       "allowed_uses": [
         "comprehension_source"
       ],
-      "description": "Assistant-role messages from the selected conversation, in source order.",
+      "description": "Assistant-role messages from this value, in its current order.",
       "domain": "event",
       "field_details": [
         {
@@ -2825,13 +2888,13 @@
       "name": "assistant_messages",
       "public_type": "collection<message>",
       "source": "quarry.types.messages.Messages.assistant_messages",
-      "summary": "Assistant-role messages from the selected conversation, in source order."
+      "summary": "Assistant-role messages from this value, in its current order."
     },
     {
       "allowed_uses": [
         "comprehension_source"
       ],
-      "description": "Developer-role messages from the selected conversation, in source order.",
+      "description": "Developer-role messages from this value, in its current order.",
       "domain": "event",
       "field_details": [
         {
@@ -2855,7 +2918,7 @@
       "name": "developer_messages",
       "public_type": "collection<message>",
       "source": "quarry.types.messages.Messages.developer_messages",
-      "summary": "Developer-role messages from the selected conversation, in source order."
+      "summary": "Developer-role messages from this value, in its current order."
     },
     {
       "allowed_uses": [
@@ -2891,7 +2954,7 @@
       "allowed_uses": [
         "comprehension_source"
       ],
-      "description": "System-role messages from the selected conversation, in source order.",
+      "description": "System-role messages from this value, in its current order.",
       "domain": "event",
       "field_details": [
         {
@@ -2915,7 +2978,7 @@
       "name": "system_messages",
       "public_type": "collection<message>",
       "source": "quarry.types.messages.Messages.system_messages",
-      "summary": "System-role messages from the selected conversation, in source order."
+      "summary": "System-role messages from this value, in its current order."
     },
     {
       "allowed_uses": [],
@@ -3091,7 +3154,7 @@
       "allowed_uses": [
         "comprehension_source"
       ],
-      "description": "User-role messages from the selected conversation, in source order.",
+      "description": "User-role messages from this value, in its current order.",
       "domain": "event",
       "field_details": [
         {
@@ -3115,7 +3178,7 @@
       "name": "user_messages",
       "public_type": "collection<message>",
       "source": "quarry.types.messages.Messages.user_messages",
-      "summary": "User-role messages from the selected conversation, in source order."
+      "summary": "User-role messages from this value, in its current order."
     },
     {
       "category": "flow_word",
@@ -3251,6 +3314,15 @@
       "source": "quarry.dsl.syntax.TOKEN_RECORDS",
       "spelling": ".",
       "summary": "Quarry punctuation `.`."
+    },
+    {
+      "category": "operator",
+      "id": "token:else",
+      "kind": "token",
+      "reserved_for_variables": false,
+      "source": "quarry.dsl.syntax.TOKEN_RECORDS",
+      "spelling": "else",
+      "summary": "Quarry operator `else`."
     },
     {
       "category": "operator",
@@ -3676,8 +3748,17 @@
       "summary": "Quarry flow word `within`."
     }
   ],
-  "language_version": "0.1.0",
+  "language_version": "0.1.1",
   "operator_precedence": [
+    {
+      "associativity": "right",
+      "description": "Chooses between two compatible values after evaluating a Boolean predicate.",
+      "family": "conditional value",
+      "operators": [
+        "if ... else"
+      ],
+      "precedence": 1
+    },
     {
       "associativity": "left",
       "description": "Evaluated after `and`.",
@@ -3685,7 +3766,7 @@
       "operators": [
         "or"
       ],
-      "precedence": 1
+      "precedence": 2
     },
     {
       "associativity": "left",
@@ -3694,7 +3775,7 @@
       "operators": [
         "and"
       ],
-      "precedence": 2
+      "precedence": 3
     },
     {
       "associativity": "right",
@@ -3703,7 +3784,7 @@
       "operators": [
         "not"
       ],
-      "precedence": 3
+      "precedence": 4
     },
     {
       "associativity": "none",
@@ -3718,7 +3799,7 @@
         "right_after",
         "until"
       ],
-      "precedence": 4
+      "precedence": 5
     },
     {
       "associativity": "none",
@@ -3732,7 +3813,7 @@
         ">=",
         "<="
       ],
-      "precedence": 5
+      "precedence": 6
     },
     {
       "associativity": "none",
@@ -3746,17 +3827,17 @@
         "in",
         "as"
       ],
-      "precedence": 6
+      "precedence": 7
     },
     {
       "associativity": "left",
-      "description": "Adds or subtracts numeric values.",
+      "description": "Adds or subtracts numbers; `+` also combines compatible message selections.",
       "family": "addition",
       "operators": [
         "+",
         "-"
       ],
-      "precedence": 7
+      "precedence": 8
     },
     {
       "associativity": "left",
@@ -3765,7 +3846,7 @@
       "operators": [
         "*"
       ],
-      "precedence": 8
+      "precedence": 9
     },
     {
       "associativity": "left",
@@ -3778,7 +3859,7 @@
         "[slice]",
         ".*"
       ],
-      "precedence": 9
+      "precedence": 10
     }
   ],
   "rejected_spellings": [

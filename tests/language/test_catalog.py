@@ -20,6 +20,7 @@ from quarry.language.generate import generate_language_spec, render_reference, w
 from quarry.safety.validator import RuleValidator
 from quarry.types.dsl.model_calls import MODEL_OPERATION_TYPES
 from quarry.types.exceptions import RuleParseError
+from quarry.types.transforms import ContentTransform, TransformOperation
 from tests.conftest import rule_matches
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -40,7 +41,14 @@ def _compile_stage(rule_text: str) -> tuple[str, list[str]]:
             *(error.message for error in validation.semantic_errors),
             *(error.error for error in validation.regex_errors),
         ]
-    compiled = compile_rule(parsed)
+    compiled = compile_rule(
+        parsed,
+        transforms={
+            "normalized": ContentTransform(
+                (TransformOperation("strip"), TransformOperation("casefold"))
+            )
+        },
+    )
     if not compiled.ok:
         return "compile", [error.message for error in compiled.diagnostics.errors]
     return "complete", []

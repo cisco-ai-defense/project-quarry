@@ -24,6 +24,7 @@ from quarry.types.dsl.comprehensions import (
     FilterComprehension,
     MapComprehension,
 )
+from quarry.types.dsl.conditional import ConditionalValue
 from quarry.types.dsl.functions import FunctionCall
 from quarry.types.dsl.literals import Identifier, Literal, ParameterRef
 from quarry.types.dsl.model_calls import MODEL_OPERATION_TYPES, ModelCall
@@ -48,6 +49,7 @@ from quarry.types.dsl.traversal import (
 
 __all__ = [
     "ConditionNode",
+    "ConditionalValue",
     "ConditionVisit",
     "condition_child_fields",
     "iter_condition_children",

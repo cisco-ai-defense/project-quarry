@@ -1,6 +1,6 @@
 {
   "name": "quarry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find Quarry language features, compile rules, and scan single or batched conversations.",
   "author": {
     "name": "Cisco AI Software and Platform Group",

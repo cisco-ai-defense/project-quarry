@@ -1,0 +1,3 @@
+rule "Normalized model input"
+condition:
+    model("guard").classify(messages.transform("normalized")) >= 0.8

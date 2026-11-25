@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -83,6 +85,12 @@ class Cost(StrEnum):
         """Return the rank of the cost."""
         return _COST_RANK[self]
 
+    @property
+    def requires_external_service(self) -> bool:
+        """Return whether grounding may cross the process's local evaluation boundary."""
+
+        return self.rank >= _COST_RANK[Cost.MODEL]
+
 
 _COST_RANK = {Cost.PURE: 0, Cost.DECODE: 1, Cost.MODEL: 2, Cost.LLM: 3, Cost.YARA: 4}
 
@@ -105,6 +113,316 @@ class ModelExpression:
         """Return a stable recursive identity for atom hashing."""
 
         return self.kind, self.value, tuple(child.content_key() for child in self.children)
+
+    @property
+    def inputs(self) -> frozenset[str]:
+        return frozenset({str(self.value)} if self.kind == "input_state" else ()).union(
+            *(child.inputs for child in self.children)
+        )
+
+    @property
+    def reads_messages(self) -> bool:
+        return self.kind in {"messages", "message_view", "tool_calls", "system_prompt"} or any(
+            child.reads_messages for child in self.children
+        )
+
+    @property
+    def reads_tools(self) -> bool:
+        return self.kind == "tools" or any(child.reads_tools for child in self.children)
+
+
+MAX_MODEL_EXPRESSION_DEPTH = 64
+MAX_MODEL_EXPRESSION_NODES = 10_000
+MAX_MODEL_EXPRESSION_FANOUT = 256
+MAX_CONSTRUCTED_MESSAGES = 256
+MAX_CONSTRUCTED_TEXT_CHARACTERS = 1_000_000
+MAX_CONSTRUCTED_TEXT_BYTES = 4_000_000
+
+_MODEL_EXPRESSION_ARITIES: dict[str, tuple[int, int]] = {
+    "absent": (0, 0),
+    "add_message": (3, 3),
+    "and": (2, 2),
+    "as_messages": (1, 1),
+    "binding": (0, 0),
+    "compare": (2, 2),
+    "concat": (2, MAX_MODEL_EXPRESSION_FANOUT),
+    "conditional": (3, 3),
+    "extract_span": (4, 4),
+    "field": (1, 1),
+    "field_text": (1, 1),
+    "if_refused": (2, 2),
+    "index": (1, 1),
+    "join": (1, 1),
+    "literal": (0, 0),
+    "map": (3, 3),
+    "message": (2, 2),
+    "message_select": (2, 2),
+    "message_view": (0, 0),
+    "messages": (0, 0),
+    "model_call": (0, 16),
+    "not": (1, 1),
+    "or": (2, 2),
+    "parameter": (0, 0),
+    "refused": (1, 1),
+    "slice": (3, 3),
+    "split_any": (2, 2),
+    "string_compare": (2, 2),
+    "string_patterns": (0, MAX_MODEL_EXPRESSION_FANOUT),
+    "text_equals": (1, 1),
+    "text_ref": (0, 0),
+    "tools": (0, 0),
+    "transform": (1, 1),
+    "+": (2, 2),
+    "-": (2, 2),
+    "*": (2, 2),
+}
+_NONE_VALUE_KINDS = frozenset(
+    {
+        "absent",
+        "add_message",
+        "and",
+        "as_messages",
+        "concat",
+        "conditional",
+        "extract_span",
+        "field_text",
+        "if_refused",
+        "message",
+        "messages",
+        "not",
+        "or",
+        "refused",
+        "slice",
+        "tools",
+        "+",
+        "-",
+        "*",
+    }
+)
+
+
+def validate_model_expression(expression: ModelExpression) -> None:
+    """Reject malformed, cyclic, or excessively large model-expression graphs."""
+
+    if not isinstance(expression, ModelExpression):
+        raise TypeError("model expression root must be a ModelExpression")
+    count = 0
+    active: set[int] = set()
+    stack: list[tuple[ModelExpression, int, bool]] = [(expression, 1, False)]
+    while stack:
+        node, depth, leaving = stack.pop()
+        identity = id(node)
+        if leaving:
+            active.remove(identity)
+            continue
+        if identity in active:
+            raise ValueError("model expression contains a cycle")
+        if depth > MAX_MODEL_EXPRESSION_DEPTH:
+            raise ValueError(f"model expression exceeds {MAX_MODEL_EXPRESSION_DEPTH} nested levels")
+        count += 1
+        if count > MAX_MODEL_EXPRESSION_NODES:
+            raise ValueError(f"model expression exceeds {MAX_MODEL_EXPRESSION_NODES} nodes")
+        if not isinstance(node.kind, str) or node.kind not in _MODEL_EXPRESSION_ARITIES:
+            raise ValueError(f"unknown model expression kind {node.kind!r}")
+        if node.value is not None and not isinstance(node.value, str | int | float | bool):
+            raise TypeError("model expression values must be JSON scalars")
+        if isinstance(node.value, float) and not math.isfinite(node.value):
+            raise ValueError("model expression numbers must be finite")
+        if not isinstance(node.children, tuple) or any(
+            not isinstance(child, ModelExpression) for child in node.children
+        ):
+            raise TypeError("model expression children must be ModelExpression values")
+        minimum, maximum = _MODEL_EXPRESSION_ARITIES[node.kind]
+        if not minimum <= len(node.children) <= maximum:
+            expected = str(minimum) if minimum == maximum else f"{minimum} through {maximum}"
+            raise ValueError(f"model expression kind {node.kind!r} requires {expected} children")
+        if len(node.children) > MAX_MODEL_EXPRESSION_FANOUT:
+            raise ValueError(
+                f"model expression exceeds {MAX_MODEL_EXPRESSION_FANOUT} children at one node"
+            )
+        if node.kind in _NONE_VALUE_KINDS and node.value is not None:
+            raise TypeError(f"model expression kind {node.kind!r} requires a null value")
+        if node.kind == "message_view" and node.value not in {
+            "system_messages",
+            "developer_messages",
+            "user_messages",
+            "assistant_messages",
+            "tool_responses",
+        }:
+            raise ValueError(f"invalid message selector {node.value!r}")
+        if node.kind in {"binding", "map", "message_select", "parameter", "split_any"} and (
+            not isinstance(node.value, str) or not node.value.isidentifier()
+        ):
+            raise ValueError(f"invalid {node.kind} name {node.value!r}")
+        if node.kind == "text_ref" and (not isinstance(node.value, str) or not node.value):
+            raise ValueError("model text reference name must be a non-empty string")
+        if node.kind == "join" and not isinstance(node.value, str):
+            raise TypeError("model join separator must be a string")
+        if node.kind == "string_patterns" and (
+            not isinstance(node.value, str) or len(node.value) != 4 or set(node.value) - {"0", "1"}
+        ):
+            raise ValueError("model string-pattern flags must contain four binary digits")
+        if (
+            node.kind == "text_equals"
+            and node.value is not None
+            and not isinstance(node.value, str)
+        ):
+            raise TypeError("model text equality value must be a string or null")
+        if node.kind == "field":
+            parts = node.value.split(".") if isinstance(node.value, str) else ()
+            if not parts or any(
+                not part
+                or (not part.isidentifier() and not (part == "*" and index == len(parts) - 1))
+                for index, part in enumerate(parts)
+            ):
+                raise ValueError(f"invalid model field selector {node.value!r}")
+        if node.kind == "index" and (
+            isinstance(node.value, bool) or not isinstance(node.value, int)
+        ):
+            raise TypeError("model expression index must be an integer")
+        if node.kind == "compare" and node.value not in {"=", "!=", ">", "<", ">=", "<="}:
+            raise ValueError(f"invalid model comparison {node.value!r}")
+        if node.kind == "string_compare" and node.value not in {
+            "contains",
+            "in",
+            "~",
+            "matches",
+        }:
+            raise ValueError(f"invalid model string comparison {node.value!r}")
+
+        active.add(identity)
+        stack.append((node, depth, True))
+        stack.extend((child, depth + 1, False) for child in reversed(node.children))
+
+
+def validate_transform_expression_graph(
+    expression: ModelExpression,
+    *,
+    maximum: int,
+    validate_plan: Callable[[str], object],
+    additional_roots: tuple[ModelExpression, ...] = (),
+) -> None:
+    """Validate every transform occurrence across finalized model-expression roots.
+
+    Shared DAG nodes count once per incoming occurrence, matching their serialized and
+    evaluation shape. The active-path check rejects cycles without deduplicating siblings or
+    resetting the aggregate transform budget between roots.
+    """
+
+    count = 0
+    active: set[int] = set()
+    stack: list[tuple[ModelExpression, bool]] = [
+        (root, False) for root in reversed((expression, *additional_roots))
+    ]
+    while stack:
+        node, leaving = stack.pop()
+        identity = id(node)
+        if leaving:
+            active.remove(identity)
+            continue
+        if identity in active:
+            raise ValueError("model expression contains a cycle")
+        if node.kind == "transform":
+            count += 1
+            if count > maximum:
+                raise ValueError(
+                    f"model expression exceeds {maximum} content transform applications"
+                )
+            if not isinstance(node.value, str):
+                raise TypeError("compiled content transform must be a string")
+            validate_plan(node.value)
+        active.add(identity)
+        stack.append((node, True))
+        stack.extend((child, False) for child in reversed(node.children))
+
+
+def validate_constructed_message_graph(
+    expression: ModelExpression,
+    *,
+    additional_roots: tuple[ModelExpression, ...] = (),
+) -> None:
+    """Validate constructor occurrences, roles, and static text across finalized roots."""
+
+    count = 0
+    total_characters = 0
+    total_bytes = 0
+    active: set[int] = set()
+    stack: list[tuple[ModelExpression, bool]] = [
+        (root, False) for root in reversed((expression, *additional_roots))
+    ]
+    while stack:
+        node, leaving = stack.pop()
+        identity = id(node)
+        if leaving:
+            active.remove(identity)
+            continue
+        if identity in active:
+            raise ValueError("model expression contains a cycle")
+        if node.kind in {"message", "add_message"}:
+            count += 1
+            if count > MAX_CONSTRUCTED_MESSAGES:
+                raise ValueError(
+                    f"model expression exceeds {MAX_CONSTRUCTED_MESSAGES} constructed messages"
+                )
+            role_index = 0 if node.kind == "message" else 1
+            content_index = role_index + 1
+            role = node.children[role_index]
+            if role.kind != "literal" or role.value not in {
+                "system",
+                "developer",
+                "user",
+                "assistant",
+            }:
+                raise ValueError(f"model expression kind {node.kind!r} has an invalid message role")
+            content = node.children[content_index]
+            if content.kind not in {
+                "conditional",
+                "extract_span",
+                "field",
+                "if_refused",
+                "join",
+                "literal",
+                "parameter",
+                "text_ref",
+            }:
+                raise ValueError(f"model expression kind {node.kind!r} has invalid message content")
+            if node.kind == "add_message" and node.children[0].kind not in {
+                "message",
+                "add_message",
+            }:
+                raise ValueError(
+                    "model expression kind 'add_message' has an invalid constructor receiver"
+                )
+            if content.kind == "literal":
+                if not isinstance(content.value, str):
+                    raise TypeError("constructed message literal content must be a string")
+                total_characters += len(content.value)
+                if total_characters > MAX_CONSTRUCTED_TEXT_CHARACTERS:
+                    raise ValueError(
+                        "constructed input text exceeds "
+                        f"{MAX_CONSTRUCTED_TEXT_CHARACTERS} characters"
+                    )
+                for character in content.value:
+                    codepoint = ord(character)
+                    if 0xD800 <= codepoint <= 0xDFFF:
+                        raise ValueError("constructed message text must contain valid Unicode")
+                    total_bytes += (
+                        1
+                        if codepoint <= 0x7F
+                        else 2
+                        if codepoint <= 0x7FF
+                        else 3
+                        if codepoint <= 0xFFFF
+                        else 4
+                    )
+                    if total_bytes > MAX_CONSTRUCTED_TEXT_BYTES:
+                        raise ValueError(
+                            "constructed input text exceeds "
+                            f"{MAX_CONSTRUCTED_TEXT_BYTES} UTF-8 bytes"
+                        )
+        active.add(identity)
+        stack.append((node, True))
+        stack.extend((child, False) for child in reversed(node.children))
 
 
 @dataclass(frozen=True)

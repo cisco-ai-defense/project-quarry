@@ -33,6 +33,7 @@ from quarry.types.dsl import (
     AnyComprehension,
     Assignment,
     BinaryOp,
+    ConditionalValue,
     ConditionNode,
     ContainsAnyOp,
     FieldAccess,
@@ -640,6 +641,8 @@ class DSLTransformer(Transformer):
                     args=call_args,
                     result_type=MODEL_OPERATION_TYPES[method],
                 )
+            if method == "transform":
+                return FunctionCall("_transform", [base, *call_args])
             if isinstance(base, Identifier) and base.name in self._METHOD_RECEIVERS:
                 if method == "extract":
                     return FunctionCall(method, [base, *call_args])
@@ -701,6 +704,17 @@ class DSLTransformer(Transformer):
             left = BinaryOp("and", left, op)
         return left
 
+    @dsl_construct(name="conditional-value")
+    def conditional_value(self, chosen, predicate, fallback):
+        """Choose one of two compatible values using a Boolean predicate.
+
+        Only the selected branch is evaluated. Both branches must have compatible static
+        types. A Boolean conditional can be a rule condition; other values can feed a typed
+        comparison or model input.
+        """
+
+        return ConditionalValue(chosen, predicate, fallback)
+
     def description(self, desc):
         """Description."""
         return ("description", self._decode_string_token(desc))
@@ -755,7 +769,13 @@ class DSLTransformer(Transformer):
 
     @dsl_construct(name="addition")
     def add_op(self, left, right):
-        """Add two numeric values."""
+        """Add numbers or combine source-backed message selections in written order.
+
+        Message combination is available in typed model inputs. It preserves immutable values,
+        content, provenance, written order, transcript indexes, and tool identities. It normally
+        reuses message objects, but may return immutable relinked tool variants when independent
+        views must form one self-contained call/result graph; object identity is not guaranteed.
+        """
         return BinaryOp("+", left, right)
 
     @dsl_construct(name="subtraction")
