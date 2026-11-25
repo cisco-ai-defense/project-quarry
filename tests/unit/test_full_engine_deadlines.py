@@ -201,6 +201,31 @@ def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
         assert not armed and not finished.is_set()
 
 
+@pytest.mark.parametrize(
+    ("rule_timeout", "deadline_seconds"),
+    [(120.0, 60.0), (60.0, None)],
+    ids=["scan-deadline", "rule-deadline"],
+)
+def test_deadline_caps_model_request_timeout(tmp_path, rule_timeout, deadline_seconds) -> None:
+    class TimeoutAdapter(_SlowAdapter):
+        async def classify_messages(self, config, messages, tools, *, timeout=None):
+            self.received_timeout = timeout
+            return await super().classify_messages(config, messages, tools, timeout=timeout)
+
+    adapter = TimeoutAdapter(0)
+    scanner = _scanner(
+        tmp_path,
+        _MODEL_RULE,
+        adapter=adapter,
+        limits=SafetyLimits(rule_timeout=rule_timeout, inference_timeout=None),
+    )
+    result = asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=deadline_seconds))
+
+    assert result.rule_matches == ["m"]
+    assert adapter.calls == 1
+    assert adapter.received_timeout is not None and 0 < adapter.received_timeout <= 60.0
+
+
 def test_a_local_rule_completes_while_a_model_rule_times_out(tmp_path) -> None:
     scanner = _scanner(
         tmp_path,
@@ -237,8 +262,11 @@ def test_concurrent_scans_have_isolated_timeouts(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("api", ["sync", "async"])
-def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api) -> None:
-    adapter = _SlowAdapter(0.5)
+def test_fail_on_timeout_raises_with_partial_telemetry(
+    tmp_path, api, admitted_rule_timeout
+) -> None:
+    adapter_for_scan, assert_expired = admitted_rule_timeout
+    adapter = adapter_for_scan()
     scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
@@ -257,6 +285,7 @@ def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api) -> None:
     assert adapter.calls == partial.model_usage["calls"] == 1
     assert partial.model_usage["records"] == [{"model": "pi", "operation": "classify", "calls": 1}]
     assert partial.rule_timings["m"] >= 0.0
+    assert_expired()
 
 
 def test_expired_scan_deadline_raises_with_zero_predispatch_usage(tmp_path) -> None:
@@ -309,9 +338,9 @@ def test_timeout_while_waiting_for_limiter_records_no_adapter_attempt(tmp_path) 
     assert exc_info.value.scan_result.model_usage["calls"] == 0
 
 
-def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path, monkeypatch) -> None:
-    import quarry.cache.async_cache as async_cache_module
-
+@pytest.fixture
+def admitted_rule_timeout(monkeypatch):
+    """Expire a real asyncio timer after the provider has started."""
     now = 1024.0
     armed = []
     finished = threading.Event()
@@ -357,10 +386,28 @@ def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path, monkeyp
             finally:
                 finished.set()
 
+    def adapter_for_scan():
+        nonlocal now
+        now = 1024.0
+        armed.clear()
+        finished.clear()
+        return Admitted(0.5)
+
+    def assert_expired():
+        assert finished.wait(3)
+        assert next(item[2] for item in armed if item[0] == "rule").expired()
+
+    return adapter_for_scan, assert_expired
+
+
+def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(
+    tmp_path, admitted_rule_timeout
+) -> None:
+    adapter_for_scan, assert_expired = admitted_rule_timeout
     conversation = tmp_path / "conversation.json"
     conversation.write_text('{"messages":[{"role":"user","content":"attack"}]}')
 
-    file_adapter = Admitted(0.5)
+    file_adapter = adapter_for_scan()
     file_scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
@@ -372,13 +419,9 @@ def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path, monkeyp
     assert file_adapter.calls == file_result.model_usage["calls"] == 1
     assert file_result.rule_timings["m"] >= 0.0
     assert file_result.error == "Rule m timeout"
-    assert finished.wait(3)
-    assert next(item[2] for item in armed if item[0] == "rule").expired()
+    assert_expired()
 
-    now = 1024.0
-    armed.clear()
-    finished.clear()
-    batch_adapter = Admitted(0.5)
+    batch_adapter = adapter_for_scan()
     batch_scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
@@ -390,8 +433,7 @@ def test_file_and_batch_wrappers_keep_raised_timeout_telemetry(tmp_path, monkeyp
     assert batch_adapter.calls == batch_result.model_usage["calls"] == 1
     assert batch_result.rule_timings["m"] >= 0.0
     assert batch_result.evaluation_errors == {"conv_1": "Rule m timeout"}
-    assert finished.wait(3)
-    assert next(item[2] for item in armed if item[0] == "rule").expired()
+    assert_expired()
 
 
 @pytest.mark.parametrize(

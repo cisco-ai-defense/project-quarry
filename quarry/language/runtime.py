@@ -35,6 +35,7 @@ INTERNAL_FUNCTION_NAMES = frozenset(
         "_method_has_parameter",
         "_string_spans",
         "_extract_windows",
+        "_input_message",
     }
 )
 
