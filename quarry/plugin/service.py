@@ -34,6 +34,7 @@ from copy import deepcopy
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 import yaml
@@ -61,6 +62,12 @@ from quarry.prepared import PreparedRuleCache
 from quarry.safety.quality import quality_warnings
 from quarry.safety.validator import Complexity, RuleValidator
 from quarry.scanner import DSLScanner
+from quarry.telemetry import (
+    elapsed_seconds,
+    empty_model_usage,
+    merge_model_usage,
+    models_called,
+)
 from quarry.types.exceptions import (
     ConfigurationError,
     ConversationValidationError,
@@ -639,6 +646,8 @@ class QuarryPlugin:
                     "completion_state": "invalid",
                     "diagnostics": diagnostics,
                     "timings": {},
+                    "model_usage": empty_model_usage(),
+                    "models_called": [],
                 }
             )
             if conversations is not None:
@@ -684,6 +693,7 @@ class QuarryPlugin:
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
 
+        scan_started = monotonic()
         try:
             results = await policy.scan_many_async(
                 selected,
@@ -695,13 +705,17 @@ class QuarryPlugin:
             )
         except ParameterValueError as exc:
             return fail_before_scan([{"code": "invalid_parameters", "message": str(exc)}])
+        request_scan_seconds = elapsed_seconds(scan_started)
 
         provenance = results[0]
+        aggregate_usage = merge_model_usage(result.model_usage for result in results)
         response.update(
             {
                 "policy_digest": policy.policy_digest,
                 "parameter_digest": provenance.parameter_digest,
                 "parameter_evidence": provenance.parameter_evidence,
+                "model_usage": aggregate_usage,
+                "models_called": models_called(aggregate_usage),
             }
         )
 
@@ -718,6 +732,7 @@ class QuarryPlugin:
                 node_ids=tree.ids,
                 details=verbosity == "full",
                 include_explanations=bool(explain) or verbosity == "full",
+                include_telemetry_details=conversation is not None or verbosity == "full",
             )
             if result.validation_error is not None:
                 report_input = None
@@ -758,6 +773,7 @@ class QuarryPlugin:
             )
             response["results"] = payloads
             response["count"] = len(payloads)
+            response["timings"] = {"total_seconds": request_scan_seconds}
             if static_graphs is not None:
                 response["visualization"] = build_batch_runtime_attribution(
                     [payload["visualization"] for payload in payloads],
@@ -774,6 +790,7 @@ class QuarryPlugin:
         node_ids: Mapping[str | None, str] | None = None,
         details: bool = True,
         include_explanations: bool = True,
+        include_telemetry_details: bool = True,
     ) -> dict[str, Any]:
         """Serialize one fail-closed scan result for either tool mode.
 
@@ -787,12 +804,13 @@ class QuarryPlugin:
         payload: dict[str, Any] = {
             "completion_state": result.completion_state,
             "failures": [failure.to_dict() for failure in result.failures],
-            "timings": {
-                "total_seconds": result.scan_time,
-                "rules": dict(result.rule_timings or {}),
-            },
+            "timings": {"total_seconds": result.scan_time},
             "diagnostics": self._scan_diagnostics(result),
         }
+        if include_telemetry_details:
+            payload["timings"]["rules"] = dict(sorted((result.rule_timings or {}).items()))
+            payload["model_usage"] = result.model_usage
+            payload["models_called"] = models_called(result.model_usage)
         if static_graphs is not None:
             payload["visualization"] = build_runtime_attribution(
                 static_graphs,

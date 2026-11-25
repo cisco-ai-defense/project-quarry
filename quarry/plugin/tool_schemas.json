@@ -1455,6 +1455,73 @@
         "title": "ModelOperation",
         "type": "object"
       },
+      "ModelUsageRecord": {
+        "additionalProperties": true,
+        "description": "Attempted physical calls for one public model alias and operation.",
+        "properties": {
+          "calls": {
+            "maximum": 1000000,
+            "minimum": 0,
+            "title": "Calls",
+            "type": "integer"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "score",
+              "classify",
+              "complete",
+              "input_tokens"
+            ],
+            "maxLength": 64,
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "operation",
+          "calls"
+        ],
+        "title": "ModelUsageRecord",
+        "type": "object"
+      },
+      "ModelUsageSummary": {
+        "additionalProperties": true,
+        "description": "Bounded provider-neutral model usage for one scan or ordered batch.",
+        "properties": {
+          "calls": {
+            "maximum": 1000000,
+            "minimum": 0,
+            "title": "Calls",
+            "type": "integer"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/$defs/ModelUsageRecord"
+            },
+            "maxItems": 512,
+            "title": "Records",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "calls",
+          "records",
+          "truncated"
+        ],
+        "title": "ModelUsageSummary",
+        "type": "object"
+      },
       "NumberMeasurement": {
         "additionalProperties": true,
         "description": "The collection size a decision step compared.",
@@ -1715,6 +1782,19 @@
             "title": "Matches",
             "type": "array"
           },
+          "model_usage": {
+            "$ref": "#/$defs/ModelUsageSummary"
+          },
+          "models_called": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 128,
+            "title": "Models Called",
+            "type": "array"
+          },
           "partial_matches": {
             "items": {
               "type": "string"
@@ -1926,12 +2006,16 @@
         "properties": {
           "rules": {
             "additionalProperties": {
+              "maximum": 31536000.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "title": "Rules",
             "type": "object"
           },
           "total_seconds": {
+            "maximum": 31536000.0,
+            "minimum": 0.0,
             "title": "Total Seconds",
             "type": "number"
           }
@@ -2024,6 +2108,19 @@
         "title": "Matches",
         "type": "array"
       },
+      "model_usage": {
+        "$ref": "#/$defs/ModelUsageSummary"
+      },
+      "models_called": {
+        "items": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 128,
+        "title": "Models Called",
+        "type": "array"
+      },
       "parameter_digest": {
         "pattern": "^[0-9a-f]{64}$",
         "title": "Parameter Digest",
@@ -2101,7 +2198,9 @@
       "rule_hash",
       "verbosity",
       "compilation",
-      "completion_state"
+      "completion_state",
+      "model_usage",
+      "models_called"
     ],
     "title": "ScanResponse",
     "type": "object"

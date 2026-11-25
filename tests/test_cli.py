@@ -261,6 +261,14 @@ models:
         assert exit_code == 1
         assert output[0]["matches"] == [{"rule": "Hybrid"}]
         assert adapter.score_calls == 1
+        assert output[0]["model_usage"] == {
+            "calls": 1,
+            "records": [{"model": "gemma4", "operation": "score", "calls": 1}],
+            "truncated": False,
+        }
+        assert output[0]["models_called"] == ["gemma4"]
+        assert output[0]["timings"]["total_seconds"] >= 0.0
+        assert output[0]["timings"]["rules"]["Hybrid"] >= 0.0
 
     def test_cli_scan_command_missing_rules(self):
         result = subprocess.run(
@@ -304,6 +312,12 @@ class TestCLIEdgeCases:
             rule_matches=["Matched Sibling"],
             scan_time=0.02,
             timed_out_rules=["Slow Rule"],
+            rule_timings={"Matched Sibling": 0.01},
+            model_usage={
+                "calls": 1,
+                "records": [{"model": "judge", "operation": "score", "calls": 1}],
+                "truncated": False,
+            },
         )
 
         rows = list(csv.DictReader(StringIO(format_results([result], "csv"))))
@@ -311,6 +325,28 @@ class TestCLIEdgeCases:
         assert rows[0]["rule"] == "Matched Sibling"
         assert rows[0]["completion_state"] == "incomplete"
         assert rows[0]["timed_out_rules"] == '["Slow Rule"]'
+        assert orjson.loads(rows[0]["timings"]) == {
+            "total_seconds": 0.02,
+            "rules": {"Matched Sibling": 0.01},
+        }
+        assert orjson.loads(rows[0]["model_usage"]) == result.model_usage
+        assert orjson.loads(rows[0]["models_called"]) == ["judge"]
+
+    def test_csv_keeps_rule_timings_on_their_own_rows(self):
+        names = [f"rule_{index}" for index in range(1_000)]
+        timings = {name: index / 1_000 for index, name in enumerate(names)}
+        timings["unmatched"] = 0.01
+        result = ScanResult(Path("conversation.json"), names, 1.0, rule_timings=timings)
+
+        csv_output = format_results([result], "csv")
+        rows = list(csv.DictReader(StringIO(csv_output)))
+        assert [row["rule"] for row in rows] == names
+        assert all(
+            orjson.loads(row["timings"]) == {"total_seconds": 1.0, "rules": {name: timings[name]}}
+            for row, name in zip(rows, names, strict=True)
+        )
+        assert len(csv_output) < 250_000
+        assert orjson.loads(format_results([result], "json"))[0]["timings"]["rules"] == timings
 
     def test_mixed_directory_timeout_takes_exit_precedence(
         self, tmp_path, temp_config_file, monkeypatch, capsys

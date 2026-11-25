@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import sleep as _sleep
 from collections.abc import Awaitable, Callable, Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from time import monotonic
@@ -33,6 +33,7 @@ from quarry.safety.timer import (
     clamp_to_evaluation_deadline,
     current_evaluation_deadline,
 )
+from quarry.telemetry import ModelOperation, ModelUsageLedger
 from quarry.types.exceptions import LLMError
 
 T = TypeVar("T")
@@ -72,10 +73,14 @@ class _ModelUsageTimeout(LLMError):
 
 
 class ModelCallBudget:
-    """Limit paid provider attempts per Quarry model alias during one scan."""
+    """Limit and account for provider attempts per public model alias."""
 
-    def __init__(self, max_calls_per_alias: int):
-        if (
+    def __init__(
+        self,
+        max_calls_per_alias: int | None,
+        telemetry: ModelUsageLedger | None = None,
+    ):
+        if max_calls_per_alias is not None and (
             isinstance(max_calls_per_alias, bool)
             or not isinstance(max_calls_per_alias, int)
             or max_calls_per_alias < 1
@@ -83,11 +88,15 @@ class ModelCallBudget:
             raise ValueError("max_calls_per_alias must be a positive integer")
         self.max_calls_per_alias = max_calls_per_alias
         self.calls_by_alias: dict[str, int] = {}
+        self.telemetry = telemetry
 
     def check(self, alias: str) -> None:
         """Fail when ``alias`` has no attempt left, without reserving one."""
 
-        if self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias:
+        if (
+            self.max_calls_per_alias is not None
+            and self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias
+        ):
             raise LLMError(
                 f"Inference model '{alias}' reached its model-call limit "
                 f"(max_model_calls={self.max_calls_per_alias})",
@@ -98,11 +107,13 @@ class ModelCallBudget:
                 },
             )
 
-    def consume(self, alias: str) -> None:
+    def consume(self, alias: str, operation: ModelOperation = "complete") -> None:
         """Reserve one provider attempt or fail before the adapter is called."""
 
         self.check(alias)
         self.calls_by_alias[alias] = self.calls_by_alias.get(alias, 0) + 1
+        if self.telemetry is not None:
+            self.telemetry.record(alias, operation)
 
 
 _current_model_call_budget = ContextVar[ModelCallBudget | None](
@@ -113,15 +124,24 @@ _current_model_call_budget = ContextVar[ModelCallBudget | None](
 @contextmanager
 def model_call_budget(
     max_calls_per_alias: int | None,
-) -> Generator[ModelCallBudget | None, None, None]:
-    """Install one task-local cost budget inherited by every rule in a scan."""
+    telemetry: ModelUsageLedger | None = None,
+) -> Generator[ModelCallBudget, None, None]:
+    """Install one task-local cost and telemetry scope inherited by child tasks."""
 
-    budget = ModelCallBudget(max_calls_per_alias) if max_calls_per_alias is not None else None
+    budget = ModelCallBudget(max_calls_per_alias, telemetry)
     token = _current_model_call_budget.set(budget)
     try:
         yield budget
     finally:
         _current_model_call_budget.reset(token)
+
+
+def track_model_call() -> AbstractContextManager[None]:
+    """Track pending attempts in the scan that owns the provider request."""
+    budget = _current_model_call_budget.get()
+    if budget is None or budget.telemetry is None:
+        return nullcontext()
+    return budget.telemetry.track_call()
 
 
 class ModelUsage:
@@ -136,6 +156,7 @@ class ModelUsage:
         operation: Callable[[float | None], Awaitable[T]],
         *,
         budget_alias: str | None = None,
+        operation_name: ModelOperation = "complete",
         timeout: float | None = None,
         retry_history: ModelRetryHistory | None = None,
     ) -> T:
@@ -154,6 +175,7 @@ class ModelUsage:
                 operation,
                 deadline=None,
                 budget_alias=budget_alias,
+                operation_name=operation_name,
                 retry_history=history,
             )
 
@@ -182,6 +204,7 @@ class ModelUsage:
                         operation,
                         deadline=deadline,
                         budget_alias=budget_alias,
+                        operation_name=operation_name,
                         evaluation_timeout_message=evaluation_timeout_message,
                         retry_history=history,
                     )
@@ -230,6 +253,7 @@ class ModelUsage:
         *,
         deadline: float | None,
         budget_alias: str | None,
+        operation_name: ModelOperation = "complete",
         evaluation_timeout_message: str | None = None,
         retry_history: ModelRetryHistory | None = None,
     ) -> T:
@@ -248,7 +272,7 @@ class ModelUsage:
                 )
             budget = _current_model_call_budget.get()
             if budget is not None:
-                budget.consume(budget_alias or model)
+                budget.consume(budget_alias or model, operation_name)
             return await operation(remaining)
 
         if self.rate_limiter is None:

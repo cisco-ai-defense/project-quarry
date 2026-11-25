@@ -24,10 +24,27 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from math import isfinite
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    from quarry.types.rules import ScanResult
 
 
 class QuarryTimeoutError(Exception):
-    """Raised when evaluation times out."""
+    """Raised when evaluation times out, optionally carrying safe partial scan telemetry."""
+
+    def __init__(self, message: str, *, scan_result: ScanResult | None = None):
+        self.scan_result = scan_result
+        # Match the result-bearing public validation and incomplete-scan exceptions.
+        self.result = scan_result
+        super().__init__(message)
+
+    def with_scan_result(self, scan_result: ScanResult) -> Self:
+        """Attach the latest detached partial result without changing exception text."""
+
+        self.scan_result = scan_result
+        self.result = scan_result
+        return self
 
 
 @dataclass(frozen=True)

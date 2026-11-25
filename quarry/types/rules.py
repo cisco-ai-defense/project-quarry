@@ -16,10 +16,11 @@
 
 """Rule related types."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from quarry.telemetry import empty_model_usage
 from quarry.types.dsl import ConditionNode
 from quarry.types.exceptions import ConversationValidationError, IncompleteScanError
 from quarry.types.failures import ScanFailure, ScanFailureCategory, _category_from_metadata
@@ -100,6 +101,9 @@ class ScanResult:
     # Per decomposed rule, the decision-tree checks the scan grounded, even when the rule
     # timed out or raised. Concrete values are ``quarry.engine.contracts.ScanRecord``.
     decision_paths: dict[str, Any] | None = None
+    # Provider-neutral physical adapter attempts made for this scan. Cache hits and callers
+    # that only wait for another scan's shared request do not add calls.
+    model_usage: dict[str, Any] = field(default_factory=empty_model_usage)
 
     # Optional structured attribution for the existing error channels. These fields do
     # not independently make a scan fail; only the corresponding failure signal does.
@@ -107,6 +111,39 @@ class ScanResult:
     evaluation_error_categories: dict[str, ScanFailureCategory | str] | None = field(
         default=None, kw_only=True
     )
+    # Submitted conversation count for a batch; None for scalar or older unknown results.
+    batch_size: int | None = field(default=None, kw_only=True)
+
+    @staticmethod
+    def _validate_batch_size(value: object) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("batch_size must be a non-negative integer or None")
+
+    def __post_init__(self) -> None:
+        self._validate_batch_size(self.batch_size)
+
+    def __setstate__(self, state: object) -> None:
+        """Restore known dataclass fields and initialize telemetry absent from older pickles."""
+
+        if type(state) is not dict:
+            raise TypeError("ScanResult pickle state must be a plain dictionary")
+        state = cast(dict[str, Any], state)
+        field_names = {item.name for item in fields(self)}
+        unknown = set(state) - field_names
+        if unknown:
+            raise ValueError("ScanResult pickle state contains unknown fields")
+        missing = field_names - set(state) - {"model_usage", "rule_timings", "batch_size"}
+        if missing:
+            raise ValueError("ScanResult pickle state is missing required fields")
+        self._validate_batch_size(state.get("batch_size"))
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        if "rule_timings" not in state:
+            object.__setattr__(self, "rule_timings", None)
+        if "model_usage" not in state:
+            object.__setattr__(self, "model_usage", empty_model_usage())
+        if "batch_size" not in state:
+            object.__setattr__(self, "batch_size", None)
 
     @property
     def failures(self) -> tuple[ScanFailure, ...]:
