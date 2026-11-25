@@ -16,9 +16,28 @@
 
 """Tests for authoritative, invalid, and incomplete scan results."""
 
+import json
+import pickle
+from dataclasses import asdict
+from pathlib import Path
+
 import pytest
 
 from quarry import ConversationValidationError, IncompleteScanError, ScanResult
+
+
+def _uninitialized_scan_result() -> ScanResult:
+    return ScanResult.__new__(ScanResult)
+
+
+class _LegacyScanResultPickle:
+    """Emit a historical ScanResult state through pickle's normal state hook."""
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+
+    def __reduce__(self):
+        return (_uninitialized_scan_result, (), self.state)
 
 
 def result_with(**overrides) -> ScanResult:
@@ -53,6 +72,92 @@ def test_invalid_result_raises_typed_validation_error_with_result() -> None:
     assert exc_info.value.scan_result is result
     assert exc_info.value.result is result
     assert "missing messages" in str(exc_info.value)
+
+
+def test_telemetry_defaults_preserve_legacy_construction_and_are_independent() -> None:
+    first = ScanResult(None, [], 0.0)
+    second = ScanResult(None, [], 0.0)
+
+    assert first.rule_timings is second.rule_timings is None
+    assert (
+        first.model_usage
+        == second.model_usage
+        == {
+            "calls": 0,
+            "records": [],
+            "truncated": False,
+        }
+    )
+    first.model_usage["records"].append({"model": "judge", "operation": "score", "calls": 1})
+    assert second.model_usage["records"] == []
+
+
+def test_scan_result_telemetry_round_trips_through_json_and_pickle() -> None:
+    result = result_with(
+        rule_timings={"Rule": 0.005},
+        model_usage={
+            "calls": 1,
+            "records": [{"model": "judge", "operation": "score", "calls": 1}],
+            "truncated": False,
+        },
+    )
+
+    json_payload = json.loads(json.dumps(asdict(result), sort_keys=True))
+    assert json_payload["rule_timings"] == {"Rule": 0.005}
+    assert json_payload["model_usage"] == result.model_usage
+
+    restored = pickle.loads(pickle.dumps(result))
+    assert restored == result
+    assert restored.model_usage is not result.model_usage
+    assert restored.model_usage["records"] is not result.model_usage["records"]
+
+
+def test_legacy_pickle_without_telemetry_receives_independent_defaults() -> None:
+    state = dict(result_with().__dict__)
+    state.pop("model_usage")
+    state.pop("rule_timings")
+
+    first = pickle.loads(pickle.dumps(_LegacyScanResultPickle(state)))
+    second = pickle.loads(pickle.dumps(_LegacyScanResultPickle(state)))
+
+    assert isinstance(first, ScanResult)
+    assert first.rule_timings is second.rule_timings is None
+    assert (
+        first.model_usage
+        == second.model_usage
+        == {
+            "calls": 0,
+            "records": [],
+            "truncated": False,
+        }
+    )
+    first.model_usage["records"].append({"model": "judge", "operation": "score", "calls": 1})
+    assert second.model_usage["records"] == []
+
+
+def test_direct_legacy_state_rejects_unknown_fields() -> None:
+    state = dict(result_with().__dict__)
+    state.pop("model_usage")
+    state["unexpected"] = "not restored"
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        _uninitialized_scan_result().__setstate__(state)
+
+
+def test_python_api_documents_scan_result_telemetry_contract() -> None:
+    documentation = (Path(__file__).parents[2] / "docs" / "python-api.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert all(
+        term in documentation
+        for term in (
+            "ScanResult.rule_timings",
+            "ScanResult.model_usage",
+            "QuarryTimeoutError",
+            "[scan telemetry](PLUGIN.md#scan-telemetry)",
+        )
+    )
 
 
 @pytest.mark.parametrize(
