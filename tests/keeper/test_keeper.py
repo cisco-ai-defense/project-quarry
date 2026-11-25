@@ -6,6 +6,7 @@ import json
 import socket
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -229,10 +230,18 @@ def test_network_lock_blocks_outbound_connections() -> None:
             socket.getaddrinfo("example.com", 443)
 
 
-def test_network_lock_blocks_network_libraries(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delitem(sys.modules, "httpx", raising=False)
+def test_network_lock_blocks_network_libraries() -> None:
     with network_lock(), pytest.raises(OfflineViolation):
         import httpx  # noqa: F401
+
+
+def test_network_lock_rejects_loaded_network_libraries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "httpx", ModuleType("httpx"))
+    with (
+        pytest.raises(OfflineViolation, match="Network libraries are already loaded.*httpx"),
+        network_lock(),
+    ):
+        pass
 
 
 def test_network_lock_restores_socket_afterwards() -> None:
