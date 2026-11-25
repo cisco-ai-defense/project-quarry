@@ -60,6 +60,9 @@ class Re2RegexBackend(RegexBackend):
     def iter_match_texts(self, pattern, text, flags=0):
         return regex_cache.iter_match_texts(pattern, text, flags)
 
+    def iter_match_spans(self, pattern, text, flags=0):
+        return regex_cache.iter_match_spans(pattern, text, flags)
+
     def count(self, pattern, text, flags=0):
         return regex_cache.count(pattern, text, flags)
 

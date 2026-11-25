@@ -57,7 +57,9 @@ DSL_GRAMMAR = r"""
             | comparison
 
     function_call: IDENTIFIER "(" [arguments] ")"
-    arguments: expr ("," expr)*
+    arguments: argument ("," argument)*
+    ?argument: expr | named_argument
+    named_argument: ARG_NAME "=" expr
     postfix: "." IDENTIFIER "(" [arguments] ")" -> method_postfix
            | "." IDENTIFIER -> attr_postfix
            | "[" ":" "]" -> slice_all_postfix
@@ -67,6 +69,7 @@ DSL_GRAMMAR = r"""
            | "[" SIGNED_INT "]" -> signed_index_postfix
            | "[" expr "]" -> index_postfix
     wildcard_postfix: "." WILDCARD -> wildcard_postfix
+    wildcard_method: "." IDENTIFIER "(" [arguments] ")" -> method_postfix
 
     string_position: "@" IDENTIFIER WILDCARD?
     string_count: "#" IDENTIFIER WILDCARD?
@@ -78,7 +81,7 @@ DSL_GRAMMAR = r"""
     string_wildcard: STRING_VAR WILDCARD?
 
     primary: function_call | string_position | string_count | string_set_expr | STRING_VAR -> string_var_ref | IDENTIFIER -> identifier | "(" expr ")" | value | comprehension
-    atom: primary postfix* wildcard_postfix?
+    atom: primary postfix* (wildcard_postfix wildcard_method?)?
     value: STRING -> string_literal | NUMBER -> number_literal | array | "true" -> true_literal | "false" -> false_literal | "null" -> null_literal
     array: "[" [value ("," value)*] "]"
 
@@ -97,6 +100,7 @@ DSL_GRAMMAR = r"""
            | arith_expr "matches" pattern_block -> matches_op
            | arith_expr "in" arith_expr "as" IDENTIFIER -> in_op_with_capture
            | arith_expr "in" arith_expr -> in_op
+           | arith_expr "inside" arith_expr -> inside_op
            | arith_expr "as" IDENTIFIER -> assignment
            | arith_expr
 
@@ -120,6 +124,7 @@ DSL_GRAMMAR = r"""
     // and lookahead-anchored to a following ':' or ']' so it only fires inside subscripts.
     SIGNED_INT.2: /-?[0-9]+(?=\s*(?::|\]))/
     STRING_VAR: /\$[a-zA-Z_][a-zA-Z0-9_]*/
+    ARG_NAME.3: /[a-zA-Z_][a-zA-Z0-9_]*(?=[ \t\r\n]*=(?!=))/
     PATTERN_OPERATOR: "contains" | "==" | "!=" | ">" | "<" | ">=" | "<="
     METADATA_KEY: /(?!condition\b|collect\b|strings\b|variables\b|parameters\b)[a-zA-Z_][a-zA-Z0-9_]*/
     // Variable-binding LHS name. Exclude block headers so each optional block terminates
@@ -223,7 +228,7 @@ OPERATOR_PRECEDENCE = (
     OperatorPrecedence(
         6,
         "text and membership",
-        ("contains", "contains_any", "~", "matches", "in", "as"),
+        ("contains", "contains_any", "~", "matches", "in", "inside", "as"),
         "none",
         "Tests text or membership and binds captures.",
         "in_expr",
