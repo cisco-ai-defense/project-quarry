@@ -1939,6 +1939,7 @@ class DSLScanner:
                 rule_matches=[],
                 scan_time=0.0,
                 validation_error="Batch must contain at least one conversation",
+                batch_size=0,
             )
 
         if self.verbose:
@@ -2054,6 +2055,7 @@ class DSLScanner:
             evaluation_warnings=agg_evaluation_warnings or None,
             explanations=all_evidence or None,
             model_usage=model_usage.snapshot(),
+            batch_size=len(conversations),
         )
 
     def scan_file(self, json_path: Path, enable_explain: ExplainLevel = False) -> ScanResult:

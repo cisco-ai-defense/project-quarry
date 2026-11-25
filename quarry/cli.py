@@ -253,8 +253,21 @@ def format_results(
                     output_json = (
                         orjson.dumps(typed_output.to_dict()).decode() if typed_output else ""
                     )
+                    timing_key = rule_name
+                    if result.batch_size is not None:
+                        prefix, separator, original_name = rule_name.partition(":")
+                        index = prefix.removeprefix("conv_")
+                        if (
+                            separator
+                            and prefix.startswith("conv_")
+                            and index.isascii()
+                            and index.isdigit()
+                            and index[0] != "0"
+                        ):
+                            # Remove only the generated prefix. A rule may itself contain one.
+                            timing_key = original_name
                     timing = (
-                        {rule_name: rule_timings[rule_name]} if rule_name in rule_timings else {}
+                        {timing_key: rule_timings[timing_key]} if timing_key in rule_timings else {}
                     )
 
                     writer.writerow(
@@ -282,7 +295,12 @@ def format_results(
                         "",
                         "",
                         *completion_cells,
-                        orjson.dumps({"total_seconds": result.scan_time, "rules": {}}).decode(),
+                        orjson.dumps(
+                            {
+                                "total_seconds": result.scan_time,
+                                "rules": dict(sorted(rule_timings.items())),
+                            }
+                        ).decode(),
                         *usage_cells,
                     ]
                 )

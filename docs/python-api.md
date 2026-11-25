@@ -68,7 +68,7 @@ adapter-attempt counts:
 The `model` value is the configured public alias, never a provider model name. Records use only
 the generic operations `score`, `classify`, `complete`, and `input_tokens`. The summary does not
 contain prompts, model content, responses, endpoints, credentials, trace data, or pricing.
-Telemetry is diagnostic and never changes a verdict or completion state.
+Telemetry is diagnostic and never changes a verdict or completion state. `ScanResult.batch_size` records the submitted conversation count for batch scans (zero for an empty batch), and is `None` for individual scans and older saved results. CSV match rows retain only their original rule's timing, including batch averages; a result without matches retains its complete timing map in its single CSV row.
 
 When `fail_on_timeout` raises `QuarryTimeoutError`, `error.scan_result` (also available as
 `error.result`) may carry a partial timing and model-usage snapshot. A timeout during

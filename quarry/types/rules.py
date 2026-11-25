@@ -111,6 +111,16 @@ class ScanResult:
     evaluation_error_categories: dict[str, ScanFailureCategory | str] | None = field(
         default=None, kw_only=True
     )
+    # Submitted conversation count for a batch; None for scalar or older unknown results.
+    batch_size: int | None = field(default=None, kw_only=True)
+
+    @staticmethod
+    def _validate_batch_size(value: object) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("batch_size must be a non-negative integer or None")
+
+    def __post_init__(self) -> None:
+        self._validate_batch_size(self.batch_size)
 
     def __setstate__(self, state: object) -> None:
         """Restore known dataclass fields and initialize telemetry absent from older pickles."""
@@ -122,15 +132,18 @@ class ScanResult:
         unknown = set(state) - field_names
         if unknown:
             raise ValueError("ScanResult pickle state contains unknown fields")
-        missing = field_names - set(state) - {"model_usage", "rule_timings"}
+        missing = field_names - set(state) - {"model_usage", "rule_timings", "batch_size"}
         if missing:
             raise ValueError("ScanResult pickle state is missing required fields")
+        self._validate_batch_size(state.get("batch_size"))
         for name, value in state.items():
             object.__setattr__(self, name, value)
         if "rule_timings" not in state:
             object.__setattr__(self, "rule_timings", None)
         if "model_usage" not in state:
             object.__setattr__(self, "model_usage", empty_model_usage())
+        if "batch_size" not in state:
+            object.__setattr__(self, "batch_size", None)
 
     @property
     def failures(self) -> tuple[ScanFailure, ...]:
