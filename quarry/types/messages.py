@@ -2271,6 +2271,20 @@ class Messages(Sequence[MessageType]):
                     variant_compatibility[compatibility_key] = (piece, compatible)
                 if compatible:
                     ordered_pieces[-1] = existing
+                elif (
+                    isinstance(existing, ToolMessage)
+                    and isinstance(piece, ToolMessage)
+                    or isinstance(existing, AssistantMessage)
+                    and isinstance(piece, AssistantMessage)
+                    and existing.tool_calls
+                    and piece.tool_calls
+                ):
+                    # Ordinary occurrences may have distinct variants. Two variants
+                    # carrying the same tool unit remain invalid; stop at the first
+                    # conflict rather than traversing all repeated selections.
+                    raise ValueError(
+                        "cannot combine different content variants of the same source message"
+                    )
 
         canonical_tools: dict[str, _CanonicalToolUnit] = {}
         for ordinal, canonical in enumerate(root._items):
