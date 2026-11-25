@@ -176,7 +176,7 @@ def json_size(value: Any, limit: int) -> int:
         kind = type(current)
         if kind is not str and issubclass(kind, str):
             current = str.__str__(current)
-        elif kind is not int and issubclass(kind, int):
+        elif kind is not int and kind is not bool and issubclass(kind, int):
             current = int.__int__(cast(int, current))
         elif kind is not float and issubclass(kind, float):
             current = float.__float__(cast(Any, current))
@@ -192,9 +192,17 @@ def json_size(value: Any, limit: int) -> int:
         elif current is False:
             total += 5
         elif type(current) is int:
-            # Its digits and sign; a number too long to print is over any budget.
-            digits = abs(current).bit_length() * 30103 // 100000
-            total += len(str(current)) if digits < 4000 else limit + 1
+            # Since 2**10 > 10**3, this is a lower bound on decimal digits.
+            # Reject an integer that cannot fit before allocating its spelling.
+            bits = current.bit_length()
+            minimum_digits = (bits - 1) * 3 // 10 + 1 if bits else 1
+            if minimum_digits + int(current < 0) > limit - total:
+                return limit + 1
+            try:
+                total += len(str(current))
+            except ValueError:
+                # Respect the active interpreter's integer conversion limit.
+                return limit + 1
         elif type(current) is float:
             total += len(_json_float(current))
         elif type(current) is dict:
