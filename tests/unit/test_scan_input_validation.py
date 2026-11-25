@@ -835,8 +835,15 @@ def test_distinct_argument_preflight_stops_at_the_inspection_deadline(
     )
 
     if fail_on_timeout:
-        with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded"):
+        with pytest.raises(QuarryTimeoutError, match="Scan deadline exceeded") as exc_info:
             asyncio.run(scanner.scan_data_async(conversation, deadline_seconds=0.05))
+        assert exc_info.value.scan_result.model_usage == {
+            "calls": 0,
+            "records": [],
+            "truncated": False,
+        }
+        assert exc_info.value.scan_result.completion_state == "incomplete"
+        assert exc_info.value.scan_result.rule_timings is None
     else:
         result = asyncio.run(scanner.scan_data_async(conversation, deadline_seconds=0.05))
     assert 0 < len(decoded) < len(arguments)
