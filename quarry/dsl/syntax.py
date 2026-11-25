@@ -56,6 +56,7 @@ class SyntaxExclusion:
 _CATEGORY_SPELLINGS: dict[TokenCategory, tuple[str, ...]] = {
     "block_keyword": (
         "rule",
+        "imports:",
         "metadata:",
         "strings:",
         "variables:",
@@ -177,10 +178,12 @@ SYNTAX_EXCLUSIONS = (
     SyntaxExclusion("false_literal", "not_a_public_form"),
     SyntaxExclusion("flow_expr", "not_a_public_form"),
     SyntaxExclusion("identifier", "not_a_public_form"),
+    SyntaxExclusion("import_group", "not_a_public_form"),
     SyntaxExclusion("in_expr", "not_a_public_form"),
     SyntaxExclusion("index_postfix", "not_a_public_form"),
     SyntaxExclusion("metadata_item", "not_a_public_form"),
     SyntaxExclusion("named_argument", "not_a_public_form"),
+    SyntaxExclusion("module", "not_a_public_form"),
     SyntaxExclusion("not_expr", "not_a_public_form"),
     SyntaxExclusion("null_literal", "not_a_public_form"),
     SyntaxExclusion("number_literal", "not_a_public_form"),

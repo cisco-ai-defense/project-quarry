@@ -54,6 +54,7 @@ from quarry.engine.contracts import (
 )
 from quarry.engine.decision import Parts, boot_diagram_is_decided, reads
 from quarry.engine.desugar import (
+    COMPOSED_CHECK,
     ORDERS_INPUT_ITEMS,
     Desugarer,
     FlowProbe,
@@ -622,7 +623,10 @@ class _Lowerer:
         if isinstance(node, FunctionCall) and node.name in ("called_tool", "called_tools"):
             return self._f._mint_atom("tool_calls", "name", "equals", (self._f._lit(node.args[0]),))
         name = f.name or source_name(var)
-        return self._f.compile_step(node, surface, Scope().bind(name, surface))
+        scope = Scope().bind(name, surface)
+        if isinstance(node, AnyComprehension) and node.variable.startswith(COMPOSED_CHECK):
+            return self._f.compile_composed_check(node, scope, surface)
+        return self._f.compile_step(node, surface, scope)
 
     def pinned_join(self, side: _JoinSide, surface: str) -> T.Formula:
         """A join to the candidate element, parameterized by the candidate's field:
@@ -1686,6 +1690,7 @@ def _attempt(rule, bind: str | None, decompose: bool, response_schemas: Mapping[
         collect_plan=collect_plan,
         tool_quantifiers=c.tool_quantifiers,
         closed_conditions=closed_conditions,
+        split_checks=c.split_checks,
         full_trace_proof=full_trace_proof,
         decision_tree=decision_tree,
     )
