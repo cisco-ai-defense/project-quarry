@@ -119,6 +119,8 @@ result.raise_for_status()
 
 Authenticate stored compiled bytes before passing them to the loader. The loader checks the wire version, compiler version, rule requirement, and runtime resource identity; it does not prove arbitrary bytes came from your build. Recompile source after an incompatible version change. Policies with bound text parameters also require the host to manage their evidence key and follow the loader's key requirements.
 
+Earlier compiler-12, format-9 chat policies omit flow preflight metadata. The loader preserves their bytes and policy identity without recompiling source. Policies that read declared inputs or order input items require that metadata; recompile their source if it is absent. Unsupported compiler versions are rejected explicitly.
+
 See [parameters](parameters.md) for binding and digest behavior. Public result, exception, conversation, and message types are exported from `quarry`; configuration classes live in `quarry.config`.
 
 ## Judge results
