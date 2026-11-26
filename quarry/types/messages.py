@@ -928,13 +928,15 @@ class ToolFunction(OpenAIObject):
 
 
 class Tool(OpenAIObject):
-    """One function tool offered with a conversation."""
+    """One structurally valid offered tool, preserved even when rules cannot read it."""
 
-    type: Literal["function"]
+    type: str
     function: ToolFunction
     DSL_FIELDS: ClassVar[frozenset[str]] = frozenset({"type", "name", "description", "parameters"})
     DSL_FIELD_METADATA: ClassVar[tuple[SurfaceFieldMetadata, ...]] = (
-        SurfaceFieldMetadata("type", "string", "Offered tool type; currently `function`."),
+        SurfaceFieldMetadata(
+            "type", "string", "Offered tool type; rules read named function tools."
+        ),
         SurfaceFieldMetadata("name", "string", "Exact offered function name."),
         SurfaceFieldMetadata("description", "string", "Description shown to the model."),
         SurfaceFieldMetadata("parameters", "object", "JSON Schema for the function arguments."),
@@ -957,6 +959,23 @@ class Tool(OpenAIObject):
         """Return a defensive tool-schema projection."""
 
         return _project_json(self.function.source_parameters)
+
+
+def tools_fault(tools: Sequence[Tool]) -> str | None:
+    """Return a bounded reason why the offered collection has no readable definitions."""
+
+    names: set[str] = set()
+    for index, tool in enumerate(tools):
+        if index % 256 == 0:
+            _raise_if_combine_expired()
+        if tool.type != "function":
+            return f"tools[{index}] has an unsupported tool type"
+        if not tool.name:
+            return f"tools[{index}].function has no readable name"
+        if tool.name in names:
+            return f"tools[{index}].function repeats an offered name"
+        names.add(tool.name)
+    return None
 
 
 MessageType = SystemMessage | DeveloperMessage | UserMessage | AssistantMessage | ToolMessage

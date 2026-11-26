@@ -82,7 +82,7 @@ _HELLO = {"role": "user", "content": "hello"}
         ),
         pytest.param(
             {"messages": [_HELLO], "tools": [{"type": "function"}]},
-            "Expected OpenAI format with type='function'",
+            "a string type and a function object",
             id="tool-without-function",
         ),
         pytest.param(
@@ -279,11 +279,6 @@ _HELLO = {"role": "user", "content": "hello"}
             id="strict-tool-function",
         ),
         pytest.param(
-            {"messages": [_HELLO], "tools": [{"type": "function", "function": {"name": ""}}]},
-            "function must have a non-empty string 'name'",
-            id="empty-tool-name",
-        ),
-        pytest.param(
             {
                 "messages": [_HELLO],
                 "tools": [{"type": "function", "function": {"name": "f", "description": 1}}],
@@ -298,11 +293,6 @@ _HELLO = {"role": "user", "content": "hello"}
             },
             "function 'parameters' must be an object",
             id="string-tool-parameters",
-        ),
-        pytest.param(
-            {"messages": [_HELLO], "tools": [_tool(), _tool()]},
-            "duplicate function name 'read_file'",
-            id="duplicate-tool-name",
         ),
     ],
 )
@@ -616,3 +606,15 @@ def test_the_model_receives_the_callers_transcript_losslessly(tmp_path, monkeypa
     assert result.rule_matches == ["R"]
     # Message order, text/image part order, full image bytes and detail, and the tool graph.
     assert scored == [_RICH["messages"]]
+
+
+@pytest.mark.parametrize(
+    "tools", [[{"type": "function", "function": {"name": ""}}], [_tool(), _tool()]]
+)
+def test_unreadable_offered_tools_only_fail_the_rule_that_reads_them(tools):
+    data = {"messages": [_HELLO], "tools": tools}
+    unused = _scanner().scan_data(data)
+    assert unused.is_complete and unused.rule_matches == ["R"]
+    read = _scanner('rule "R" condition: has_tool("read_file")').scan_data(data)
+    assert read.completion_state == "incomplete" and read.validation_error is None
+    assert read.failures[0].category.value == "invalid_input"

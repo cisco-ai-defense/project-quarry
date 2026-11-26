@@ -45,6 +45,13 @@ Python containers. Text, image URL, and input-audio parts retain their OpenAI wi
 Rules can inspect documented message and tool fields. A model call receives the selected messages
 and the tool definitions passed by the rule.
 
+Offered tools must have a string `type` and a `function` object with a string `name`.
+Unknown string types, empty names and duplicate names are preserved in raw serialization.
+A rule that reads such a collection through `tools`, `has_tool()`, `has_tools()` or a model's
+explicit tools argument fails with `invalid_input`. Rules that inspect only messages or observed
+calls can still finish. A model input consisting only of `messages` does not inherit offered tools.
+Missing fields, wrong field types and malformed parameter schemas remain whole-input errors.
+
 Message content can be text or a non-empty ordered array of text, image URL and input-audio
 parts, including in tool results. `content` and the tool-result `result` alias flatten only the
 text parts; wire serialization preserves the original array and media.
@@ -92,7 +99,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 14 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 15 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text

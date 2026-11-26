@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-14 decodes named tool arguments on demand
-# and attributes unsafe decoded values only to the rule that reads them.
-COMPILER_VERSION = "compiler-14"
+# previously produced artifacts. Compiler-15 preserves unreadable offered definitions
+# and attributes semantic tool-collection faults to their reading rules.
+COMPILER_VERSION = "compiler-15"
 
 
 @dataclass(frozen=True, slots=True)
