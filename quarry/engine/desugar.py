@@ -489,10 +489,12 @@ class Desugarer:
         if binding.coll.value is not None:
             self._t.check_value_body(comp.condition, binding.coll.value)
         body = self.cond(self._aliased(comp, binding), (*scope, binding))
+        # A Boolean constant is also an element predicate. Lowering still gates it
+        # to this collection, so true cannot count the boot step or other surfaces.
         if (
             not C.free_vars(body) <= {binding.var}
             if binding.coll.value is not None
-            else not free_only(body, binding.var)
+            else not (isinstance(body, C.Const) or free_only(body, binding.var))
         ):
             raise UnsupportedConstruct(
                 f"count([x for x in {binding.surface} if ...]) needs a filter that only reads "
