@@ -82,6 +82,7 @@ _CATEGORY_SPELLINGS: dict[TokenCategory, tuple[str, ...]] = {
         "else",
         "contains",
         "contains_any",
+        "inside",
         "matches",
         "=",
         "==",
@@ -166,6 +167,7 @@ TOKEN_RECORDS = tuple(
 
 
 SYNTAX_EXCLUSIONS = (
+    SyntaxExclusion("argument", "not_a_public_form"),
     SyntaxExclusion("arguments", "not_a_public_form"),
     SyntaxExclusion("arith_expr", "not_a_public_form"),
     SyntaxExclusion("atom", "not_a_public_form"),
@@ -180,6 +182,7 @@ SYNTAX_EXCLUSIONS = (
     SyntaxExclusion("in_expr", "not_a_public_form"),
     SyntaxExclusion("index_postfix", "not_a_public_form"),
     SyntaxExclusion("metadata_item", "not_a_public_form"),
+    SyntaxExclusion("named_argument", "not_a_public_form"),
     SyntaxExclusion("not_expr", "not_a_public_form"),
     SyntaxExclusion("null_literal", "not_a_public_form"),
     SyntaxExclusion("number_literal", "not_a_public_form"),
@@ -196,6 +199,7 @@ SYNTAX_EXCLUSIONS = (
     SyntaxExclusion("true_literal", "not_a_public_form"),
     SyntaxExclusion("value", "not_a_public_form"),
     SyntaxExclusion("variable_def", "not_a_public_form"),
+    SyntaxExclusion("wildcard_method", "not_a_public_form"),
 )
 
 

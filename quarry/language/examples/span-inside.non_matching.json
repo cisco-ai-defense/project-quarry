@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "content": "The password is exposed.",
+      "role": "user"
+    }
+  ]
+}
