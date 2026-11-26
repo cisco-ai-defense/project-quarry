@@ -42,6 +42,7 @@ from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.timer import (
     EvaluationDeadline,
+    QuarryTimeoutError,
     absolute_scan_deadline,
     evidence_deadline,
     raise_if_evaluation_expired,
@@ -50,6 +51,7 @@ from quarry.safety.timer import (
 )
 from quarry.safety.validator import _validate_json_tree, _validate_raw_json_container_types
 from quarry.scanner import DSLScanner, _DeferredEvidence
+from quarry.telemetry import add_durations, empty_model_usage, merge_model_usage
 from quarry.types.exceptions import ConversationValidationError
 from quarry.types.parameters import (
     ParameterSpec,
@@ -528,36 +530,53 @@ class CompiledPolicy:
                     remaining = remaining_evaluation_time()
                     if remaining is not None and remaining <= 0:
                         if self._scanner.limits.fail_on_timeout:
-                            raise_if_evaluation_expired()
+                            try:
+                                raise_if_evaluation_expired()
+                            except QuarryTimeoutError as error:
+                                error.with_scan_result(
+                                    self._aggregate_timeout_result(results, self._timeout_result())
+                                )
+                                raise
                         results.extend(
                             self._timeout_result() for _ in range(index, len(conversations))
                         )
                         break
                     first_deferred = len(deferred)
-                    result = await self._scanner._scan_data_with_parameters_async(
-                        conversation,
-                        effective,
-                        enable_explain=explain,
-                        record_traces=record_traces,
-                        rules_subset={self._rule_name},
-                        decision_paths=decision_paths,
-                        explore_selector=lambda value: _sampled(
-                            value,
-                            self._scanner.compiled_rules[self._rule_name].read_surfaces,
-                            self._adapter_hashes,
-                            self._scanner.compiled_rules[self._rule_name].orders_input_items,
-                            explore_rate,
-                            self._scanner.limits,
-                            self._scanner.input_registry,
-                        ),
-                        deferred_evidence=deferred,
-                    )
+                    try:
+                        result = await self._scanner._scan_data_with_parameters_async(
+                            conversation,
+                            effective,
+                            enable_explain=explain,
+                            record_traces=record_traces,
+                            rules_subset={self._rule_name},
+                            decision_paths=decision_paths,
+                            explore_selector=lambda value: _sampled(
+                                value,
+                                self._scanner.compiled_rules[self._rule_name].read_surfaces,
+                                self._adapter_hashes,
+                                self._scanner.compiled_rules[self._rule_name].orders_input_items,
+                                explore_rate,
+                                self._scanner.limits,
+                                self._scanner.input_registry,
+                            ),
+                            deferred_evidence=deferred,
+                        )
+                    except QuarryTimeoutError as error:
+                        current = error.scan_result or self._timeout_result()
+                        error.with_scan_result(self._aggregate_timeout_result(results, current))
+                        raise
                     remaining = remaining_evaluation_time()
                     if remaining is not None and remaining <= 0:
-                        if self._scanner.limits.fail_on_timeout:
-                            raise_if_evaluation_expired()
-                        timeout = self._timeout_result(scan_time=result.scan_time)
+                        timeout = self._timeout_result(result)
                         transfer_result_scope(result, timeout)
+                        if self._scanner.limits.fail_on_timeout:
+                            try:
+                                raise_if_evaluation_expired()
+                            except QuarryTimeoutError as error:
+                                error.with_scan_result(
+                                    self._aggregate_timeout_result(results, timeout)
+                                )
+                                raise
                         results.append(timeout)
                         results.extend(
                             self._timeout_result() for _ in range(index + 1, len(conversations))
@@ -591,14 +610,49 @@ class CompiledPolicy:
             deferred.clear()
             finishers.clear()
 
-    def _timeout_result(self, *, scan_time: float = 0.0) -> ScanResult:
-        """Represent a batch item that could not finish within the shared deadline."""
+    def _timeout_result(self, result: ScanResult | None = None) -> ScanResult:
+        """Represent a timed-out item while retaining its already observed telemetry."""
 
         return ScanResult(
-            file_path=None,
+            file_path=result.file_path if result is not None else None,
             rule_matches=[],
-            scan_time=scan_time,
+            scan_time=result.scan_time if result is not None else 0.0,
             timed_out_rules=[self._rule_name],
+            rule_timings=(
+                dict(sorted((result.rule_timings or {}).items())) or None
+                if result is not None
+                else None
+            ),
+            model_usage=(
+                merge_model_usage([result.model_usage])
+                if result is not None
+                else empty_model_usage()
+            ),
+        )
+
+    def _aggregate_timeout_result(
+        self,
+        completed: Sequence[ScanResult],
+        current: ScanResult,
+    ) -> ScanResult:
+        """Aggregate an ordered completed prefix and one current timeout exactly once."""
+
+        observed = (*completed, current)
+        timings: dict[str, list[float]] = {}
+        for result in observed:
+            for rule_name, duration in (result.rule_timings or {}).items():
+                timings.setdefault(rule_name, []).append(duration)
+        averaged_timings = {
+            rule_name: add_durations(*(duration / len(durations) for duration in durations))
+            for rule_name, durations in sorted(timings.items())
+        }
+        return ScanResult(
+            file_path=current.file_path,
+            rule_matches=[],
+            scan_time=add_durations(*(result.scan_time for result in observed)),
+            timed_out_rules=[self._rule_name],
+            rule_timings=averaged_timings or None,
+            model_usage=merge_model_usage([result.model_usage for result in observed]),
         )
 
     def _attach_provenance(

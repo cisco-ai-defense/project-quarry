@@ -30,6 +30,7 @@ import random
 import re
 import string
 import sys
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import nullcontext
@@ -73,7 +74,7 @@ from quarry.integrations.model_head_plan import (
 )
 from quarry.integrations.model_usage import (
     RETRYABLE_ERROR_CODES,
-    ModelPreparationError,
+    ModelPreparationFailure,
     ModelRetryHistory,
     ModelUsage,
 )
@@ -117,6 +118,7 @@ from quarry.safety.timer import (
     clamp_to_evaluation_deadline,
     raise_if_evaluation_expired,
 )
+from quarry.telemetry import ModelOperation, public_model_operation
 from quarry.types.adapter_transforms import (
     DecodeLimitError,
     LocalTransformConfig,
@@ -2616,14 +2618,24 @@ class ModelInferenceBackend:
 
                 return invoke
 
+            async def invoke_unprepared(attempt_timeout):
+                return await prepare_attempt()(attempt_timeout)
+
             try:
                 response = await self._send(
                     model_id,
                     rate_limit_model,
-                    prepare_attempt,
+                    invoke_unprepared,
+                    operation_name=public_model_operation(method),
                     timeout=timeout,
                     retry_history=retry_history,
+                    attempt_factory=prepare_attempt,
                 )
+                if isinstance(response, ModelPreparationFailure):
+                    # Preparation did not invoke an adapter. Preserve its original failure
+                    # outside provider retry/normalization and release finished host frames.
+                    traceback.clear_frames(response.error.__traceback__)
+                    raise response.error
             except LLMError as exc:
                 reason = _refusal_reason(exc) if refusals else None
                 if reason is None:
@@ -2665,10 +2677,15 @@ class ModelInferenceBackend:
                         timeout=provider_timeout,
                     )
             except TimeoutError as exc:
+                raise_if_evaluation_expired()
                 raise ModelUsage._timeout_error(
                     model_id, retry_history.last_failure, retry_history.failed_attempts
                 ) from exc
             except LLMError as exc:
+                if exc.details.get("code") == "timeout":
+                    # Shared requests have their own provider budget. The waiting
+                    # caller still owns any earlier rule or scan deadline.
+                    raise_if_evaluation_expired()
                 # A request another alias started fails under that alias's name; report it
                 # under this caller's.
                 other = exc.details.get("model")
@@ -2738,25 +2755,25 @@ class ModelInferenceBackend:
         self,
         model_id: str,
         rate_limit_model: str,
-        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[Any]]],
+        operation: Callable[[float | None], Awaitable[Any]],
         *,
+        operation_name: ModelOperation,
         timeout: float | None,
         retry_history: ModelRetryHistory,
+        attempt_factory: Callable[[], Callable[[float | None], Awaitable[Any]]] | None = None,
     ) -> Any:
         """Run one logical model call and normalize its final provider failure."""
 
         try:
-            try:
-                return await self.model_usage.run(
-                    rate_limit_model,
-                    None,
-                    budget_alias=model_id,
-                    timeout=timeout,
-                    retry_history=retry_history,
-                    prepare_attempt=prepare_attempt,
-                )
-            except ModelPreparationError as exc:
-                raise exc.error from None
+            return await self.model_usage.run(
+                rate_limit_model,
+                operation,
+                budget_alias=model_id,
+                operation_name=operation_name,
+                timeout=timeout,
+                retry_history=retry_history,
+                attempt_factory=attempt_factory,
+            )
         except LLMError as exc:
             # Adapters know the physical provider model, while authored rules know only the
             # trusted Quarry alias. Rewrite only the structured leading model label; if an

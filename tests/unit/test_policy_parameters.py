@@ -26,11 +26,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+import quarry.policy as policy_module
 from quarry.config import QuarryConfig
 from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
@@ -39,8 +41,10 @@ from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner
+from quarry.telemetry import merge_model_usage
 from quarry.types.exceptions import RuleParseError, RuleValidationError
 from quarry.types.parameters import ParameterValueError
+from quarry.types.rules import ScanResult
 
 
 class _ScoreAdapter:
@@ -59,6 +63,22 @@ class _ScoreAdapter:
     async def tokenize(self, config, messages, _tools, *, timeout=None):
         count = sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict))
         return {config.tokens.count_field: count}
+
+
+class _PermitFirstLimiter:
+    """Permit one physical call, then keep later calls waiting before dispatch."""
+
+    def __init__(self) -> None:
+        self.entries = 0
+        self.waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def limit(self, _model):
+        self.entries += 1
+        if self.entries > 1:
+            self.waiting.set()
+            await asyncio.Future()
+        yield 0.0
 
 
 def _runtime(tmp_path, model: str = "judge-v1", **document):
@@ -531,12 +551,211 @@ async def test_a_batch_rejects_a_first_result_at_the_deadline(tmp_path, monkeypa
     ]
 
 
+async def test_batch_deadline_replacement_preserves_completed_item_telemetry(
+    tmp_path, monkeypatch
+) -> None:
+    policy = _policy(tmp_path, _SLOW_GATE)
+    completed = ScanResult(
+        file_path=None,
+        rule_matches=["Batch"],
+        scan_time=0.12,
+        rule_timings={"Batch": 0.1},
+        model_usage={
+            "calls": 1,
+            "records": [{"model": "judge", "operation": "score", "calls": 1}],
+            "truncated": False,
+        },
+    )
+
+    async def scan(*_args, **_kwargs):
+        return completed
+
+    remaining = iter((1.0, 0.0))
+    monkeypatch.setattr(policy._scanner, "_scan_data_with_parameters_async", scan)
+    monkeypatch.setattr(
+        policy_module,
+        "remaining_evaluation_time",
+        lambda: next(remaining),
+    )
+
+    (timed_out,) = await policy.scan_many_async([_user("high")], deadline_seconds=10)
+
+    assert timed_out.rule_matches == []
+    assert timed_out.timed_out_rules == ["Batch"]
+    assert timed_out.scan_time == completed.scan_time
+    assert timed_out.rule_timings == completed.rule_timings
+    assert timed_out.model_usage == completed.model_usage
+    assert merge_model_usage([timed_out.model_usage]) == timed_out.model_usage
+
+
 async def test_a_batch_deadline_raises_when_timeouts_are_configured_to_fail(tmp_path) -> None:
-    config, backend, _, _ = _runtime(tmp_path, fail_on_timeout=True)
+    config, backend, adapter, _ = _runtime(tmp_path, fail_on_timeout=True)
     policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
 
-    with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded"):
-        await policy.scan_many_async([_user("slow")], deadline_seconds=0.2)
+    with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
+        await policy.scan_many_async([_user("fast"), _user("slow")], deadline_seconds=0.2)
+
+    aggregate = exc_info.value.scan_result
+    assert adapter.calls == aggregate.model_usage["calls"] == 2
+    assert aggregate.model_usage["records"] == [
+        {"model": "judge", "operation": "score", "calls": 2}
+    ]
+    assert aggregate.rule_timings["Batch"] >= 0.0
+
+
+async def test_later_limiter_timeout_keeps_prefix_usage_and_adds_no_attempt(
+    tmp_path,
+) -> None:
+    config, backend, adapter, _ = _runtime(tmp_path, fail_on_timeout=True)
+    limiter = _PermitFirstLimiter()
+    backend.model_usage.rate_limiter = limiter
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+
+    with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
+        await policy.scan_many_async(
+            [_user("first"), _user("waiting")],
+            deadline_seconds=0.2,
+        )
+
+    aggregate = exc_info.value.scan_result
+    assert limiter.entries == 2
+    assert limiter.waiting.is_set()
+    assert adapter.calls == aggregate.model_usage["calls"] == 1
+    assert aggregate.model_usage["records"] == [
+        {"model": "judge", "operation": "score", "calls": 1}
+    ]
+
+
+async def test_raising_batch_deadline_carries_completed_item_telemetry(
+    tmp_path, monkeypatch
+) -> None:
+    config, backend, _, _ = _runtime(tmp_path, fail_on_timeout=True)
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    completed = ScanResult(
+        file_path=None,
+        rule_matches=["Batch"],
+        scan_time=0.08,
+        rule_timings={"Batch": 0.07},
+        model_usage={
+            "calls": 1,
+            "records": [{"model": "judge", "operation": "score", "calls": 1}],
+            "truncated": False,
+        },
+    )
+
+    async def scan(*_args, **_kwargs):
+        return completed
+
+    remaining = iter((1.0, 0.0))
+    monkeypatch.setattr(policy._scanner, "_scan_data_with_parameters_async", scan)
+    monkeypatch.setattr(
+        policy_module,
+        "remaining_evaluation_time",
+        lambda: next(remaining),
+    )
+
+    def expired() -> None:
+        raise QuarryTimeoutError("Policy batch deadline exceeded")
+
+    monkeypatch.setattr(policy_module, "raise_if_evaluation_expired", expired)
+
+    with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
+        await policy.scan_many_async([_user("high")], deadline_seconds=10)
+
+    assert exc_info.value.scan_result.model_usage == completed.model_usage
+    assert exc_info.value.scan_result.rule_timings == completed.rule_timings
+
+
+async def test_raising_batch_aggregates_prefix_and_retried_current_once(
+    tmp_path, monkeypatch
+) -> None:
+    config, backend, _, _ = _runtime(tmp_path, fail_on_timeout=True)
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    prefix = ScanResult(
+        None,
+        ["Batch"],
+        0.04,
+        rule_timings={"Batch": 0.03},
+        model_usage={
+            "calls": 1,
+            "records": [{"model": "judge", "operation": "score", "calls": 1}],
+            "truncated": False,
+        },
+    )
+    current = ScanResult(
+        None,
+        [],
+        0.08,
+        timed_out_rules=["Batch"],
+        rule_timings={"Batch": 0.07},
+        model_usage={
+            "calls": 2,
+            "records": [{"model": "judge", "operation": "score", "calls": 2}],
+            "truncated": False,
+        },
+    )
+    scans = 0
+
+    async def scan(*_args, **_kwargs):
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            return prefix
+        raise QuarryTimeoutError("Rule Batch timeout", scan_result=current)
+
+    remaining = iter((1.0, 1.0, 1.0))
+    monkeypatch.setattr(policy._scanner, "_scan_data_with_parameters_async", scan)
+    monkeypatch.setattr(policy_module, "remaining_evaluation_time", lambda: next(remaining))
+
+    with pytest.raises(QuarryTimeoutError, match="Rule Batch timeout") as exc_info:
+        await policy.scan_many_async([_user("first"), _user("second")], deadline_seconds=10)
+
+    aggregate = exc_info.value.scan_result
+    assert aggregate.scan_time == pytest.approx(0.12)
+    assert aggregate.rule_timings == {"Batch": pytest.approx(0.05)}
+    assert aggregate.model_usage == {
+        "calls": 3,
+        "records": [{"model": "judge", "operation": "score", "calls": 3}],
+        "truncated": False,
+    }
+
+
+def test_sync_batch_predispatch_timeout_retains_completed_prefix_telemetry(
+    tmp_path, monkeypatch
+) -> None:
+    config, backend, _, _ = _runtime(tmp_path, fail_on_timeout=True)
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    prefix = ScanResult(
+        None,
+        ["Batch"],
+        0.05,
+        rule_timings={"Batch": 0.04},
+        model_usage={
+            "calls": 1,
+            "records": [{"model": "judge", "operation": "score", "calls": 1}],
+            "truncated": False,
+        },
+    )
+
+    async def scan(*_args, **_kwargs):
+        return prefix
+
+    remaining = iter((1.0, 1.0, 0.0))
+    monkeypatch.setattr(policy._scanner, "_scan_data_with_parameters_async", scan)
+    monkeypatch.setattr(policy_module, "remaining_evaluation_time", lambda: next(remaining))
+
+    def expired() -> None:
+        raise QuarryTimeoutError("Policy batch deadline exceeded")
+
+    monkeypatch.setattr(policy_module, "raise_if_evaluation_expired", expired)
+
+    with pytest.raises(QuarryTimeoutError, match="Policy batch deadline exceeded") as exc_info:
+        policy.scan_many([_user("first"), _user("second")], deadline_seconds=10)
+
+    aggregate = exc_info.value.scan_result
+    assert aggregate.scan_time == prefix.scan_time
+    assert aggregate.rule_timings == prefix.rule_timings
+    assert aggregate.model_usage == prefix.model_usage
 
 
 async def test_rule_traces_are_returned_only_when_requested() -> None:

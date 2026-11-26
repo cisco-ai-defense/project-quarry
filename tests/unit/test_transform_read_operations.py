@@ -84,6 +84,14 @@ def test_model_expression_transform_chain_preserves_requesting_rule_and_provider
         result = policy.scan({"messages": [{"role": "user", "content": "same"}]})
     assert result.is_complete and result.rule_matches == ["R"]
     assert len(adapter.parts) == len(adapter.inputs) == 1
+    assert result.model_usage == {
+        "calls": 2,
+        "records": [
+            {"model": "extractor", "operation": "complete", "calls": 1},
+            {"model": "judge", "operation": "classify", "calls": 1},
+        ],
+        "truncated": False,
+    }
     assert {
         (row["rule"], row["model"], row["operation"], row["observations"]) for row in rows(session)
     } == {("R", "extractor", "transform", 1), ("R", "judge", "classify", 1)}

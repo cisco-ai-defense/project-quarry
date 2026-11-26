@@ -34,9 +34,18 @@ from quarry.safety.timer import (
     clamp_to_evaluation_deadline,
     current_evaluation_deadline,
 )
+from quarry.telemetry import ModelOperation, ModelUsageLedger
 from quarry.types.exceptions import LLMError
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class ModelPreparationFailure:
+    """Carry an unsent payload failure outside provider retry/error normalization."""
+
+    error: Exception
+
 
 RETRYABLE_ERROR_CODES = frozenset(
     {
@@ -73,10 +82,14 @@ class _ModelUsageTimeout(LLMError):
 
 
 class ModelCallBudget:
-    """Limit paid provider attempts per Quarry model alias during one scan."""
+    """Limit and account for provider attempts per public model alias."""
 
-    def __init__(self, max_calls_per_alias: int):
-        if (
+    def __init__(
+        self,
+        max_calls_per_alias: int | None,
+        telemetry: ModelUsageLedger | None = None,
+    ):
+        if max_calls_per_alias is not None and (
             isinstance(max_calls_per_alias, bool)
             or not isinstance(max_calls_per_alias, int)
             or max_calls_per_alias < 1
@@ -84,11 +97,15 @@ class ModelCallBudget:
             raise ValueError("max_calls_per_alias must be a positive integer")
         self.max_calls_per_alias = max_calls_per_alias
         self.calls_by_alias: dict[str, int] = {}
+        self.telemetry = telemetry
 
     def check(self, alias: str) -> None:
         """Fail when ``alias`` has no attempt left, without reserving one."""
 
-        if self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias:
+        if (
+            self.max_calls_per_alias is not None
+            and self.calls_by_alias.get(alias, 0) >= self.max_calls_per_alias
+        ):
             raise LLMError(
                 f"Inference model '{alias}' reached its model-call limit "
                 f"(max_model_calls={self.max_calls_per_alias})",
@@ -99,11 +116,13 @@ class ModelCallBudget:
                 },
             )
 
-    def consume(self, alias: str) -> None:
+    def consume(self, alias: str, operation: ModelOperation = "complete") -> None:
         """Reserve one provider attempt or fail before the adapter is called."""
 
         self.check(alias)
         self.calls_by_alias[alias] = self.calls_by_alias.get(alias, 0) + 1
+        if self.telemetry is not None:
+            self.telemetry.record(alias, operation)
 
 
 _current_model_call_budget = ContextVar[ModelCallBudget | None](
@@ -114,23 +133,16 @@ _current_model_call_budget = ContextVar[ModelCallBudget | None](
 @contextmanager
 def model_call_budget(
     max_calls_per_alias: int | None,
-) -> Generator[ModelCallBudget | None, None, None]:
-    """Install one task-local cost budget inherited by every rule in a scan."""
+    telemetry: ModelUsageLedger | None = None,
+) -> Generator[ModelCallBudget, None, None]:
+    """Install one task-local cost and telemetry scope inherited by child tasks."""
 
-    budget = ModelCallBudget(max_calls_per_alias) if max_calls_per_alias is not None else None
+    budget = ModelCallBudget(max_calls_per_alias, telemetry)
     token = _current_model_call_budget.set(budget)
     try:
         yield budget
     finally:
         _current_model_call_budget.reset(token)
-
-
-class ModelPreparationError(Exception):
-    """A local payload could not be prepared for dispatch."""
-
-    def __init__(self, error: Exception):
-        super().__init__(str(error))
-        self.error = error
 
 
 class ModelUsage:
@@ -142,13 +154,14 @@ class ModelUsage:
     async def run(
         self,
         model: str,
-        operation: Callable[[float | None], Awaitable[T]] | None,
+        operation: Callable[[float | None], Awaitable[T]],
         *,
         budget_alias: str | None = None,
+        operation_name: ModelOperation = "complete",
         timeout: float | None = None,
         retry_history: ModelRetryHistory | None = None,
-        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
-    ) -> T:
+        attempt_factory: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
+    ) -> T | ModelPreparationFailure:
         """Run sequential attempts until success, a final error, or timeout.
 
         The caller timeout and active rule deadline form one logical-call
@@ -164,8 +177,9 @@ class ModelUsage:
                 operation,
                 deadline=None,
                 budget_alias=budget_alias,
+                operation_name=operation_name,
                 retry_history=history,
-                prepare_attempt=prepare_attempt,
+                attempt_factory=attempt_factory,
             )
 
         active_evaluation = current_evaluation_deadline()
@@ -188,15 +202,28 @@ class ModelUsage:
             attempt_timeout = asyncio.timeout(remaining)
             try:
                 async with attempt_timeout:
-                    return await self._attempt(
+                    result = await self._attempt(
                         model,
                         operation,
                         deadline=deadline,
                         budget_alias=budget_alias,
+                        operation_name=operation_name,
                         evaluation_timeout_message=evaluation_timeout_message,
                         retry_history=history,
-                        prepare_attempt=prepare_attempt,
+                        attempt_factory=attempt_factory,
                     )
+                    if isinstance(result, ModelPreparationFailure):
+                        return result
+                    # Host callbacks may finish without yielding to the timeout task.
+                    # Include adapter work and limiter cleanup before accepting success.
+                    self._remaining(
+                        deadline,
+                        name,
+                        evaluation_timeout_message,
+                        history.last_failure,
+                        history.failed_attempts,
+                    )
+                    return result
             except TimeoutError as exc:
                 # Preserve the scanner's error type when this inner timer is
                 # enforcing the same rule deadline.
@@ -238,46 +265,53 @@ class ModelUsage:
     async def _attempt(
         self,
         model: str,
-        operation: Callable[[float | None], Awaitable[T]] | None,
+        operation: Callable[[float | None], Awaitable[T]],
         *,
         deadline: float | None,
         budget_alias: str | None,
+        operation_name: ModelOperation = "complete",
         evaluation_timeout_message: str | None = None,
         retry_history: ModelRetryHistory | None = None,
-        prepare_attempt: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
-    ) -> T:
+        attempt_factory: Callable[[], Callable[[float | None], Awaitable[T]]] | None = None,
+    ) -> T | ModelPreparationFailure:
         """Acquire one limiter ticket and invoke one physical attempt."""
 
-        def remaining_time() -> float | None:
-            if deadline is None:
-                return None
-            history = retry_history if retry_history is not None else ModelRetryHistory()
-            return self._remaining(
-                deadline,
-                budget_alias or model,
-                evaluation_timeout_message,
-                history.last_failure,
-                history.failed_attempts,
-            )
-
-        async def invoke() -> T:
-            remaining = remaining_time()
+        async def invoke() -> T | ModelPreparationFailure:
+            remaining = None
+            if deadline is not None:
+                history = retry_history if retry_history is not None else ModelRetryHistory()
+                remaining = self._remaining(
+                    deadline,
+                    budget_alias or model,
+                    evaluation_timeout_message,
+                    history.last_failure,
+                    history.failed_attempts,
+                )
             budget = _current_model_call_budget.get()
-            attempt = operation
-            if prepare_attempt is not None:
-                if budget is not None:
-                    budget.check(budget_alias or model)
-                try:
-                    attempt = prepare_attempt()
-                except Exception as error:
-                    raise ModelPreparationError(error) from error
-                remaining = remaining_time()
             if budget is not None:
-                budget.consume(budget_alias or model)
-            assert attempt is not None
+                budget.check(budget_alias or model)
+            attempt = operation
+            if attempt_factory is not None:
+                try:
+                    attempt = attempt_factory()
+                except Exception as error:
+                    return ModelPreparationFailure(error)
+                # A synchronous payload factory can use the budget without yielding to
+                # the timeout task. Check again before charging or starting the adapter.
+                if deadline is not None:
+                    history = retry_history if retry_history is not None else ModelRetryHistory()
+                    remaining = self._remaining(
+                        deadline,
+                        budget_alias or model,
+                        evaluation_timeout_message,
+                        history.last_failure,
+                        history.failed_attempts,
+                    )
+            if budget is not None:
+                budget.consume(budget_alias or model, operation_name)
             return await attempt(remaining)
 
-        async def limited_attempt() -> T:
+        async def limited_attempt() -> T | ModelPreparationFailure:
             if self.rate_limiter is None:
                 return await invoke()
             budget = _current_model_call_budget.get()
