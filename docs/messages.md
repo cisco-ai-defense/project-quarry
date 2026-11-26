@@ -70,6 +70,23 @@ objects. When independently evaluated transformed views contribute opposite side
 call/result pair, Quarry creates immutable relinked variants so the combined graph is
 self-contained. Object identity is therefore not guaranteed.
 
+Repeated selections retain each occurrence independently. Two variants of one source message
+can have different roles, content layouts or transformed text while keeping the same source
+`message_index`. Slicing, role views, composition and token-bounded splitting keep their written
+order and preserve each variant's provenance. A model span binds to the particular occurrence
+that produced it. If variants map the same character offsets to different original ranges,
+`source_ranges(message_index, start, end)` is ambiguous and raises; use the bound model span's
+`source_ranges` and `messages.extract(span)` instead.
+
+Text splitting prepares a scan-local range index once for each message variant. Range lookup and
+source-map copying are bounded across the entire split operation, including tokenizer probes and
+overlap. Exceeding 4,000,000 range work units raises an evaluation error and leaves the scan
+incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
+A failed or cancelled split cancels and joins its owned token probes before returning, including
+when its caller repeats cancellation while probe cleanup is still running.
+Compiler identity advances to 13 with compiled-policy format 9 unchanged. Earlier compiler
+artifacts are explicitly refused; recompile their saved rule sources before loading them.
+
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
 messages can be placed before, after, or between source views. Constructed roles are restricted to
 `system`, `developer`, `user`, and `assistant`, and constructors do not accept provider fields or
@@ -77,6 +94,10 @@ tool IDs. Composition accepts at most 256 parts, 256 constructed messages, and 1
 overall. A tool response must still follow the selected assistant call it answers before the value
 can be sent to a model. Selections with repeated tool-call IDs or repeated results for one call are
 rejected before model dispatch.
+
+Conflicting variants that both retain the same tool-call or tool-result identity are refused
+when the conflict is found. A text-preserving copy of a tool result, rewritten to an ordinary
+non-tool role, can accompany the original result without duplicating its tool identity.
 
 Constructed messages have stable scan-local identity but no source coordinates. Their text is
 explicitly unmapped unless it was copied through a provenance-preserving field operation.

@@ -634,7 +634,7 @@ async def apply_content_transform(
         raise TypeError("content transform receiver must be Messages")
     if not isinstance(transform, ContentTransform):
         raise TypeError("content transform definition must be ContentTransform")
-    unique = {ordinal: messages._message_at(ordinal) for ordinal in messages._ordinals}
+    unique = {id(message): message for message in messages}
     input_characters = sum(len(message.content) for message in unique.values())
     if input_characters > MAX_TRANSFORM_INPUT_CHARACTERS:
         raise ValueError(
@@ -644,7 +644,7 @@ async def apply_content_transform(
     metrics = _metrics if _metrics is not None else _TransformMetrics()
     overrides: dict[int, MessageType] = {}
     pacer = Pacer()
-    for ordinal, message in unique.items():
+    for identity, message in unique.items():
         if pacer.due():
             await asyncio.sleep(0)
         raise_if_evaluation_expired()
@@ -680,8 +680,18 @@ async def apply_content_transform(
         final_segments = _merge_segments(mapped)
         budget.keep(output_offset, final_segments)
         if changed or final_segments != provenance:
-            overrides[ordinal] = message._with_transformed_content(replacements, final_segments)
-    return messages if not overrides else messages._with_overrides(overrides)
+            overrides[identity] = message._with_transformed_content(replacements, final_segments)
+    return (
+        messages
+        if not overrides
+        else messages._with_position_overrides(
+            {
+                position: overrides[id(message)]
+                for position, message in enumerate(messages)
+                if id(message) in overrides
+            }
+        )
+    )
 
 
 @lru_cache(maxsize=256)

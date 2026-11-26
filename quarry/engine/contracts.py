@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-11 binds registered adapter transforms, their
-# resource requirements, model budgets and local-purity validation.
-COMPILER_VERSION = "compiler-11"
+# previously produced artifacts. Compiler-13 bounds provenance work across split
+# preparation, token probes and overlap while retaining distinct message occurrences.
+COMPILER_VERSION = "compiler-13"
 
 
 @dataclass(frozen=True, slots=True)

@@ -52,6 +52,12 @@ from quarry.integrations.adapter_transforms import (
     transform_error,
     transform_unit_snapshot,
 )
+from quarry.integrations.message_ranges import (
+    MessageRangeIndex,
+    RangeBudget,
+    RangeMetrics,
+    gather_split_tasks,
+)
 from quarry.integrations.model_usage import (
     RETRYABLE_ERROR_CODES,
     ModelPreparationError,
@@ -3421,12 +3427,25 @@ class ModelInferenceBackend:
         context: Messages | None,
         *,
         timeout: float | None,
+        _range_metrics: RangeMetrics | None = None,
     ) -> tuple[Messages, ...]:
         """Build the chunks after public argument validation."""
 
         await require_readable_media(messages)
         if context is not None:
             await require_readable_media(context)
+        range_budget = RangeBudget(_range_metrics)
+        range_indexes: dict[int, MessageRangeIndex] = {}
+        range_lock = asyncio.Lock()
+
+        async def range_index(position: int) -> MessageRangeIndex:
+            message = messages[position]
+            async with range_lock:
+                prepared = range_indexes.get(id(message))
+                if prepared is None:
+                    prepared = await MessageRangeIndex.prepare(message, range_budget)
+                    range_indexes[id(message)] = prepared
+                return prepared
 
         async def count(selection: Messages) -> int:
             return await self._count_messages(
@@ -3441,29 +3460,78 @@ class ModelInferenceBackend:
             return _llm_error("conversation_too_large", detail, model_id)
 
         def text_of(ordinal: int) -> str:
-            return messages._root._items[ordinal].content
+            return messages[ordinal].content
 
-        def piece(ordinal: int, start: int, end: int) -> Messages:
-            return messages._select_ranges((ordinal,), {ordinal: (start, end)})
+        async def piece(ordinal: int, start: int, end: int) -> Messages:
+            prepared = await range_index(ordinal)
+            selected = messages[ordinal : ordinal + 1]
+            selected._install_variants((prepared.segment(start, end),))
+            object.__setattr__(selected, "_chunk", True)
+            await range_budget.checkpoint()
+            return selected
 
-        context_ordinals = () if context is None else context._ordinals
-        body = tuple(ordinal for ordinal in messages._ordinals if ordinal not in context_ordinals)
+        async def count_piece(ordinal: int, start: int, end: int) -> int:
+            return await count(await piece(ordinal, start, end))
+
+        # Packing keys are local positions. Two occurrences may have one source index
+        # while holding different text, roles, or provenance.
+        context_positions: list[int] = []
+        external_context: list[int] = []
+        consumed: set[int] = set()
+        if context is not None:
+            available: dict[int, list[int]] = {}
+            by_ordinal: dict[int, list[int]] = {}
+            for position in range(len(messages) - 1, -1, -1):
+                available.setdefault(id(messages[position]), []).append(position)
+                by_ordinal.setdefault(messages[position].message_index, []).append(position)
+            for message in context:
+                position = None
+                for matches in (
+                    available.get(id(message), []),
+                    by_ordinal.get(message.message_index, []),
+                ):
+                    while matches and matches[-1] in consumed:
+                        matches.pop()
+                    if matches:
+                        position = matches.pop()
+                        break
+                if position is None:
+                    external_context.append(message.message_index)
+                else:
+                    consumed.add(position)
+                    context_positions.append(position)
+        context_ordinals = tuple(context_positions)
+        body = tuple(position for position in range(len(messages)) if position not in consumed)
         if not body:
             raise ValueError("split input holds no messages besides its context")
-        if context_ordinals and context_ordinals[-1] > body[0]:
-            # A view keeps transcript order, so only a leading context starts every chunk.
+        if (
+            context_ordinals
+            and (
+                max(context_ordinals) > body[0]
+                or context_ordinals != tuple(sorted(context_ordinals))
+            )
+            or external_context
+            and max(external_context) >= min(messages[position].message_index for position in body)
+        ):
+            # Only a leading context can prefix every chunk without reordering its body.
             raise ValueError("split context must come before every message it is split from")
 
         def chunk(ranges: dict[int, tuple[int, int] | None]) -> Messages:
-            ordinals = sorted({*context_ordinals, *ranges})
-            return messages._select_ranges(
-                ordinals,
-                {
-                    ordinal: text_range
-                    for ordinal, text_range in ranges.items()
-                    if text_range is not None and text_range != (0, len(text_of(ordinal)))
-                },
-            )
+            positions = sorted(ranges)
+            prefix = tuple(context) if context is not None else ()
+            variants = (*prefix, *(messages[position] for position in positions))
+            selected = messages._view_ordinals(message.message_index for message in variants)
+            selected._install_variants(variants)
+            replacements = {
+                len(prefix) + local: range_indexes[id(messages[position])].segment(*text_range)
+                for local, position in enumerate(positions)
+                if (text_range := ranges.get(position)) is not None
+                and text_range != (0, len(text_of(position)))
+            }
+            if replacements or context is not None:
+                selected = selected._with_position_overrides(replacements)
+            object.__setattr__(selected, "_chunk", True)
+            return selected
 
         whole = chunk(dict.fromkeys(body))
         if await count(whole) <= max_input_tokens:
@@ -3472,8 +3540,8 @@ class ModelInferenceBackend:
         # Counted alone, every message and range also pays the tokenizer's per-request
         # framing, so summed counts overcount a chunk; a chunk of several parts is confirmed.
         context_tokens = 0 if context is None else await count(context)
-        message_tokens = await asyncio.gather(
-            *(count(messages._select_ordinals((ordinal,))) for ordinal in body)
+        message_tokens = await gather_split_tasks(
+            count(messages[ordinal : ordinal + 1]) for ordinal in body
         )
         # Overlap is optional, so it must not force an otherwise fitting message to be cut.
         budget = max_input_tokens - context_tokens
@@ -3499,29 +3567,31 @@ class ModelInferenceBackend:
                 bounds.append(boundary if boundary > bounds[-1] else target)
             bounds.append(end)
             ranges = list(zip(bounds, bounds[1:], strict=False))
-            counts = await asyncio.gather(
-                *(count(piece(ordinal, low, high)) for low, high in ranges)
+            counts = await gather_split_tasks(
+                count_piece(ordinal, low, high) for low, high in ranges
             )
-            nested = await asyncio.gather(
-                *(cut(ordinal, low, high, n) for (low, high), n in zip(ranges, counts, strict=True))
+            nested = await gather_split_tasks(
+                cut(ordinal, low, high, n) for (low, high), n in zip(ranges, counts, strict=True)
             )
             return [part for parts_of in nested for part in parts_of]
 
         async def parts_of(ordinal: int, tokens: int) -> list[_ChunkPart]:
             if tokens <= budget:
                 return [_ChunkPart(ordinal, None, tokens)]
-            source = messages._root._items[ordinal].source_content
-            if not isinstance(source, str) or not source:
+            if context is not None and await count(chunk({ordinal: None})) <= max_input_tokens:
+                # Summing two requests charges framing twice. Keep a whole occurrence
+                # when the actual context-plus-message request fits.
+                return [_ChunkPart(ordinal, None, budget)]
+            message = messages[ordinal]
+            if not message._can_split_text() or not message.content:
                 # Counted alone it pays the request framing twice beside the context, so
                 # only the exact count of its chunk in ``confirm`` can reject it.
                 return [_ChunkPart(ordinal, None, tokens)]
-            return await cut(ordinal, 0, len(source), tokens)
+            await range_index(ordinal)
+            return await cut(ordinal, 0, len(message.content), tokens)
 
-        split_messages = await asyncio.gather(
-            *(
-                parts_of(ordinal, tokens)
-                for ordinal, tokens in zip(body, message_tokens, strict=True)
-            )
+        split_messages = await gather_split_tasks(
+            parts_of(ordinal, tokens) for ordinal, tokens in zip(body, message_tokens, strict=True)
         )
         packed: list[list[_ChunkPart]] = [[]]
         used = 0
@@ -3533,8 +3603,8 @@ class ModelInferenceBackend:
             used += part.tokens
 
         def has_text(part: _ChunkPart) -> bool:
-            source = messages._root._items[part.ordinal].source_content
-            return isinstance(source, str) and bool(source)
+            message = messages[part.ordinal]
+            return message._can_split_text() and bool(message.content)
 
         async def tail(parts: list[_ChunkPart]) -> dict[int, tuple[int, int] | None]:
             """Return what the next chunk repeats from the end of ``parts``.
@@ -3560,7 +3630,7 @@ class ModelInferenceBackend:
             while room > 0 and start < high:
                 spaces = [text.find(space, start, high) for space in " \n\t"]
                 start = min((index for index in spaces if index >= 0), default=start)
-                tokens = await count(piece(last.ordinal, start, high))
+                tokens = await count_piece(last.ordinal, start, high)
                 if tokens <= room:
                     return {
                         last.ordinal: (start, high),
@@ -3569,7 +3639,7 @@ class ModelInferenceBackend:
                 start = high - int((high - start) * room / tokens * 0.9)
             return {}
 
-        tails = await asyncio.gather(*(tail(parts) for parts in packed[:-1]) if overlap else ())
+        tails = await gather_split_tasks((tail(parts) for parts in packed[:-1]) if overlap else ())
 
         def own_ranges(
             index: int, repeated: dict[int, tuple[int, int] | None] | None = None
@@ -3632,7 +3702,7 @@ class ModelInferenceBackend:
             return view
 
         return tuple(
-            await asyncio.gather(*(confirm(index, view) for index, view in enumerate(chunks)))
+            await gather_split_tasks(confirm(index, view) for index, view in enumerate(chunks))
         )
 
     async def model_split_conversation(

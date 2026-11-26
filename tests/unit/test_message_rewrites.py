@@ -394,8 +394,10 @@ def test_combination_compares_part_only_origins_as_well_as_wire_data():
             replace_media=True,
         )
         variants.append(source._with_overrides({0: message}))
-    with pytest.raises(ValueError, match="different content variants"):
-        Messages.combine(variants)
+    combined = Messages.combine(variants)
+    assert [
+        combined._bind_span(Span(index, 0, 5)).source_parts[0].part_index for index in range(2)
+    ] == [0, 1]
 
 
 @pytest.mark.asyncio
@@ -431,13 +433,15 @@ async def test_new_media_in_a_restructured_message_uses_message_context_not_an_i
     assert span.to_dict()["source_parts"] == [{"message_index": 0}]
 
 
-def test_conflicting_repeated_source_rewrites_fail_instead_of_overwriting_one_occurrence():
+def test_repeated_source_rewrites_preserve_each_occurrence():
     source = Messages.from_openai([{"role": "assistant", "content": "same"}])
     repeated = Messages.combine((source, source))
-    with pytest.raises(ValueError, match="conflicting rewrites"):
-        repeated.rewritten(
-            [{"role": "user", "content": "same"}, {"role": "system", "content": "same"}]
-        )
+    rewritten = repeated.rewritten(
+        [{"role": "user", "content": "same"}, {"role": "system", "content": "same"}]
+    )
+    assert [message.role for message in rewritten] == ["user", "system"]
+    assert [message.message_index for message in rewritten] == [0, 0]
+    assert source[0].role == "assistant"
 
 
 def test_changing_a_tool_result_association_does_not_leave_a_hidden_old_link():
