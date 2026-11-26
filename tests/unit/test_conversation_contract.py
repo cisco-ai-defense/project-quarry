@@ -54,11 +54,6 @@ _HELLO = {"role": "user", "content": "hello"}
 @pytest.mark.parametrize(
     ("conversation", "reason"),
     [
-        pytest.param(
-            {"messages": [_HELLO, {"role": "platform", "content": "x"}]},
-            "invalid role 'platform'",
-            id="unknown-role",
-        ),
         pytest.param({"messages": [{"content": "Hello"}]}, "missing 'role' key", id="no-role"),
         pytest.param(
             {"messages": [{"role": "user"}]},
@@ -84,32 +79,6 @@ _HELLO = {"role": "user", "content": "hello"}
             {"messages": [_HELLO], "tools": [{"type": "function"}]},
             "a string type and a function object",
             id="tool-without-function",
-        ),
-        pytest.param(
-            {
-                "messages": [
-                    {"role": "assistant", "tool_calls": [_call("duplicate")]},
-                    {"role": "assistant", "tool_calls": [_call("duplicate")]},
-                ]
-            },
-            "Duplicate tool-call id 'duplicate'",
-            id="duplicate-call-id",
-        ),
-        pytest.param(
-            {"messages": [{"role": "tool", "tool_call_id": "missing", "content": "result"}]},
-            "unknown tool_call_id 'missing'",
-            id="orphan-response",
-        ),
-        pytest.param(
-            {
-                "messages": [
-                    {"role": "assistant", "tool_calls": [_call()]},
-                    {"role": "tool", "tool_call_id": "call_1", "content": "first"},
-                    {"role": "tool", "tool_call_id": "call_1", "content": "second"},
-                ]
-            },
-            "duplicates response for tool_call_id 'call_1'",
-            id="second-response",
         ),
         pytest.param(
             {"messages": [{"role": "assistant", "refusal": 7}]},
@@ -195,21 +164,6 @@ _HELLO = {"role": "user", "content": "hello"}
             id="tool-content-parts",
         ),
         pytest.param(
-            {"messages": [{"role": "tool", "tool_call_id": "", "content": "result"}]},
-            "non-empty string 'tool_call_id'",
-            id="empty-tool-call-id",
-        ),
-        pytest.param(
-            {
-                "messages": [
-                    {"role": "tool", "tool_call_id": "call_1", "content": "early"},
-                    {"role": "assistant", "tool_calls": [_call()]},
-                ]
-            },
-            "before its assistant tool call",
-            id="response-before-call",
-        ),
-        pytest.param(
             {"messages": [{"role": "assistant", "tool_calls": ["call_1"]}]},
             "tool_calls[0] is not an object (got str)",
             id="string-tool-call",
@@ -218,11 +172,6 @@ _HELLO = {"role": "user", "content": "hello"}
             {"messages": [{"role": "assistant", "tool_calls": [{**_call(), "index": 0}]}]},
             "tool_calls[0] has unsupported keys: ['index']",
             id="streaming-index-on-call",
-        ),
-        pytest.param(
-            {"messages": [{"role": "assistant", "tool_calls": [_call("")]}]},
-            "must have a non-empty string 'id'",
-            id="empty-call-id",
         ),
         pytest.param(
             {
@@ -293,6 +242,78 @@ def test_a_conversation_outside_the_openai_contract_is_invalid(conversation, rea
     assert reason in result.validation_error
     with pytest.raises(ConversationValidationError):
         result.raise_for_status()
+
+
+@pytest.mark.parametrize(
+    ("conversation", "condition"),
+    [
+        pytest.param(
+            {"messages": [_HELLO, {"role": "platform", "content": "x"}]},
+            'any m in messages where m.content contains "x"',
+            id="unknown-role",
+        ),
+        pytest.param(
+            {
+                "messages": [
+                    {"role": "assistant", "tool_calls": [_call("duplicate")]},
+                    {"role": "assistant", "tool_calls": [_call("duplicate")]},
+                ]
+            },
+            'any c in tool_calls where c.id == "duplicate"',
+            id="duplicate-call-id",
+        ),
+        pytest.param(
+            {"messages": [{"role": "tool", "tool_call_id": "missing", "content": "result"}]},
+            'all r in tool_responses where r.tool_call_id == "call_1"',
+            id="orphan-response",
+        ),
+        pytest.param(
+            {
+                "messages": [
+                    {"role": "assistant", "tool_calls": [_call()]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "first"},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "second"},
+                ]
+            },
+            'all r in tool_responses where r.tool_call_id == "call_1"',
+            id="second-response",
+        ),
+        pytest.param(
+            {"messages": [{"role": "tool", "tool_call_id": "", "content": "result"}]},
+            'all r in tool_responses where r.tool_call_id == "call_1"',
+            id="empty-tool-call-id",
+        ),
+        pytest.param(
+            {
+                "messages": [
+                    {"role": "tool", "tool_call_id": "call_1", "content": "early"},
+                    {"role": "assistant", "tool_calls": [_call()]},
+                ]
+            },
+            'all r in tool_responses where r.tool_call_id == "call_1"',
+            id="response-before-call",
+        ),
+        pytest.param(
+            {"messages": [{"role": "assistant", "tool_calls": [_call("")]}]},
+            'any c in tool_calls where c.id == ""',
+            id="empty-call-id",
+        ),
+    ],
+)
+def test_semantic_sender_and_link_faults_are_local_to_the_reading_rule(conversation, condition):
+    result = DSLScanner(
+        QuarryConfig(
+            quarry_rule_texts=(
+                'rule "Always" condition: true',
+                f'rule "Read" condition: {condition}',
+            )
+        )
+    ).scan_data(conversation)
+    assert result.rule_matches == ["Always"] and result.completion_state == "incomplete"
+    assert result.validation_error is None
+    assert [failure.to_dict() for failure in result.failures] == [
+        {"category": "invalid_input", "rule_name": "Read"}
+    ]
 
 
 def test_an_input_audio_part_is_part_of_the_contract() -> None:

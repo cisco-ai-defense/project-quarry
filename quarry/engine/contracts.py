@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-16 preserves unreadable tool calls and
-# attributes semantic call-field and model-input faults to their reading rules.
-COMPILER_VERSION = "compiler-16"
+# previously produced artifacts. Compiler-17 preserves unreadable senders and
+# attributes uncertain causal tool links to the rules that read them.
+COMPILER_VERSION = "compiler-17"
 
 
 @dataclass(frozen=True, slots=True)

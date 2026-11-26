@@ -882,9 +882,8 @@ def test_composition_rejects_a_tool_result_before_its_call(tmp_path) -> None:
     result = scanner.scan_data(conversation)
 
     assert result.rule_matches == []
-    assert result.evaluation_errors == {
-        "R": "tool-result message selected before its originating assistant tool call"
-    }
+    assert result.evaluation_errors == {"R": "model input does not contain exact call/result links"}
+    assert result.evaluation_error_categories["R"] == "invalid_input"
     assert adapter.classification_messages == []
 
 

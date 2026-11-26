@@ -576,13 +576,13 @@ class RuleEvidence:
 def _event_content(event: ConversationEvent) -> str | None:
     """Best-effort textual content of an event's source (message/tool call/response)."""
     src = event.source
-    content = getattr(src, "content", None)
-    if content is not None:
-        return str(content)
-    # Position evidence may use opaque wire text without semantically reading a call.
+    # A place records position; it need not semantically read a faulted field.
     place_texts = getattr(type(src), "place_texts", None)
     if callable(place_texts):
         return "\n".join(text for _, text in place_texts(src))
+    content = getattr(src, "content", None)
+    if content is not None:
+        return str(content)
     # Tool calls have no ``content``; surface their arguments as the excerpt.
     try:
         args = getattr(src, "arguments", None)
