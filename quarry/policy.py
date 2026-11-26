@@ -243,6 +243,7 @@ class CompiledPolicy:
     _evidence_key: bytes = field(
         default_factory=lambda: secrets.token_bytes(32), repr=False, compare=False
     )
+    _omit_legacy_flow_requirements: bool = field(default=False, repr=False, compare=False)
 
     @property
     def parameter_schema(self) -> tuple[ParameterSpec, ...]:
