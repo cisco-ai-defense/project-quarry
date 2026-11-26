@@ -95,8 +95,9 @@ from quarry.safety.validator import (
     Severity,
     _validate_json_tree,
     validate_conversation,
+    validate_conversation_top_level,
 )
-from quarry.types.context import ScanContext
+from quarry.types.context import ScanContext, preflight_conversation_total_size
 from quarry.types.dsl import FunctionCall, walk_condition_nodes
 from quarry.types.exceptions import (
     ConfigurationError,
@@ -1067,6 +1068,7 @@ class DSLScanner:
         rules_subset: set[str] | None = None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute parameters already validated by ``CompiledPolicy``."""
@@ -1081,6 +1083,7 @@ class DSLScanner:
                 parameters=parameters,
                 decision_paths=decision_paths,
                 explore=explore,
+                explore_selector=explore_selector,
                 deferred_evidence=deferred_evidence,
             )
 
@@ -1095,6 +1098,7 @@ class DSLScanner:
         parameters: dict[str, ParameterValue] | None,
         decision_paths: bool = False,
         explore: bool = False,
+        explore_selector: Callable[[dict[str, Any]], bool] | None = None,
         deferred_evidence: list | None = None,
     ) -> ScanResult:
         """Execute one scan inside the caller's installed inspection deadline.
@@ -1131,9 +1135,15 @@ class DSLScanner:
                 validation_error=message,
             )
         bound_parameters = parameters or {}
+        total_size_preflight = None
         legacy_chat = not self.input_registry.declarations and not self.input_adapters
         if legacy_chat:
             try:
+                raw_messages, raw_tools = validate_conversation_top_level(data)
+                if self.limits.enforce_limits:
+                    total_size_preflight = preflight_conversation_total_size(
+                        raw_messages, raw_tools, self.limits.max_total_size
+                    )
                 validate_conversation(
                     data,
                     parse_arguments=False,
@@ -1324,6 +1334,17 @@ class DSLScanner:
                 tool_call_types=self.tool_call_types,
                 parameters=bound_parameters,
                 parameter_specs={spec.name: spec for spec in parameter_schema},
+                _total_size_preflight=total_size_preflight,
+            )
+        except QuarryTimeoutError as exc:
+            if self.limits.fail_on_timeout:
+                raise
+            return ScanResult(
+                file_path=file_path,
+                rule_matches=[],
+                scan_time=(datetime.now() - start_time).total_seconds(),
+                error=f"Input preparation timed out: {exc}",
+                error_category=ScanFailureCategory.TIMEOUT,
             )
         except ConversationValidationError as exc:
             message = str(exc)
@@ -1346,7 +1367,8 @@ class DSLScanner:
                 evaluation_errors={"conversation_preparation": diagnostic},
             )
 
-        # Argument decoding stays local to rules that read arguments.
+        # Structural and resource guards run before materialization. Semantic argument
+        # decoding remains lazy and faults only the rule that actually reads arguments.
 
         try:
             wanted = {section: value for section, value in raw_sections.items() if section in read}
@@ -1355,6 +1377,19 @@ class DSLScanner:
                 self.limits,
                 {section: reason for section, reason in input_faults.items() if section in read},
             )
+            max_timeline_items = self.limits.max_timeline_items
+            timeline_item_count = len(context.timeline) + sum(
+                len(items) for items in prepared.lists.values()
+            )
+            if (
+                self.limits.enforce_limits
+                and max_timeline_items > 0
+                and timeline_item_count > max_timeline_items
+            ):
+                raise ConversationValidationError(
+                    f"scan produces {timeline_item_count} timeline items; limit is "
+                    f"{max_timeline_items}"
+                )
             missing_event_surfaces = {
                 section
                 for section in self.input_registry.event_surfaces
@@ -1418,6 +1453,9 @@ class DSLScanner:
                 evaluation_error_categories={"input_preparation": _failure_category(exc)},
                 evaluation_errors={"input_preparation": diagnostic},
             )
+
+        if explore_selector is not None:
+            explore = explore_selector(data)
 
         # Inputs exceeding a limit have been refused before any rule runs.
 

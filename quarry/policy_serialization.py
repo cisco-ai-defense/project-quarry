@@ -973,16 +973,14 @@ def _check_closed_conditions(artifact: CompiledRuleArtifact) -> None:
 def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
     # Report incompatible compilers before checking their version-specific fields.
-    if "compiler_version" in value:
-        compiler_version = _string(value["compiler_version"], "rule.artifact.compiler_version")
-        if compiler_version != COMPILER_VERSION:
-            raise _fail(
-                f"compiler_version {compiler_version!r} is unsupported; expected {COMPILER_VERSION!r}"
-            )
+    compiler_version = _string(value.get("compiler_version"), "rule.artifact.compiler_version")
+    if compiler_version != COMPILER_VERSION:
+        raise _fail(
+            f"compiler_version {compiler_version!r} is unsupported; expected {COMPILER_VERSION!r}"
+        )
     legacy_flows = "flow_requirements" not in value
     expected = _ARTIFACT_KEYS - {"flow_requirements"} if legacy_flows else _ARTIFACT_KEYS
     _exact_keys(value, expected, "rule.artifact")
-    compiler_version = _string(value["compiler_version"], "rule.artifact.compiler_version")
     specs = [
         _atom_from_wire(item, index)
         for index, item in enumerate(_list(value["atom_specs"], "rule.artifact.atom_specs"))

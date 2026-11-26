@@ -42,7 +42,7 @@ from quarry.safety.timer import (
     remaining_evaluation_time,
     scan_deadline,
 )
-from quarry.safety.validator import _validate_json_tree
+from quarry.safety.validator import _validate_json_tree, _validate_raw_json_container_types
 from quarry.scanner import DSLScanner, _DeferredEvidence
 from quarry.types.exceptions import ConversationValidationError
 from quarry.types.parameters import (
@@ -199,6 +199,7 @@ def _validated_sample(
     most = limits.max_total_size if limits.enforce_limits else None
     for key, value in sampled.items():
         try:
+            _validate_raw_json_container_types(value)
             _validate_json_tree(value, key, limits.max_nesting_depth)
         except ConversationValidationError:
             return None
@@ -452,8 +453,8 @@ class CompiledPolicy:
                         record_traces=record_traces,
                         rules_subset={self._rule_name},
                         decision_paths=decision_paths,
-                        explore=_sampled(
-                            conversation,
+                        explore_selector=lambda value: _sampled(
+                            value,
                             self._scanner.compiled_rules[self._rule_name].read_surfaces,
                             self._adapter_hashes,
                             self._scanner.compiled_rules[self._rule_name].orders_input_items,

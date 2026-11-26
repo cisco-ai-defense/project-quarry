@@ -207,6 +207,9 @@ class StaticEnvironment:
         default=None, repr=False, compare=False
     )
 
+    extension_state: dict[str, Any] = field(default_factory=dict)
+    missing_extension_states: frozenset[str] = frozenset()
+
     def __getattribute__(self, name: str):
         if name == "system_prompt":
             reader = object.__getattribute__(self, "_system_prompt_reader")
