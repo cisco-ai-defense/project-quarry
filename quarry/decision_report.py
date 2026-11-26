@@ -972,6 +972,32 @@ def _validated_path(path: Mapping[str, Any], index: int) -> DecisionPathPayload:
     return validated
 
 
+def _validate_measured_outcome(
+    node: Mapping[str, Any], entry: Mapping[str, Any], index: int
+) -> None:
+    """Reject a score or number record that its node cannot have, or whose recorded
+    comparison contradicts its outcome, so a re-walk cannot flip an unchanged threshold."""
+
+    for kind, form_key in (("score", "score_form"), ("number", "number_form")):
+        measured = entry.get(kind)
+        if measured is None:
+            continue
+        form = node.get(form_key)
+        if form is None:
+            raise ValueError(f"path {index} records a {kind} for a step that has none")
+        if measured["operator"] != form["operator"]:
+            raise ValueError(f"path {index} records a {kind} operator its step does not use")
+        value, outcome = measured["value"], entry["outcome"]
+        if (
+            value is not None
+            and outcome is not None
+            and compare(value, measured["operator"], measured["threshold"]) != outcome
+        ):
+            raise ValueError(
+                f"path {index} records a {kind} whose value and threshold contradict its outcome"
+            )
+
+
 def _validate_path_route(tree: DecisionTreePayload, path: DecisionPathPayload, index: int) -> None:
     """Reject a same-tree path that could not have followed the tree's edges."""
 
@@ -981,6 +1007,7 @@ def _validate_path_route(tree: DecisionTreePayload, path: DecisionPathPayload, i
     for position, entry in enumerate(entries):
         if key in (MATCH, NO_MATCH) or entry["node"] != key:
             raise ValueError(f"path {index} does not follow the tree at step {position}")
+        _validate_measured_outcome(nodes[key], entry, index)
         outcome = entry["outcome"]
         if outcome is None:
             if position != len(entries) - 1 or path["leaf"] is not None:
@@ -998,9 +1025,12 @@ def _validate_path_route(tree: DecisionTreePayload, path: DecisionPathPayload, i
     valid_node_ids = {node["id"] for node in nodes.values()}
     valid_step_keys = set(nodes)
     exploration = path.get("exploration", {})
+    nodes_by_id = {node["id"]: node for node in nodes.values()}
     for entry in exploration.get("off_path", ()):
         if entry["node"] not in valid_step_keys and entry["node"] not in valid_node_ids:
             raise ValueError(f"path {index} explores a node outside the tree")
+        explored = nodes.get(entry["node"]) or nodes_by_id[entry["node"]]
+        _validate_measured_outcome(explored, entry, index)
     if any(
         node not in valid_step_keys and node not in valid_node_ids
         for node in exploration.get("failed", ())
@@ -1046,7 +1076,8 @@ def decision_flows(
         and valid paths from another tree by label under ``unmapped_paths``.
 
     Raises:
-        ValueError: A malformed or cyclic tree, malformed or impossible paths, a label
+        ValueError: A malformed or cyclic tree, malformed or impossible paths (including a
+            score or number record whose value and threshold contradict its outcome), a label
             count that is not the path count, an out-of-bounds request, or a threshold that
             names no score or number node or parameter.
     """
