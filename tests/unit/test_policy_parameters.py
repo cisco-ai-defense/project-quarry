@@ -28,13 +28,16 @@ import json
 import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 import quarry.policy as policy_module
 from quarry.config import QuarryConfig
+from quarry.integrations import model_usage
 from quarry.integrations.model_inference import ModelInferenceBackend
 from quarry.policy import compile_policy
+from quarry.safety import timer
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.timer import QuarryTimeoutError
 from quarry.scanner import DSLScanner
@@ -492,13 +495,57 @@ def test_a_raising_timeout_contract_is_kept_and_a_zero_deadline_bounds_the_batch
 _SLOW_GATE = 'rule "Batch"\ncondition:\n    model("judge").score(messages, "c") >= 0.5\n'
 
 
-async def test_a_batch_keeps_results_finished_before_its_deadline(tmp_path) -> None:
-    results = await _policy(tmp_path, _SLOW_GATE).scan_many_async(
+def _clocked_batch_policy(tmp_path, monkeypatch, *, expires_on):
+    config, backend, adapter, _ = _runtime(tmp_path)
+    policy = compile_policy(_SLOW_GATE, runtime_config=config, model_inference_backend=backend)
+    loop = asyncio.get_running_loop()
+    start = now = loop.time()
+
+    def clock():
+        return now
+
+    async def score(_config, messages, *, timeout=None):
+        nonlocal now
+        adapter.calls += 1
+        if any(message.get("content") == expires_on for message in messages):
+            deadline = timer.current_evaluation_deadline()
+            assert deadline is not None
+            assert deadline.expires_at == start + 0.2
+            now = deadline.expires_at
+        return 0.8
+
+    # Advance the provider and event-loop clocks together: host scheduling must
+    # not decide which synthetic response reaches the fixed 0.2-second boundary.
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(loop, "time", clock)
+    monkeypatch.setattr(adapter, "score", score)
+    return policy, adapter
+
+
+async def test_a_batch_keeps_results_finished_before_its_deadline(tmp_path, monkeypatch) -> None:
+    policy, adapter = _clocked_batch_policy(tmp_path, monkeypatch, expires_on="slow")
+    results = await policy.scan_many_async(
         [_user("fast"), _user("slow"), _user("fast")], deadline_seconds=0.2
     )
 
+    assert adapter.calls == 2
     assert [(r.rule_matches, r.completion_state, r.timed_out_rules) for r in results] == [
         (["Batch"], "complete", None),
+        ([], "incomplete", ["Batch"]),
+        ([], "incomplete", ["Batch"]),
+    ]
+
+
+async def test_a_batch_rejects_a_first_result_at_the_deadline(tmp_path, monkeypatch) -> None:
+    policy, adapter = _clocked_batch_policy(tmp_path, monkeypatch, expires_on="fast")
+    results = await policy.scan_many_async(
+        [_user("fast"), _user("slow"), _user("fast")], deadline_seconds=0.2
+    )
+
+    assert adapter.calls == 1
+    assert [(r.rule_matches, r.completion_state, r.timed_out_rules) for r in results] == [
+        ([], "incomplete", ["Batch"]),
         ([], "incomplete", ["Batch"]),
         ([], "incomplete", ["Batch"]),
     ]
