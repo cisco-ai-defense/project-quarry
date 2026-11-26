@@ -614,9 +614,15 @@ def test_resolved_large_schema_annotation_fanout_is_byte_bounded(tmp_path, monke
 
 
 def test_short_environment_placeholder_cannot_hide_oversized_expansion(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "QUARRY_MODEL_CONFIG_OVERSIZED_MODEL",
-        "x" * (config_module.MAX_RESOLVED_MODEL_CONFIG_BYTES + 1),
+    # Exercise expansion beyond the resolver limit without an OS environment-size cap.
+    monkeypatch.setattr(
+        config_module.os,
+        "environ",
+        {
+            **config_module.os.environ,
+            "QUARRY_MODEL_CONFIG_OVERSIZED_MODEL": "x"
+            * (config_module.MAX_RESOLVED_MODEL_CONFIG_BYTES + 1),
+        },
     )
 
     with pytest.raises(ConfigurationError, match="aggregate limit of 1000000 bytes"):
@@ -982,8 +988,9 @@ def _judge(**fields) -> dict:
             id="text-mapping-without-file",
         ),
         pytest.param(
-            {"texts": {"policy": {"file": "/nonexistent/quarry/policy.md"}}},
-            "Text resource 'policy' file not found: /nonexistent/quarry/policy.md",
+            {"texts": {"policy": {"file": str(Path("/nonexistent/quarry/policy.md").absolute())}}},
+            "Text resource 'policy' file not found: "
+            f"{Path('/nonexistent/quarry/policy.md').absolute()}",
             id="absolute-text-file-missing",
         ),
         pytest.param(
@@ -1015,10 +1022,17 @@ def test_an_invalid_configuration_is_rejected_with_its_reason(
     assert str(exc_info.value) == message
 
 
-def test_an_unreadable_text_file_is_named_in_the_error(tmp_path) -> None:
+def test_an_unreadable_text_file_is_named_in_the_error(tmp_path, monkeypatch) -> None:
     policy = tmp_path / "policy.md"
     policy.write_text("keep secrets", encoding="utf-8")
-    policy.chmod(0)
+    read_text = Path.read_text
+
+    def refuse_policy(path, *args, **kwargs):
+        if path == policy:
+            raise PermissionError(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse_policy)
 
     with pytest.raises(ValueError) as exc_info:
         QuarryConfig.from_mapping(

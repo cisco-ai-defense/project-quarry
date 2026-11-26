@@ -18,13 +18,14 @@
 
 import importlib
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 import re2
 
 from quarry.cache.regex_cache import RE2_MAX_MEM_BYTES, RegexCache
+from quarry.safety import timer
 from quarry.safety.timer import QuarryTimeoutError, evaluation_deadline
 
 REGEX_CACHE_MODULE = importlib.import_module("quarry.cache.regex_cache")
@@ -172,14 +173,17 @@ def test_catastrophic_backtracking_pattern_uses_re2() -> None:
     assert cache.count(CATASTROPHIC_PATTERN, text) == 0
 
 
-def test_rule_deadline_still_aborts_evaluation() -> None:
+def test_rule_deadline_still_aborts_evaluation(monkeypatch) -> None:
     """Honor the rule deadline around RE2 calls."""
 
     cache = RegexCache()
     results = []
+    now = timer.time.monotonic()
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
 
-    with pytest.raises(QuarryTimeoutError), evaluation_deadline(0.001, "rule deadline"):
-        time.sleep(0.01)
+    with pytest.raises(QuarryTimeoutError), evaluation_deadline(10, "rule deadline") as deadline:
+        assert deadline is not None
+        now = deadline.expires_at
         results.append(cache.search(r"\brm\b", "rm -rf /"))
 
     assert results == []

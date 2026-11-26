@@ -445,14 +445,20 @@ async def test_local_settings_and_adapter_instances_keep_distinct_cache_identiti
 
 
 @pytest.mark.asyncio
-async def test_expired_deadline_prevents_even_a_cached_transform_read(tmp_path):
+async def test_expired_deadline_prevents_even_a_cached_transform_read(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from quarry.safety import timer
     from quarry.safety.timer import QuarryTimeoutError, scan_deadline
 
     adapter = TextAdapter()
     service = backend(tmp_path, adapter)
     await service.transform_unit("convert", text("input"))
-    with scan_deadline(0.001):
-        await asyncio.sleep(0.01)
+    now = timer.time.monotonic()
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=lambda: now))
+    with scan_deadline(10) as deadline:
+        assert deadline is not None
+        now = deadline.expires_at
         with pytest.raises(QuarryTimeoutError):
             await service.transform_unit("convert", text("input"))
     assert len(adapter.calls) == 1

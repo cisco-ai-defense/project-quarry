@@ -476,7 +476,9 @@ def test_explain_reports_the_constitution_without_leaking_configured_text(
     assert str(hidden) not in json.dumps(evidence)
 
 
-def test_a_raising_timeout_contract_is_kept_and_a_zero_deadline_bounds_the_batch() -> None:
+def test_a_raising_timeout_contract_is_kept_and_a_zero_deadline_bounds_the_batch(
+    expire_rule_clock,
+) -> None:
     source = 'rule "Batch" condition: user_said("hello")'
     conversation = _user("hello")
     raising = QuarryConfig(

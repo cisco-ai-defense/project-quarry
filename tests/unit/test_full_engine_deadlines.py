@@ -79,9 +79,65 @@ def _scanner(tmp_path, *rules, adapter: _SlowAdapter, limits: SafetyLimits, limi
     ],
 )
 def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
-    tmp_path, limits, delay, deadline, timed_out, reached_the_model
+    tmp_path, limits, delay, deadline, timed_out, reached_the_model, monkeypatch
 ) -> None:
-    adapter = _SlowAdapter(delay)
+    now = 1024.0
+    armed = []
+    finished = threading.Event()
+
+    def clock():
+        return now
+
+    class AdmittedAsyncio:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def timeout(self, seconds):
+            owner = timer.current_evaluation_deadline()
+            if owner is None:
+                # A cache-owned provider attempt clears the starter's rule
+                # context while retaining the supplied finite timeout budget.
+                assert self.kind == "provider" and len(armed) == 1
+                owner = armed[0][3]
+            assert owner is not None and seconds == owner.expires_at - now
+            # Arm a real timer only after admission, so scheduler delay before
+            # provider dispatch cannot invalidate the reached-provider assertion.
+            native = asyncio.timeout(None)
+            armed.append((self.kind, asyncio.get_running_loop(), native, owner))
+            return native
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", AdmittedAsyncio("rule"))
+    monkeypatch.setattr(model_usage, "asyncio", AdmittedAsyncio("provider"))
+
+    class Admitted(_SlowAdapter):
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            nonlocal now
+            self.calls += 1
+            assert reached_the_model
+            assert len(armed) == 2 and {item[0] for item in armed} == {"rule", "provider"}
+            _, loop, native, owner = next(item for item in armed if item[0] == "rule")
+            assert owner.error_message == (
+                "Scan deadline exceeded" if deadline is not None else "Rule m timeout"
+            )
+            try:
+                if timed_out:
+                    assert self.delay > owner.expires_at - now
+                    now = owner.expires_at
+                    loop.call_soon_threadsafe(native.reschedule, loop.time())
+                    await asyncio.Future()
+                now += self.delay
+                assert now < owner.expires_at
+                await asyncio.sleep(0)
+                return classification(0.02, 0.98)
+            finally:
+                finished.set()
+
+    adapter = Admitted(delay)
     scanner = _scanner(tmp_path, _MODEL_RULE, adapter=adapter, limits=limits)
 
     result = asyncio.run(scanner.scan_data_async(_ATTACK, deadline_seconds=deadline))
@@ -89,6 +145,10 @@ def test_slow_model_work_is_bounded_by_rule_and_scan_deadlines(
     assert (result.timed_out_rules or []) == (["m"] if timed_out else [])
     assert result.rule_matches == ([] if timed_out else ["m"])
     assert bool(adapter.calls) is reached_the_model
+    if reached_the_model:
+        assert finished.wait(3)
+    else:
+        assert not armed and not finished.is_set()
 
 
 def test_a_local_rule_completes_while_a_model_rule_times_out(tmp_path) -> None:
@@ -127,13 +187,60 @@ def test_concurrent_scans_have_isolated_timeouts(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("api", ["sync", "async"])
-def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api) -> None:
-    adapter = _SlowAdapter(0.5)
+def test_fail_on_timeout_raises_with_partial_telemetry(tmp_path, api, monkeypatch) -> None:
+    _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, 1024.0)
+
+
+@pytest.mark.parametrize("api", ["sync", "async"])
+def test_rounded_deadline_raises_with_partial_telemetry(tmp_path, api, monkeypatch) -> None:
+    _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, 1015.0000000000001)
+
+
+def _assert_timeout_partial_telemetry(tmp_path, api, monkeypatch, clock_start) -> None:
+    # Crossing a binary exponent boundary can round the absolute deadline by
+    # one ULP. Keep that case deterministic, independent of host uptime.
+    now = clock_start
+    expected_remaining = (clock_start + 10) - clock_start
+    armed = []
+
+    def clock():
+        return now
+
+    def arm_timeout(seconds):
+        assert seconds == expected_remaining
+        deadline = timer.current_evaluation_deadline()
+        assert deadline is not None and deadline.error_message == "Rule m timeout"
+        timeout = asyncio.timeout(seconds)
+        armed.append((asyncio.get_running_loop(), timeout, deadline))
+        return timeout
+
+    class ScannerAsyncio:
+        timeout = staticmethod(arm_timeout)
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(timer, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(model_usage, "monotonic", clock)
+    monkeypatch.setattr(scanner_module, "asyncio", ScannerAsyncio())
+
+    class Admitted(_SlowAdapter):
+        async def classify_messages(self, _config, messages, _tools, *, timeout=None):
+            nonlocal now
+            self.calls += 1
+            # Expire the real rule timeout after admission, independent of scheduler load.
+            assert len(armed) == 1
+            loop, rule_timeout, deadline = armed[0]
+            now = deadline.expires_at
+            loop.call_soon_threadsafe(rule_timeout.reschedule, loop.time())
+            await asyncio.Future()
+
+    adapter = Admitted(0.5)
     scanner = _scanner(
         tmp_path,
         _MODEL_RULE,
         adapter=adapter,
-        limits=SafetyLimits(rule_timeout=0.05, fail_on_timeout=True),
+        limits=SafetyLimits(rule_timeout=10.0, fail_on_timeout=True),
     )
 
     with pytest.raises(QuarryTimeoutError, match="Rule m timeout") as exc_info:

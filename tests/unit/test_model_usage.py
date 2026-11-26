@@ -35,6 +35,8 @@ from quarry.types.exceptions import LLMError
 
 @pytest.mark.asyncio
 async def test_model_usage_retries_with_one_limiter_ticket_per_attempt(monkeypatch) -> None:
+    now = 0.0
+    monkeypatch.setattr(model_usage, "monotonic", lambda: now)
     tickets: list[str] = []
     limiter_active = False
     timeouts: list[float] = []
@@ -53,9 +55,11 @@ async def test_model_usage_retries_with_one_limiter_ticket_per_attempt(monkeypat
         assert limiter_active is False
 
     async def operation(timeout: float | None) -> str:
+        nonlocal now
         assert timeout is not None
         assert limiter_active is True
         timeouts.append(timeout)
+        now += 0.001
         if len(timeouts) == 1:
             raise LLMError("try again", {"code": "rate_limit"})
         return "ok"
@@ -68,6 +72,8 @@ async def test_model_usage_retries_with_one_limiter_ticket_per_attempt(monkeypat
     assert 0 < timeouts[1] < timeouts[0] <= 1.0
 
     async def unavailable(_timeout: float | None) -> str:
+        nonlocal now
+        now += 0.001
         raise LLMError("try again", {"code": "connection"})
 
     with pytest.raises(LLMError) as exc_info:

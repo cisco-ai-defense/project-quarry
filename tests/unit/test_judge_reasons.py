@@ -811,10 +811,15 @@ def test_ambiguous_quoted_label_probabilities_cannot_reverse_the_canonical_verdi
 
 @pytest.mark.parametrize(("retained", "omitted"), [(2, 3), (0, 3), (2, 0)])
 def test_human_explanation_reports_reason_omissions_even_without_retained_text(
-    tmp_path, capsys, retained, omitted
+    tmp_path, capsys, monkeypatch, retained, omitted
 ):
+    from rich.console import Console
+
+    from quarry import cli
     from quarry.engine.witness import AtomEvidence
 
+    # Keep literal markup on one line; wrapping is a separate presentation concern.
+    monkeypatch.setattr(cli, "Console", lambda: Console(width=160))
     scanner = _scanner(tmp_path, JudgeAdapter())
     result = scanner.scan_data(
         {"messages": [{"role": "user", "content": "synthetic"}]}, enable_explain=True

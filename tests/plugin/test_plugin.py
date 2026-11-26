@@ -1886,7 +1886,7 @@ async def test_an_overridable_schema_container_has_no_verdict_or_callback():
 
 
 @pytest.mark.parametrize("fail_on_timeout", [True, False])
-async def test_plugin_returns_a_structured_timeout_result(fail_on_timeout):
+async def test_plugin_returns_a_structured_timeout_result(fail_on_timeout, expire_rule_clock):
     # A timeout is reported per conversation with its partial result, whether or not the
     # configuration asks a scan to raise on timeout, so a batch keeps every other result.
     config = QuarryConfig(
