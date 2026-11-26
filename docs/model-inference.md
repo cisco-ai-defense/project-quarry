@@ -223,6 +223,10 @@ send offered tools separately as serialized context. `last_turn` refers to the l
 message, including its serialized object for JSON; it does not silently select a user role.
 Empty rendered content or an empty last-turn interval makes no encoder, classifier, or decoder
 request. Ordinary model operations without windows retain their existing empty-message behavior.
+JSON window rendering converts large native integers in bounded steps, with deadline and
+cancellation checks between steps. It retains standard JSON spelling, the window character
+budget, and the interpreter's configured integer digit limit, including when that limit is
+disabled.
 
 ### Window adapter methods
 

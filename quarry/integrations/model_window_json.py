@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 from array import array
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +53,8 @@ _ESCAPES = re.compile(r'["\\\x00-\x1f]')
 _STRING_STEP = 16_384
 _MAX_NODES = 100_000
 _MAX_PIECES = 1_000_000
+_INTEGER_STEP = 512
+_INTEGER_BASE = 10**_INTEGER_STEP
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +187,40 @@ class _Writer:
             await self.checkpoint()
         self.emit('"', mapping)
 
+    async def integer(self, value, mapping):
+        """Encode bounded native integers without one uninterruptible decimal conversion."""
+        negative = value < 0
+        remaining = MAX_WINDOW_RENDER_CHARACTERS - self.length - int(negative)
+        bits = value.bit_length()
+        minimum_digits = (bits - 1) * 3 // 10 + 1 if bits else 1
+        active_limit = sys.get_int_max_str_digits()
+
+        def check_size(digits):
+            if active_limit and digits > active_limit:
+                raise ValueError(
+                    f"Exceeds the limit ({active_limit} digits) for integer string conversion; "
+                    "use sys.set_int_max_str_digits() to increase the limit"
+                )
+            if digits > remaining:
+                raise ValueError("model window JSON exceeds its render limit")
+
+        check_size(minimum_digits)
+        if -_INTEGER_BASE < value < _INTEGER_BASE:
+            self.emit(json.dumps(value, allow_nan=False), mapping)
+            return
+        await self.checkpoint()
+        magnitude = -value if negative else value
+        pieces = []
+        while magnitude >= _INTEGER_BASE:
+            magnitude, remainder = divmod(magnitude, _INTEGER_BASE)
+            pieces.append(f"{remainder:0{_INTEGER_STEP}d}")
+            # The remaining quotient is nonzero, so these digits are unavoidable.
+            check_size(len(pieces) * _INTEGER_STEP + 1)
+            await self.checkpoint()
+        leading = str(magnitude)
+        check_size(len(leading) + len(pieces) * _INTEGER_STEP)
+        self.emit(("-" if negative else "") + leading + "".join(reversed(pieces)), mapping)
+
     async def value(self, value, mapping=None, exact_paths=None, *, inline_media=False):
         exact_paths = {} if exact_paths is None else exact_paths
         stack: list[tuple[str, Any, tuple[str | int, ...], int]] = [("value", value, (), 0)]
@@ -206,7 +243,13 @@ class _Writer:
             if kind is str:
                 await self.string(value, mapping, exact_paths.get(path))
                 continue
-            if value is None or any(kind is native for native in (bool, int, float)):
+            if kind is int or (
+                kind is not bool
+                and any(base is int for base in type.__getattribute__(kind, "__mro__"))
+            ):
+                await self.integer(int.__int__(value), mapping)
+                continue
+            if value is None or any(kind is native for native in (bool, float)):
                 self.emit(json.dumps(value, allow_nan=False), mapping)
                 continue
             if any(base is OpenAIObject for base in type.__getattribute__(kind, "__mro__")):
