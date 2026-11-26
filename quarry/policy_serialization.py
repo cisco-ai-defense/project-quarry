@@ -508,6 +508,16 @@ def serialize_compiled_policy(policy: CompiledPolicy) -> bytes:
         payload["inputs"] = dict(policy._input_hashes)
     if policy._adapter_hashes:
         payload["adapters"] = dict(policy._adapter_hashes)
+    if policy._omit_legacy_flow_requirements:
+        # Preserve the durable representation of pre-input format-9 chat policies.
+        # Declared-input artifacts cannot use this legacy shape (checked on load).
+        if (
+            artifact.flow_requirements
+            or artifact.orders_input_items
+            or (artifact.read_surfaces - surface_names())
+        ):
+            raise RuntimeError("cannot omit flow requirements from an input-aware artifact")
+        del payload["rule"]["artifact"]["flow_requirements"]
     return orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
 
 
@@ -962,12 +972,15 @@ def _check_closed_conditions(artifact: CompiledRuleArtifact) -> None:
 
 def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> CompiledRuleArtifact:
     value = _mapping(raw, "rule.artifact")
+    # Report incompatible compilers before checking their version-specific fields.
     compiler_version = _string(value.get("compiler_version"), "rule.artifact.compiler_version")
     if compiler_version != COMPILER_VERSION:
         raise _fail(
             f"compiler_version {compiler_version!r} is unsupported; expected {COMPILER_VERSION!r}"
         )
-    _exact_keys(value, _ARTIFACT_KEYS, "rule.artifact")
+    legacy_flows = "flow_requirements" not in value
+    expected = _ARTIFACT_KEYS - {"flow_requirements"} if legacy_flows else _ARTIFACT_KEYS
+    _exact_keys(value, expected, "rule.artifact")
     specs = [
         _atom_from_wire(item, index)
         for index, item in enumerate(_list(value["atom_specs"], "rule.artifact.atom_specs"))
@@ -989,8 +1002,14 @@ def _artifact_from_wire(raw: object, inputs: frozenset[str] = frozenset()) -> Co
         closed_conditions=_closed_conditions_from_wire(value["closed_conditions"]),
         full_trace_proof=_boolean(value["full_trace_proof"], "rule.artifact.full_trace_proof"),
         decision_tree=_decision_tree_from_wire(value["decision_tree"]),
-        flow_requirements=_flow_requirements_from_wire(value["flow_requirements"]),
+        flow_requirements=_flow_requirements_from_wire(value.get("flow_requirements", [])),
     )
+    if legacy_flows and (
+        inputs or artifact.orders_input_items or (artifact.read_surfaces - surface_names())
+    ):
+        raise _fail(
+            "flow_requirements is required for declared-input artifacts; recompile from source"
+        )
     missing_specs = sorted(artifact.automaton_atoms - set(artifact.atom_specs))
     if missing_specs:
         raise _fail("DFA atoms lack specifications: " + ", ".join(missing_specs))
@@ -1268,4 +1287,5 @@ def load_compiled_policy(
         _model_hashes=MappingProxyType(models),
         _input_hashes=MappingProxyType(input_hashes),
         _adapter_hashes=MappingProxyType(adapter_hashes),
+        _omit_legacy_flow_requirements="flow_requirements" not in rule_value["artifact"],
     )
