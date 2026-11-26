@@ -95,7 +95,7 @@ class Cost(StrEnum):
 _COST_RANK = {Cost.PURE: 0, Cost.DECODE: 1, Cost.MODEL: 2, Cost.LLM: 3, Cost.YARA: 4}
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ModelExpression:
     """Validated model predicate evaluated before the DFA consumes its boolean result.
 
@@ -103,6 +103,8 @@ class ModelExpression:
     operation, ``value`` carries one scalar, and ``children`` contains its operands.
     Keeping the representation frozen and hashable makes the complete predicate part
     of an atom's structural identity without adding non-boolean values to the DFA.
+    Weak references let optional request metadata name a live construction site without
+    retaining its literal payload. They add no serialized field or expression operand.
     """
 
     kind: str

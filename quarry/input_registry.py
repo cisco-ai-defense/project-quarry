@@ -174,7 +174,9 @@ class _Namespace:
 class InputObject:
     """Immutable, allowlisted DSL view of a validated object."""
 
-    __slots__ = ("_fields",)
+    # Optional read metadata must release an input with its native owner rather than
+    # retaining the immutable field graph just to prevent pointer reuse.
+    __slots__ = ("_fields", "__weakref__")
 
     def __init__(self, fields: Mapping[str, Any]):
         object.__setattr__(

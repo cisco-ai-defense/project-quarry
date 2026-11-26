@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from itertools import count
+from struct import calcsize
 from types import MappingProxyType
 from typing import Any, TypeVar, cast
 
@@ -36,6 +37,7 @@ from quarry.engine.events import ConversationEvent, EvaluationInput, StaticEnvir
 from quarry.engine.pacing import Pacer
 from quarry.engine.witness import ModelResultEvidence
 from quarry.input_registry import InputObject
+from quarry.integrations.read_usage import ReadReplay, capture_read_usage, replay_read_usage
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.message_groups import MessageGroups
 from quarry.types.messages import (
@@ -201,6 +203,7 @@ class _Entry:
     scope: tuple = ()
     size: int = 0
     lease: MessageValueLease | None = None
+    logical_reads: ReadReplay | None = None
 
 
 class MessageValueMemo:
@@ -247,19 +250,24 @@ class MessageValueMemo:
             if entry.value is not None:
                 if reads is not None:
                     reads.extend(entry.reads)
+                replay_read_usage(entry.logical_reads)
                 return cast(_Value, entry.value)
             retained_parts: list[MessageValueLease] = []
             token = _CALCULATION.set(retained_parts)
             try:
-                value = await compute()
-                if not isinstance(value, Messages | MessageGroups):
-                    raise TypeError("transformed message value must be Messages")
-                kept_reads = tuple(reads or ())
-                entry.lease = await self.budget.retain((key, value, kept_reads))
-                entry.size = entry.lease.size
-                self._bytes += entry.size
-                entry.reads = kept_reads
-                entry.value = value
+                with capture_read_usage() as logical_reads:
+                    value = await compute()
+                    if not isinstance(value, Messages | MessageGroups):
+                        raise TypeError("transformed message value must be Messages")
+                    kept_reads = tuple(reads or ())
+                    entry.lease = await self.budget.retain((key, value, kept_reads))
+                    entry.size = entry.lease.size
+                    self._bytes += entry.size
+                    entry.reads = kept_reads
+                    # Accounting has its own quotas and weak request ownership. It is
+                    # excluded from the decision value's retained graph and byte budget.
+                    entry.logical_reads = None if logical_reads is None else logical_reads.result()
+                    entry.value = value
                 return value
             finally:
                 _CALCULATION.reset(token)
@@ -340,6 +348,12 @@ def _retained_nodes(
             if any(kind is known for known in _SAFE_SHALLOW_TYPES)
             else object.__sizeof__(item)
         )
+        if kind is InputObject:
+            # Preserve the historical object header plus one immutable data slot.
+            # Weak storage may be an explicit slot or a managed preheader depending
+            # on Python; subtracting a pointer from __sizeof__ is not portable.
+            # Optional registry owners/ranges have separate cumulative bounds.
+            size = object.__basicsize__ + calcsize("P")
         total += size
         if total > limit:
             raise _GraphLimitExceeded

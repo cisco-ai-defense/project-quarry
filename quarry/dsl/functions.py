@@ -28,6 +28,7 @@ from decimal import Decimal
 from numbers import Real
 from typing import Annotated, Any
 
+from quarry.integrations.read_operations import handoff_model_read, model_read
 from quarry.language.metadata import DSLParameter, Use, dsl_function
 from quarry.types import messages as _messages
 from quarry.types.exceptions import ModelError
@@ -40,11 +41,12 @@ async def _classify(ctx, model_name: str, text: str, class_index: int) -> float:
     different class indices share one inference. It rejects unconfigured models and
     discards responses rejected by the reader.
     """
-    return await _inference_backend(ctx).model_classification(
-        model_name,
-        text,
-        read=lambda result: _extract_max_probability(result, class_index=class_index),
-    )
+    with handoff_model_read():
+        return await _inference_backend(ctx).model_classification(
+            model_name,
+            text,
+            read=lambda result: _extract_max_probability(result, class_index=class_index),
+        )
 
 
 def _extract_max_probability(classification_result, class_index: int = 1) -> float:
@@ -125,9 +127,10 @@ async def model_scan(
     ``model`` names the configured classifier. ``text`` is the field being
     classified, and ``class_index`` selects the model output whose probability is tested.
     """
-    class_index = _require_class_index("model_scan", class_index)
-    score = await _classify(ctx, str(model_name), str(text), class_index)
-    return score > (threshold if threshold is not None else 0.5)
+    with model_read(model_name, "classify"):
+        class_index = _require_class_index("model_scan", class_index)
+        score = await _classify(ctx, str(model_name), str(text), class_index)
+        return score > (threshold if threshold is not None else 0.5)
 
 
 @dsl_function(
@@ -154,8 +157,9 @@ async def model_score(
     ``model`` names the configured classifier. Compare the returned value with
     a numeric threshold in the rule. ``class_index`` is mandatory in the DSL.
     """
-    class_index = _require_class_index("model_score", class_index)
-    return await _classify(ctx, str(model_name), str(text), class_index)
+    with model_read(model_name, "classify"):
+        class_index = _require_class_index("model_score", class_index)
+        return await _classify(ctx, str(model_name), str(text), class_index)
 
 
 def _inference_backend(ctx):
@@ -251,14 +255,16 @@ async def llm_score(
     plus selected conversation and normalizes the positive-token probability. A named text
     reference is resolved through the resource manager before the backend call.
     """
-    backend = _inference_backend(ctx)
-    resolved = ctx.resource_manager.resolve_text(constitution)
-    conversation = _select_model_input(ctx, selector)
-    return await backend.model_text_score(
-        str(model_name),
-        resolved,
-        conversation,
-    )
+    with model_read(model_name, "score"):
+        backend = _inference_backend(ctx)
+        resolved = ctx.resource_manager.resolve_text(constitution)
+        conversation = _select_model_input(ctx, selector)
+        with handoff_model_read():
+            return await backend.model_text_score(
+                str(model_name),
+                resolved,
+                conversation,
+            )
 
 
 def _compare_chunk(value: float, op: str, threshold: float) -> bool:
@@ -279,13 +285,15 @@ async def _chunk_scalar(ctx, backend, scalar: str, model_name: str, constitution
     """One whole-chunk scalar measurement. Each arm must map a whole chunk to a number; adding
     a new arm here is the runtime half of adding an entry to the compiler's ``_CHUNK_SCALARS``."""
     if scalar == "llm_score":
-        return await backend.model_text_score(
-            model_name,
-            constitution,
-            chunk,
-        )
+        with model_read(model_name, "score"), handoff_model_read():
+            return await backend.model_text_score(
+                model_name,
+                constitution,
+                chunk,
+            )
     if scalar == "llm_input_tokens":
-        return await backend.model_input_tokens(model_name, chunk)
+        with model_read(model_name, "input_tokens"), handoff_model_read():
+            return await backend.model_input_tokens(model_name, chunk)
     raise ModelError(f"unsupported chunked scalar {scalar!r}")
 
 
@@ -331,11 +339,12 @@ async def llm_chunk_reduce(
     resolved = ctx.resource_manager.resolve_text(constitution)
     # Split the SELECTED input (default conversation() → whole transcript + tools; a Messages
     # selection → that transcript, no tools), not always the whole request.
-    chunks = await backend.model_split_conversation(
-        str(model_name),
-        _select_model_input(ctx, selector),
-        int(max_input_tokens),
-    )
+    with model_read(model_name, "split"), handoff_model_read():
+        chunks = await backend.model_split_conversation(
+            str(model_name),
+            _select_model_input(ctx, selector),
+            int(max_input_tokens),
+        )
     if not chunks:
         # Empty domain: return the reduction's IDENTITY element, which makes the folded outer
         # comparator produce the right vacuous answer on its own (∃ over ∅ = False, ∀ = True) for
@@ -372,8 +381,12 @@ async def llm_input_tokens(
     The configured inference backend performs tokenization. ``conversation()`` includes offered
     tools, while a message-surface selection contains only the transcript.
     """
-    backend = _inference_backend(ctx)
-    return await backend.model_input_tokens(str(model_name), _select_model_input(ctx, selector))
+    with model_read(model_name, "input_tokens"):
+        backend = _inference_backend(ctx)
+        with handoff_model_read():
+            return await backend.model_input_tokens(
+                str(model_name), _select_model_input(ctx, selector)
+            )
 
 
 @dsl_function(
@@ -399,11 +412,13 @@ async def llm_complete(
     The compiler folds the comparison operator and literal into one Boolean external atom; the
     scanner applies that comparison to the generated text.
     """
-    backend = _inference_backend(ctx)
-    return await backend.model_text_completion(
-        str(model_name),
-        _select_model_input(ctx, selector),
-    )
+    with model_read(model_name, "complete"):
+        backend = _inference_backend(ctx)
+        with handoff_model_read():
+            return await backend.model_text_completion(
+                str(model_name),
+                _select_model_input(ctx, selector),
+            )
 
 
 def intent_baseline(ctx) -> str:

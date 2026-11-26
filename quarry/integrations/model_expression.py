@@ -63,6 +63,13 @@ from quarry.integrations.content_transforms import (
     compiled_content_transform,
 )
 from quarry.integrations.message_readability import require_model_messages
+from quarry.integrations.read_operations import (
+    current_model_read,
+    expression_transform_read,
+    handoff_model_read,
+    handoff_transform_read,
+    model_read,
+)
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.adapter_transforms import (
     adapter_transform_reference,
@@ -79,6 +86,7 @@ from quarry.types.origins import (
     message_origin,
     source_key,
 )
+from quarry.types.read_observations import _text_read_observer
 from quarry.types.results import CollectionResult, InputText, ProducerRef, ResultItem, Span
 from quarry.types.text_resources import TextRef
 
@@ -91,6 +99,7 @@ REFUSABLE_OPERATIONS = frozenset({"score", "complete"})
 # The binding that holds the field texts one map comprehension item has read.
 _ITEM_TEXTS = "\x00item_texts"
 _CONSTRUCTION_SCOPE = "\x00construction_scope"
+_READ_CONSTRUCTION_SCOPE = "\x00read_construction_scope"
 _BINDING_SCOPES = "\x00binding_scopes"
 
 
@@ -266,6 +275,8 @@ async def scoped_model_expression(expression, context, *, event=None, **kwargs):
         if scope is not None
         else None
     )
+    if bindings is not None and _text_read_observer.get() is not None:
+        bindings[_READ_CONSTRUCTION_SCOPE] = scope
     lease = None
     try:
         value = await evaluate_model_expression(
@@ -482,53 +493,57 @@ async def evaluate_model_expression(
         return value is not MISSING and value is not None and str(value) == expression.value
 
     if kind in {"transform", "local_transform", "model_transform"}:
-        source = await evaluate_model_expression(
-            expression.children[0],
-            context,
-            event=event,
-            bindings=environment,
-            trace=trace,
-            regex_backend=regex_backend,
-        )
-        if not isinstance(source, Messages):
-            raise TypeError("content transform source must be Messages")
-        if not isinstance(expression.value, str):
-            raise TypeError("compiled content transform identity must be a string")
-        if kind == "transform":
-            return await apply_content_transform(
-                source, compiled_content_transform(expression.value)
+        with expression_transform_read(expression.value if kind == "model_transform" else None):
+            source = await evaluate_model_expression(
+                expression.children[0],
+                context,
+                event=event,
+                bindings=environment,
+                trace=trace,
+                regex_backend=regex_backend,
             )
-        name, alias = adapter_transform_reference_parts(expression.value, kind == "model_transform")
-        backend = context.resource_manager.inference_backend
-        if backend is None:
-            raise RuntimeError("transform backend is not initialized")
-        definition = backend.config.transforms.get(name)
-        if adapter_transform_reference(name, definition) != expression.value:
-            raise ValueError("transform configuration differs from its compiled reference")
-        part_count = 0
-
-        def record_part() -> None:
-            nonlocal part_count
-            part_count += 1
-
-        async def transform() -> Messages:
-            return await apply_adapter_transform(
-                source, backend, name, _on_part=record_part, _message_value=True
+            if not isinstance(source, Messages):
+                raise TypeError("content transform source must be Messages")
+            if not isinstance(expression.value, str):
+                raise TypeError("compiled content transform identity must be a string")
+            if kind == "transform":
+                return await apply_content_transform(
+                    source, compiled_content_transform(expression.value)
+                )
+            name, alias = adapter_transform_reference_parts(
+                expression.value, kind == "model_transform"
             )
+            backend = context.resource_manager.inference_backend
+            if backend is None:
+                raise RuntimeError("transform backend is not initialized")
+            definition = backend.config.transforms.get(name)
+            if adapter_transform_reference(name, definition) != expression.value:
+                raise ValueError("transform configuration differs from its compiled reference")
+            part_count = 0
 
-        memo = getattr(context, "message_value_memo", None)
-        if kind == "local_transform" and memo is not None:
-            key = _message_value_key(expression, environment, event)
-            result = await memo.evaluate(key, transform, scope=key[-1])
-        else:
-            result = await transform()
-        if kind == "model_transform" and trace is not None and part_count:
-            # Evidence records logical reads, including cache hits, as other model calls do.
-            # Neither the source parts nor generated text leave this evaluation trace.
-            trace.calls.append(
-                (alias, "transform", (("transform", name), ("parts", part_count)), len(result))
-            )
-        return result
+            def record_part() -> None:
+                nonlocal part_count
+                part_count += 1
+
+            async def transform() -> Messages:
+                with handoff_transform_read(backend, name):
+                    return await apply_adapter_transform(
+                        source, backend, name, _on_part=record_part, _message_value=True
+                    )
+
+            memo = getattr(context, "message_value_memo", None)
+            if kind == "local_transform" and memo is not None:
+                key = _message_value_key(expression, environment, event)
+                result = await memo.evaluate(key, transform, scope=key[-1])
+            else:
+                result = await transform()
+            if kind == "model_transform" and trace is not None and part_count:
+                # Evidence records logical reads, including cache hits, as other model calls do.
+                # Neither the source parts nor generated text leave this evaluation trace.
+                trace.calls.append(
+                    (alias, "transform", (("transform", name), ("parts", part_count)), len(result))
+                )
+            return result
 
     if kind == "conditional":
         predicate = await evaluate_model_expression(
@@ -727,6 +742,8 @@ async def evaluate_model_expression(
         constructors.reverse()
 
         specifications = []
+        text_observer = _text_read_observer.get()
+        read_sites = [] if text_observer is not None else None
         construction_source = None
         for index, constructor in enumerate(constructors):
             if index and index % 16 == 0:
@@ -774,6 +791,17 @@ async def evaluate_model_expression(
                     provenance,
                 )
             )
+            if read_sites is not None:
+                read_sites.append(
+                    (
+                        constructor,
+                        owner
+                        if field_read
+                        and isinstance(owner, Message)
+                        and content_expression.value == "content"
+                        else None,
+                    )
+                )
         raise_if_evaluation_expired()
         base = (
             Messages()
@@ -785,7 +813,20 @@ async def evaluate_model_expression(
                 source_root=construction_source,
             )
         )
-        return base._add_synthetic_messages(tuple(specifications))
+        result = base._add_synthetic_messages(tuple(specifications))
+        if text_observer is not None and read_sites is not None:
+            for message, (constructor, source), specification in zip(
+                result, read_sites, specifications, strict=True
+            ):
+                text_observer.constructed(
+                    context.message_value_memo,
+                    constructor,
+                    environment.get(_READ_CONSTRUCTION_SCOPE, (0,)),
+                    message,
+                    specification[1],
+                    source,
+                )
+        return result
 
     if kind in {"refused", "if_refused"}:
         try:
@@ -1024,6 +1065,12 @@ async def _evaluate_message_selection(
             variable: item_scope,
         }
         item_environment[_CONSTRUCTION_SCOPE] = item_scope
+        if _text_read_observer.get() is not None:
+            item_environment[_READ_CONSTRUCTION_SCOPE] = (
+                *environment.get(_READ_CONSTRUCTION_SCOPE, ()),
+                expression,
+                position,
+            )
         memo = getattr(context, "message_value_memo", None)
         try:
             predicate = await evaluate_model_expression(
@@ -1817,37 +1864,46 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
     """
 
     alias, operation = str(expression.value).split("\x1f", 1)
-    arguments = [
-        await evaluate_model_expression(
-            child,
-            context,
-            event=event,
-            bindings=bindings,
-            trace=trace,
-            regex_backend=regex_backend,
-        )
-        for child in expression.children
-    ]
-    if any(argument is MISSING for argument in arguments):
-        return MISSING
-    if isinstance(arguments[0], Messages) and not arguments[0]:
-        # An input with no message (a message that does not exist, or a message() chain whose
-        # every turn had no content): the same "no input, no call".
-        return MISSING
-    try:
-        return await _dispatch_model_call(expression, alias, operation, arguments, context, trace)
-    except LLMError as exc:
-        if exc.details.get("code") != MODEL_REFUSED:
+    with model_read(alias, operation) as observation:
+        arguments = [
+            await evaluate_model_expression(
+                child,
+                context,
+                event=event,
+                bindings=bindings,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
+            for child in expression.children
+        ]
+        if any(argument is MISSING for argument in arguments):
+            if observation is not None:
+                observation.not_sent()
+            return MISSING
+        if isinstance(arguments[0], Messages) and not arguments[0]:
+            # An input with no message (a message that does not exist, or a message() chain
+            # whose every turn had no content): the same "no input, no call".
+            if observation is not None:
+                observation.messages(arguments[0])
+                observation.not_sent()
+            return MISSING
+        try:
+            with handoff_model_read():
+                return await _dispatch_model_call(
+                    expression, alias, operation, arguments, context, trace
+                )
+        except LLMError as exc:
+            if exc.details.get("code") != MODEL_REFUSED:
+                raise
+            if operation not in REFUSABLE_OPERATIONS:
+                raise LLMError(
+                    f"model().{operation}() cannot be refused: {exc.message}",
+                    {**exc.details, "code": "provider_error"},
+                ) from exc
+            if trace is not None:
+                _record_call(trace, context, expression, alias, operation, arguments, None)
+                trace.refusals.append((alias, operation, str(exc.details.get("reason"))))
             raise
-        if operation not in REFUSABLE_OPERATIONS:
-            raise LLMError(
-                f"model().{operation}() cannot be refused: {exc.message}",
-                {**exc.details, "code": "provider_error"},
-            ) from exc
-        if trace is not None:
-            _record_call(trace, context, expression, alias, operation, arguments, None)
-            trace.refusals.append((alias, operation, str(exc.details.get("reason"))))
-        raise
 
 
 async def _dispatch_model_call(expression, alias, operation, arguments, context, trace) -> Any:
@@ -1862,6 +1918,23 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
     for argument in arguments:
         if isinstance(argument, Messages):
             await require_model_messages(argument, standalone=operation != "split")
+
+    observation = current_model_read()
+    if observation is not None:
+        observation.messages(arguments[0])
+        if operation == "score":
+            observation.value("constitution", arguments[1], slot="constitution")
+            tools = arguments[2] if len(arguments) > 2 else None
+        else:
+            tools = (
+                arguments[1]
+                if operation in {"classify", "complete", "input_tokens"} and len(arguments) > 1
+                else None
+            )
+        if tools is not None and (type(tools) not in (tuple, list) or len(tools)):
+            observation.tools(tools)
+        if operation == "split" and len(arguments) > 3 and arguments[3] is not None:
+            observation.messages(arguments[3], slot="context")
 
     if operation == "score":
         messages, constitution, *optional = arguments

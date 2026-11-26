@@ -66,6 +66,16 @@ from quarry.integrations.model_usage import (
     ModelUsage,
 )
 from quarry.integrations.rate_limiter import LLMRateLimiter
+from quarry.integrations.read_operations import (
+    current_model_read,
+    handoff_model_read,
+    model_read,
+    record_model_input,
+    record_model_text,
+    record_transform_unit,
+    transform_model_read,
+    transform_part_read,
+)
 from quarry.integrations.shared_transforms import (
     TRANSFORM_BATCH_SIZE,
     InvalidSharedTransform,
@@ -2213,47 +2223,57 @@ class ModelInferenceBackend:
         Aggregate input, output and mapping bounds apply to each batch. All owned children
         finish or cancel before a failure escapes. Valid completed items may remain cached.
         """
-        from quarry.types.transforms import (
-            MAX_TRANSFORM_INPUT_CHARACTERS,
-            MAX_TRANSFORM_MAPPING_SEGMENTS,
-            MAX_TRANSFORM_OUTPUT_CHARACTERS,
-        )
-
-        shared = self.transform_cache_identity(name) is not None
-        if type(units) not in (list, tuple) or len(units) > TRANSFORM_BATCH_SIZE:
-            raise transform_error(name, "invalid_input", "transform batch exceeds its part limit")
-        try:
-            snapshots = [transform_unit_snapshot(unit, _check_unicode=False) for unit in units]
-        except (TypeError, ValueError) as exc:
-            raise transform_error(name, "invalid_input", "invalid transform batch input") from exc
-        size = sum(map(transform_input_size, snapshots))
-        if size > MAX_TRANSFORM_INPUT_CHARACTERS:
-            raise transform_error(name, "invalid_input", "transform batch exceeds its input limit")
-        output = segments = 0
-
-        async def one(unit):
-            nonlocal output, segments
-            call = self.transform_message_unit if _message_value else self.transform_unit
-            result = (
-                await call(name, unit)
-                if timeout is None
-                else await call(name, unit, timeout=timeout)
+        with transform_model_read(self, name, streaming=True):
+            from quarry.types.transforms import (
+                MAX_TRANSFORM_INPUT_CHARACTERS,
+                MAX_TRANSFORM_MAPPING_SEGMENTS,
+                MAX_TRANSFORM_OUTPUT_CHARACTERS,
             )
-            result = read_transform(keep_transform(result, unit, name), unit)
-            output += len(result.text)
-            segments += len(result.runs)
-            if (
-                output > MAX_TRANSFORM_OUTPUT_CHARACTERS
-                or segments > MAX_TRANSFORM_MAPPING_SEGMENTS
-            ):
-                raise transform_error(
-                    name, "invalid_output", "transform batch exceeds its output limit"
-                )
-            return result
 
-        if shared:
-            return await gather_transform_batch(one(unit) for unit in snapshots)
-        return [await one(unit) for unit in snapshots]
+            shared = self.transform_cache_identity(name) is not None
+            if type(units) not in (list, tuple) or len(units) > TRANSFORM_BATCH_SIZE:
+                raise transform_error(
+                    name, "invalid_input", "transform batch exceeds its part limit"
+                )
+            try:
+                snapshots = [transform_unit_snapshot(unit, _check_unicode=False) for unit in units]
+            except (TypeError, ValueError) as exc:
+                raise transform_error(
+                    name, "invalid_input", "invalid transform batch input"
+                ) from exc
+            size = sum(map(transform_input_size, snapshots))
+            if size > MAX_TRANSFORM_INPUT_CHARACTERS:
+                raise transform_error(
+                    name, "invalid_input", "transform batch exceeds its input limit"
+                )
+            output = segments = 0
+
+            async def one(index, unit):
+                nonlocal output, segments
+                call = self.transform_message_unit if _message_value else self.transform_unit
+                with transform_part_read(self, name, unit, batch_index=index):
+                    result = (
+                        await call(name, unit)
+                        if timeout is None
+                        else await call(name, unit, timeout=timeout)
+                    )
+                result = read_transform(keep_transform(result, unit, name), unit)
+                output += len(result.text)
+                segments += len(result.runs)
+                if (
+                    output > MAX_TRANSFORM_OUTPUT_CHARACTERS
+                    or segments > MAX_TRANSFORM_MAPPING_SEGMENTS
+                ):
+                    raise transform_error(
+                        name, "invalid_output", "transform batch exceeds its output limit"
+                    )
+                return result
+
+            if shared:
+                return await gather_transform_batch(
+                    one(index, unit) for index, unit in enumerate(snapshots)
+                )
+            return [await one(index, unit) for index, unit in enumerate(snapshots)]
 
     async def transform_messages(self, name: str, messages: Messages) -> Messages:
         """Apply one local uncached, text-preserving rewrite of an ordered message selection."""
@@ -2311,9 +2331,10 @@ class ModelInferenceBackend:
         cooperatively during long work. No user-selected module is imported.
         """
 
-        return await self._transform_unit(
-            name, unit, timeout=timeout, cache_local=not _MESSAGE_TRANSFORM_PART.get()
-        )
+        with transform_model_read(self, name):
+            return await self._transform_unit(
+                name, unit, timeout=timeout, cache_local=not _MESSAGE_TRANSFORM_PART.get()
+            )
 
     async def transform_message_unit(
         self, name: str, unit: dict[str, Any], *, timeout: float | None = None
@@ -2327,13 +2348,15 @@ class ModelInferenceBackend:
 
         # Keep the existing injected/subclassed transform_unit hook in the dispatch path.
         # The task-local flag only changes this backend's local raw-part cache policy.
-        token = _MESSAGE_TRANSFORM_PART.set(True)
-        try:
-            if timeout is None:
-                return await self.transform_unit(name, unit)
-            return await self.transform_unit(name, unit, timeout=timeout)
-        finally:
-            _MESSAGE_TRANSFORM_PART.reset(token)
+        with transform_model_read(self, name):
+            token = _MESSAGE_TRANSFORM_PART.set(True)
+            try:
+                with transform_part_read(self, name, unit):
+                    if timeout is None:
+                        return await self.transform_unit(name, unit)
+                    return await self.transform_unit(name, unit, timeout=timeout)
+            finally:
+                _MESSAGE_TRANSFORM_PART.reset(token)
 
     async def _transform_unit(
         self,
@@ -2353,6 +2376,8 @@ class ModelInferenceBackend:
             raise transform_error(name, "invalid_input", "part is outside the selected part types")
         require_media_part(None, snapshot)
         definition = self.config.transforms[name]
+        if type(definition) is ModelTransformConfig:
+            record_transform_unit(snapshot)
         cache_identity = (
             registered_cache_identity(adapter, name)
             if type(definition) is LocalTransformConfig
@@ -2775,16 +2800,17 @@ class ModelInferenceBackend:
     ) -> float:
         """Score canonical messages against an explicit constitution."""
 
-        return self._score_value(
-            model_id,
-            await self._score_outcome(
+        with model_read(model_id, "score", adopt=True):
+            return self._score_value(
                 model_id,
-                constitution,
-                messages,
-                tools,
-                timeout=timeout,
-            ),
-        )
+                await self._score_outcome(
+                    model_id,
+                    constitution,
+                    messages,
+                    tools,
+                    timeout=timeout,
+                ),
+            )
 
     async def model_judge_messages(
         self,
@@ -2801,12 +2827,13 @@ class ModelInferenceBackend:
         invalid calls raise; they never become a score or an explanation.
         """
 
-        outcome = await self._score_outcome(
-            model_id, constitution, messages, tools, timeout=timeout
-        )
-        if isinstance(outcome, _Refused):
-            raise outcome.error(model_id)
-        return outcome
+        with model_read(model_id, "score", adopt=True):
+            outcome = await self._score_outcome(
+                model_id, constitution, messages, tools, timeout=timeout
+            )
+            if isinstance(outcome, _Refused):
+                raise outcome.error(model_id)
+            return outcome
 
     async def _score_outcome(
         self,
@@ -2821,6 +2848,7 @@ class ModelInferenceBackend:
 
         await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
+        record_model_input(messages, constitution=constitution, tools=tools)
         if self.config.config_version == 2:
             # A version 2 builder reads only its arguments, so the request is named by them,
             # each conversation by its digest, and its messages are built only when it is sent.
@@ -2866,31 +2894,37 @@ class ModelInferenceBackend:
     ) -> float:
         """Compatibility wrapper that scores a complete conversation."""
 
-        conversation = _as_conversation(conversation)
-        if self.config.config_version == 2:
-            return await self.model_score_messages(
+        with model_read(model_id, "score", adopt=True):
+            conversation = _as_conversation(conversation)
+            if self.config.config_version == 2:
+                with handoff_model_read():
+                    return await self.model_score_messages(
+                        model_id,
+                        constitution,
+                        conversation.messages,
+                        conversation.tools,
+                        timeout=timeout,
+                    )
+            outbound = self._score_request(
                 model_id,
                 constitution,
-                conversation.messages,
-                conversation.tools,
-                timeout=timeout,
+                _message_dicts(conversation.messages),
+                conversation.raw_tools,
+                conversation,
             )
-        outbound = self._score_request(
-            model_id,
-            constitution,
-            _message_dicts(conversation.messages),
-            conversation.raw_tools,
-            conversation,
-        )
-        return self._score_value(
-            model_id,
-            await self._score_messages(
+            if current_model_read() is not None:
+                record_model_input(
+                    conversation.messages, constitution=constitution, tools=conversation.tools
+                )
+            return self._score_value(
                 model_id,
-                lambda: outbound,
-                key=(outbound,),
-                timeout=timeout,
-            ),
-        )
+                await self._score_messages(
+                    model_id,
+                    lambda: outbound,
+                    key=(outbound,),
+                    timeout=timeout,
+                ),
+            )
 
     async def _classify_messages_raw(
         self,
@@ -2932,17 +2966,20 @@ class ModelInferenceBackend:
     ) -> float:
         """Return the configured classifier-head score for canonical messages."""
 
-        model = self._model(model_id)
-        if model.classify is None:
-            raise ConfigurationError(f"Inference model '{model_id}' has no classify configuration")
-        class_index = model.classify.class_index
-        return await self._classification_response(
-            model_id,
-            messages,
-            tools,
-            timeout=timeout,
-            read=lambda raw: _classifier_probability(raw, class_index, model_id),
-        )
+        with model_read(model_id, "classify", adopt=True):
+            model = self._model(model_id)
+            if model.classify is None:
+                raise ConfigurationError(
+                    f"Inference model '{model_id}' has no classify configuration"
+                )
+            class_index = model.classify.class_index
+            return await self._classification_response(
+                model_id,
+                messages,
+                tools,
+                timeout=timeout,
+                read=lambda raw: _classifier_probability(raw, class_index, model_id),
+            )
 
     async def _classification_response(
         self,
@@ -2957,6 +2994,7 @@ class ModelInferenceBackend:
 
         await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
+        record_model_input(messages, tools=tools)
 
         def payload() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             message_dicts = _message_dicts(messages)
@@ -2981,59 +3019,62 @@ class ModelInferenceBackend:
     ) -> CollectionResult[Span]:
         """Decode canonical spans from one cache-shared classification response."""
 
-        if (
-            isinstance(threshold, bool)
-            or not isinstance(threshold, int | float)
-            or not math.isfinite(threshold)
-            or not 0.0 <= threshold <= 1.0
-        ):
-            raise ValueError("span threshold must be finite and between 0 and 1")
-        model = self._model(model_id)
-        if model.spans is None:
-            raise ConfigurationError(f"Inference model '{model_id}' has no spans configuration")
-        if model.category is None:
-            raise ConfigurationError(f"Inference model '{model_id}' has no category")
-        adapter = self.adapters[model.adapter]
-        decode_spans = getattr(adapter, "decode_spans", None)
-        if not callable(decode_spans):
-            raise ConfigurationError(
-                f"Inference model '{model_id}' adapter '{model.adapter}' cannot decode spans"
-            )
-        category = model.category
+        with model_read(model_id, "spans", adopt=True):
+            if (
+                isinstance(threshold, bool)
+                or not isinstance(threshold, int | float)
+                or not math.isfinite(threshold)
+                or not 0.0 <= threshold <= 1.0
+            ):
+                raise ValueError("span threshold must be finite and between 0 and 1")
+            model = self._model(model_id)
+            if model.spans is None:
+                raise ConfigurationError(f"Inference model '{model_id}' has no spans configuration")
+            if model.category is None:
+                raise ConfigurationError(f"Inference model '{model_id}' has no category")
+            adapter = self.adapters[model.adapter]
+            decode_spans = getattr(adapter, "decode_spans", None)
+            if not callable(decode_spans):
+                raise ConfigurationError(
+                    f"Inference model '{model_id}' adapter '{model.adapter}' cannot decode spans"
+                )
+            category = model.category
 
-        async def spans(raw: Any) -> CollectionResult[Span]:
-            # The adapter's decoder is handed its own copy of the shared response.
-            decoded = await decode_spans(model, _detached(raw), messages, float(threshold))
-            if isinstance(decoded, str | bytes) or not isinstance(decoded, Sequence):
-                raise TypeError("span adapter must return a sequence of Span values")
-            run_uuid = uuid.uuid4()
-            items = []
-            for ordinal, span in enumerate(decoded):
-                if not isinstance(span, Span):
-                    raise TypeError("span adapter must return only Span values")
-                # A detection holds text: an empty range, which only a message without text
-                # admits, is not one.
-                if span.score is None or not span.within_one_message or span.end <= span.start:
-                    raise TypeError(
-                        "span adapter must return scored, non-empty spans within one message"
+            async def spans(raw: Any) -> CollectionResult[Span]:
+                # The adapter's decoder is handed its own copy of the shared response.
+                decoded = await decode_spans(model, _detached(raw), messages, float(threshold))
+                if isinstance(decoded, str | bytes) or not isinstance(decoded, Sequence):
+                    raise TypeError("span adapter must return a sequence of Span values")
+                run_uuid = uuid.uuid4()
+                items = []
+                for ordinal, span in enumerate(decoded):
+                    if not isinstance(span, Span):
+                        raise TypeError("span adapter must return only Span values")
+                    # A detection holds text: an empty range, which only a message without text
+                    # admits, is not one.
+                    if span.score is None or not span.within_one_message or span.end <= span.start:
+                        raise TypeError(
+                            "span adapter must return scored, non-empty spans within one message"
+                        )
+                    span = messages._bind_span(span)
+                    identity = f"{category}:{span.message_index}:{span.start}:{span.end}:{ordinal}"
+                    items.append(
+                        ResultItem(item_id=str(uuid.uuid5(run_uuid, identity)), value=span)
                     )
-                span = messages._bind_span(span)
-                identity = f"{category}:{span.message_index}:{span.start}:{span.end}:{ordinal}"
-                items.append(ResultItem(item_id=str(uuid.uuid5(run_uuid, identity)), value=span))
-            return CollectionResult(
-                output_type="span_collection",
-                category=category,
-                source=ProducerRef(kind="model", name=model_id, run_id=str(run_uuid)),
-                items=tuple(items),
-            )
+                return CollectionResult(
+                    output_type="span_collection",
+                    category=category,
+                    source=ProducerRef(kind="model", name=model_id, run_id=str(run_uuid)),
+                    items=tuple(items),
+                )
 
-        return await self._classification_response(
-            model_id,
-            messages,
-            None,
-            timeout=timeout,
-            read=spans,
-        )
+            return await self._classification_response(
+                model_id,
+                messages,
+                None,
+                timeout=timeout,
+                read=spans,
+            )
 
     async def model_classification(
         self,
@@ -3053,23 +3094,25 @@ class ModelInferenceBackend:
         Version 2 sends the request ``model().classify`` of the same text sends, so the two
         share one response."""
 
-        if self.config.config_version == 2:
-            message = {"role": "user", "content": text}
-            return await self._classify_messages_raw(
+        with model_read(model_id, "classify", adopt=True):
+            record_model_text(text)
+            if self.config.config_version == 2:
+                message = {"role": "user", "content": text}
+                return await self._classify_messages_raw(
+                    model_id,
+                    lambda: ([message], []),
+                    # The digest ``Messages`` of this one message has, so this request shares a
+                    # response with ``model().classify`` of the same text.
+                    key=(messages_digest([wire_digest(message)]), []),
+                    timeout=timeout,
+                    read=read,
+                )
+            return await self._classify_text(
                 model_id,
-                lambda: ([message], []),
-                # The digest ``Messages`` of this one message has, so this request shares a
-                # response with ``model().classify`` of the same text.
-                key=(messages_digest([wire_digest(message)]), []),
+                text,
                 timeout=timeout,
                 read=read,
             )
-        return await self._classify_text(
-            model_id,
-            text,
-            timeout=timeout,
-            read=read,
-        )
 
     async def _classify_text(
         self,
@@ -3111,15 +3154,16 @@ class ModelInferenceBackend:
     ) -> AssistantMessage:
         """Return one validated, detached assistant message."""
 
-        message, _ = await self._complete(
-            model_id,
-            messages,
-            tools,
-            limits=limits,
-            tool_call_types=tool_call_types,
-            timeout=timeout,
-        )
-        return message
+        with model_read(model_id, "complete", adopt=True):
+            message, _ = await self._complete(
+                model_id,
+                messages,
+                tools,
+                limits=limits,
+                tool_call_types=tool_call_types,
+                timeout=timeout,
+            )
+            return message
 
     async def _complete(
         self,
@@ -3162,6 +3206,7 @@ class ModelInferenceBackend:
 
         await require_model_messages(messages)
         tool_dicts = _tool_dicts(tools)
+        record_model_input(messages, tools=tools)
         outcome = await self._complete_message_wire(
             model_id,
             _message_dicts(messages),
@@ -3226,10 +3271,11 @@ class ModelInferenceBackend:
     ) -> AssistantMessage | JsonCompletion:
         """Return one completion, with its JSON content when the alias has a response schema."""
 
-        message, value = await self._complete(model_id, messages, tools, **options)
-        if model_id not in self.response_validators:
-            return message
-        return JsonCompletion(message, value)
+        with model_read(model_id, "complete", adopt=True):
+            message, value = await self._complete(model_id, messages, tools, **options)
+            if model_id not in self.response_validators:
+                return message
+            return JsonCompletion(message, value)
 
     async def model_text_completion(
         self,
@@ -3240,25 +3286,28 @@ class ModelInferenceBackend:
     ) -> str:
         """Compatibility wrapper that requires plain text completion output."""
 
-        conversation = _as_conversation(conversation)
-        if self.config.config_version == 2:
-            message, _ = await self._complete(
-                model_id,
-                conversation.messages,
-                conversation.tools,
-                timeout=timeout,
-                text_only=True,
-            )
-            return cast(str, message.source_content)
+        with model_read(model_id, "complete", adopt=True):
+            conversation = _as_conversation(conversation)
+            if self.config.config_version == 2:
+                message, _ = await self._complete(
+                    model_id,
+                    conversation.messages,
+                    conversation.tools,
+                    timeout=timeout,
+                    text_only=True,
+                )
+                return cast(str, message.source_content)
 
-        raw_tools = list(conversation.raw_tools or [])
-        return await self._complete_text(
-            model_id,
-            _message_dicts(conversation.messages),
-            raw_tools,
-            key=(conversation.messages, raw_tools),
-            timeout=timeout,
-        )
+            raw_tools = list(conversation.raw_tools or [])
+            if current_model_read() is not None:
+                record_model_input(conversation.messages, tools=conversation.tools)
+            return await self._complete_text(
+                model_id,
+                _message_dicts(conversation.messages),
+                raw_tools,
+                key=(conversation.messages, raw_tools),
+                timeout=timeout,
+            )
 
     async def _complete_text(
         self,
@@ -3313,15 +3362,17 @@ class ModelInferenceBackend:
     ) -> int:
         """Count completion-shaped input tokens for canonical messages and tools."""
 
-        await require_model_messages(messages)
-        tool_dicts = _tool_dicts(tools)
-        return await self._count_messages(
-            model_id,
-            _message_dicts(messages),
-            tool_dicts,
-            key=(messages, tool_dicts),
-            timeout=timeout,
-        )
+        with model_read(model_id, "input_tokens", adopt=True):
+            await require_model_messages(messages)
+            tool_dicts = _tool_dicts(tools)
+            record_model_input(messages, tools=tools)
+            return await self._count_messages(
+                model_id,
+                _message_dicts(messages),
+                tool_dicts,
+                key=(messages, tool_dicts),
+                timeout=timeout,
+            )
 
     async def model_input_tokens(
         self,
@@ -3332,13 +3383,15 @@ class ModelInferenceBackend:
     ) -> int:
         """Compatibility wrapper that counts a complete conversation."""
 
-        conversation = _as_conversation(conversation)
-        return await self.model_input_tokens_messages(
-            model_id,
-            conversation.messages,
-            conversation.tools,
-            timeout=timeout,
-        )
+        with model_read(model_id, "input_tokens", adopt=True):
+            conversation = _as_conversation(conversation)
+            with handoff_model_read():
+                return await self.model_input_tokens_messages(
+                    model_id,
+                    conversation.messages,
+                    conversation.tools,
+                    timeout=timeout,
+                )
 
     async def _count_messages(
         self,
@@ -3409,31 +3462,32 @@ class ModelInferenceBackend:
         ``docs/DSL.md`` for the ``split`` language reference.
         """
 
-        for name, value, minimum in (
-            ("max_input_tokens", max_input_tokens, 1),
-            ("overlap", overlap, 0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-                raise ValueError(f"{name} must be an integer of at least {minimum}")
-        if not messages:
-            raise ModelError("message selection is empty; nothing to split")
-        if context is not None and not context.shares_root_with(messages):
-            raise ValueError("split context must be a view of the conversation being split")
-        if context is not None and not context:
-            # A context that selects nothing, such as ``system_messages`` with no system
-            # message, has nothing to repeat.
-            context = None
-        # Split makes no request of its own; the token counts it needs are cached.
-        return list(
-            await self._split_messages(
-                model_id,
-                messages,
-                max_input_tokens,
-                overlap,
-                context,
-                timeout=timeout,
+        with model_read(model_id, "split", adopt=True):
+            for name, value, minimum in (
+                ("max_input_tokens", max_input_tokens, 1),
+                ("overlap", overlap, 0),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                    raise ValueError(f"{name} must be an integer of at least {minimum}")
+            if not messages:
+                raise ModelError("message selection is empty; nothing to split")
+            if context is not None and not context.shares_root_with(messages):
+                raise ValueError("split context must be a view of the conversation being split")
+            if context is not None and not context:
+                # A context that selects nothing, such as ``system_messages`` with no system
+                # message, has nothing to repeat.
+                context = None
+            # Split makes no request of its own; the token counts it needs are cached.
+            return list(
+                await self._split_messages(
+                    model_id,
+                    messages,
+                    max_input_tokens,
+                    overlap,
+                    context,
+                    timeout=timeout,
+                )
             )
-        )
 
     async def _split_messages(
         self,
@@ -3451,6 +3505,7 @@ class ModelInferenceBackend:
         await require_model_messages(messages, standalone=False)
         if context is not None:
             await require_model_messages(context, standalone=False)
+        record_model_input(messages, context=context)
         range_budget = RangeBudget(_range_metrics)
         range_indexes: dict[int, MessageRangeIndex] = {}
         range_lock = asyncio.Lock()
@@ -3793,103 +3848,92 @@ class ModelInferenceBackend:
           O(K log U) exact probes instead of O(U), and needs no assumption about framing.
         """
 
-        if (
-            isinstance(max_input_tokens, bool)
-            or not isinstance(max_input_tokens, int)
-            or max_input_tokens <= 0
-        ):
-            raise ValueError("max_input_tokens must be a positive integer")
+        with model_read(model_id, "split", adopt=True):
+            if (
+                isinstance(max_input_tokens, bool)
+                or not isinstance(max_input_tokens, int)
+                or max_input_tokens <= 0
+            ):
+                raise ValueError("max_input_tokens must be a positive integer")
 
-        # Split by canonical-message POSITION, not by copying wire dicts. ``base`` is the source
-        # Messages graph (a Conversation's root, or a Messages selection view); ``messages`` is
-        # its wire form, serialized ONCE for token probing and aligned to positions 0..n-1;
-        # ``tools`` is the offered-tool wire (empty for a Messages selection). Each chunk is a
-        # reference-backed sub-view of ``base`` (reusing the same Message/Tool objects), so
-        # nothing is deepcopied or reparsed and the source's type is preserved.
-        base, messages, tools = _split_source(conversation)
-        digests = [wire_digest(message) for message in messages]
+            # Split by canonical-message POSITION, not by copying wire dicts. ``base`` is the source
+            # Messages graph (a Conversation's root, or a Messages selection view); ``messages`` is
+            # its wire form, serialized ONCE for token probing and aligned to positions 0..n-1;
+            # ``tools`` is the offered-tool wire (empty for a Messages selection). Each chunk is a
+            # reference-backed sub-view of ``base`` (reusing the same Message/Tool objects), so
+            # nothing is deepcopied or reparsed and the source's type is preserved.
+            base, messages, tools = _split_source(conversation)
+            if current_model_read() is not None:
+                record_model_input(
+                    base, tools=None if isinstance(conversation, Messages) else conversation.tools
+                )
+            digests = [wire_digest(message) for message in messages]
 
-        def selected(positions: Sequence[int]) -> bytes:
-            return messages_digest(digests[p] for p in positions)
+            def selected(positions: Sequence[int]) -> bytes:
+                return messages_digest(digests[p] for p in positions)
 
-        if (
-            await self._count_messages(
-                model_id,
-                messages,
-                tools,
-                key=(selected(range(len(messages))), tools),
-                timeout=timeout,
-            )
-            <= max_input_tokens
-        ):
-            return [conversation]
-
-        prefix_count = 0
-        while prefix_count < len(messages) and messages[prefix_count].get("role") in {
-            "system",
-            "developer",
-        }:
-            prefix_count += 1
-        prefix_positions = list(range(prefix_count))
-        if (
-            prefix_positions
-            and await self._count_messages(
-                model_id,
-                [messages[p] for p in prefix_positions],
-                tools,
-                key=(selected(prefix_positions), tools),
-                timeout=timeout,
-            )
-            > max_input_tokens
-        ):
-            raise _llm_error(
-                "conversation_too_large",
-                "System and developer messages exceed max_input_tokens",
-                model_id,
-            )
-
-        chunks: list[list[int]] = []
-        current = list(prefix_positions)
-        index = prefix_count
-        # Unanswered calls remain single-message units instead of absorbing later transcript.
-        answered_tool_calls = {
-            message["tool_call_id"] for message in messages if message.get("role") == "tool"
-        }
-        while index < len(messages):
-            unit: list[int] = []
-            pending_tool_calls: set[str] = set()
-            while index < len(messages):
-                message = messages[index]
-                unit.append(index)
-                index += 1
-                if message.get("role") == "assistant":
-                    pending_tool_calls.update(
-                        call["id"]
-                        for call in message.get("tool_calls") or []
-                        if call["id"] in answered_tool_calls
-                    )
-                if message.get("role") == "tool":
-                    pending_tool_calls.discard(message["tool_call_id"])
-                if not pending_tool_calls:
-                    break
-
-            # Count the full wire input, including the repeated prefix and tool schemas.
             if (
                 await self._count_messages(
                     model_id,
-                    [messages[p] for p in current + unit],
+                    messages,
                     tools,
-                    key=(selected(current + unit), tools),
+                    key=(selected(range(len(messages))), tools),
                     timeout=timeout,
                 )
                 <= max_input_tokens
             ):
-                current.extend(unit)
-                continue
+                return [conversation]
 
-            if len(current) > len(prefix_positions):
-                chunks.append(current)
-                current = list(prefix_positions)
+            prefix_count = 0
+            while prefix_count < len(messages) and messages[prefix_count].get("role") in {
+                "system",
+                "developer",
+            }:
+                prefix_count += 1
+            prefix_positions = list(range(prefix_count))
+            if (
+                prefix_positions
+                and await self._count_messages(
+                    model_id,
+                    [messages[p] for p in prefix_positions],
+                    tools,
+                    key=(selected(prefix_positions), tools),
+                    timeout=timeout,
+                )
+                > max_input_tokens
+            ):
+                raise _llm_error(
+                    "conversation_too_large",
+                    "System and developer messages exceed max_input_tokens",
+                    model_id,
+                )
+
+            chunks: list[list[int]] = []
+            current = list(prefix_positions)
+            index = prefix_count
+            # Unanswered calls remain single-message units instead of absorbing later transcript.
+            answered_tool_calls = {
+                message["tool_call_id"] for message in messages if message.get("role") == "tool"
+            }
+            while index < len(messages):
+                unit: list[int] = []
+                pending_tool_calls: set[str] = set()
+                while index < len(messages):
+                    message = messages[index]
+                    unit.append(index)
+                    index += 1
+                    if message.get("role") == "assistant":
+                        pending_tool_calls.update(
+                            call["id"]
+                            for call in message.get("tool_calls") or []
+                            if call["id"] in answered_tool_calls
+                        )
+                    if message.get("role") == "tool":
+                        pending_tool_calls.discard(message["tool_call_id"])
+                    if not pending_tool_calls:
+                        break
+
+                # Count the full wire input, including the repeated prefix and tool schemas.
                 if (
                     await self._count_messages(
                         model_id,
@@ -3903,26 +3947,42 @@ class ModelInferenceBackend:
                     current.extend(unit)
                     continue
 
-            raise _llm_error(
-                "conversation_too_large",
-                "A conversation turn exceeds max_input_tokens",
-                model_id,
-            )
+                if len(current) > len(prefix_positions):
+                    chunks.append(current)
+                    current = list(prefix_positions)
+                    if (
+                        await self._count_messages(
+                            model_id,
+                            [messages[p] for p in current + unit],
+                            tools,
+                            key=(selected(current + unit), tools),
+                            timeout=timeout,
+                        )
+                        <= max_input_tokens
+                    ):
+                        current.extend(unit)
+                        continue
 
-        if len(current) > len(prefix_positions):
-            chunks.append(current)
+                raise _llm_error(
+                    "conversation_too_large",
+                    "A conversation turn exceeds max_input_tokens",
+                    model_id,
+                )
 
-        # Rebuild each chunk as a reference-backed view of the SAME canonical messages. A
-        # Conversation source yields Conversation chunks that share its Tool objects by
-        # reference; a Messages source yields Messages chunks (no tools). No unit is ever split
-        # across a boundary, so every chunk is self-contained (call/result pairs stay together).
-        if isinstance(conversation, Messages):
-            return [base._select_positions(positions) for positions in chunks]
-        return [
-            Conversation._from_parts(
-                base._select_positions(positions),
-                conversation._tools,
-                tools_supplied=conversation._tools_supplied,
-            )
-            for positions in chunks
-        ]
+            if len(current) > len(prefix_positions):
+                chunks.append(current)
+
+            # Rebuild each chunk as a reference-backed view of the SAME canonical messages. A
+            # Conversation source yields Conversation chunks that share its Tool objects by
+            # reference; a Messages source yields Messages chunks (no tools). No unit is ever split
+            # across a boundary, so every chunk is self-contained (call/result pairs stay together).
+            if isinstance(conversation, Messages):
+                return [base._select_positions(positions) for positions in chunks]
+            return [
+                Conversation._from_parts(
+                    base._select_positions(positions),
+                    conversation._tools,
+                    tools_supplied=conversation._tools_supplied,
+                )
+                for positions in chunks
+            ]
