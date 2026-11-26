@@ -797,15 +797,10 @@ def _validate_tool_call(
         raise ConversationValidationError(
             f"Duplicate tool-call id '{call_id}' at assistant message index {message_index}"
         )
-    call_type = tool_call.get("type")
-    if (
-        type(call_type) is not str
-        or call_type != "function"
-        or type(tool_call.get("function")) is not dict
-    ):
+    if type(tool_call.get("type")) is not str or (type(tool_call.get("function")) is not dict):
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
-            "must use type='function' with a function object"
+            "must have a string type and a function object"
         )
     function = tool_call["function"]
     unexpected_function_keys = _unexpected_keys(function, frozenset({"name", "arguments"}))
@@ -814,10 +809,10 @@ def _validate_tool_call(
             f"Assistant message at index {message_index} tool_calls[{call_index}].function "
             f"has unsupported keys: {unexpected_function_keys}"
         )
-    if type(function.get("name")) is not str or not function["name"]:
+    if type(function.get("name")) is not str:
         raise ConversationValidationError(
             f"Assistant message at index {message_index} tool_calls[{call_index}] "
-            "function must have a non-empty string 'name'"
+            "function must have a string 'name'"
         )
     if not isinstance(function.get("arguments"), str):
         raise ConversationValidationError(

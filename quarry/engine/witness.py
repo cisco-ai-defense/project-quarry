@@ -579,6 +579,10 @@ def _event_content(event: ConversationEvent) -> str | None:
     content = getattr(src, "content", None)
     if content is not None:
         return str(content)
+    # Position evidence may use opaque wire text without semantically reading a call.
+    place_texts = getattr(type(src), "place_texts", None)
+    if callable(place_texts):
+        return "\n".join(text for _, text in place_texts(src))
     # Tool calls have no ``content``; surface their arguments as the excerpt.
     try:
         args = getattr(src, "arguments", None)

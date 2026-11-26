@@ -696,7 +696,7 @@ Only the fields listed here are supported for rule authoring.
 | `tool_calls` | `name` | `string` | Exact called function name. |
 | `tool_calls` | `raw_arguments` | `string` | Original JSON argument text. |
 | `tool_calls` | `response` | `tool_response \| null` | Linked tool response, or null when no response exists. Continue with a field such as `call.response.result`. |
-| `tool_calls` | `type` | `string` | Tool-call type; currently `function`. |
+| `tool_calls` | `type` | `string` | Raw call type; unreadable calls fail field reads. |
 | `tool_responses` | `call` | `tool_call` | Originating call. Continue with a field such as `response.call.name`. |
 | `tool_responses` | `content` | `string` | Flattened message text. For multimodal input, this contains text parts only. |
 | `tool_responses` | `id` | `string` | Alias for `tool_call_id`. |

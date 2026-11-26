@@ -686,6 +686,16 @@ class Message(OpenAIObject):
             call._readable_for_rewrite() for call in self.tool_calls
         )
 
+    def _require_model_readable(self) -> None:
+        """Check call values without interpreting their opaque argument strings."""
+
+        if isinstance(self, AssistantMessage):
+            for index, call in enumerate(self.tool_calls):
+                if index % 256 == 0:
+                    _raise_if_combine_expired()
+                if isinstance(call, UnreadableToolCall):
+                    raise InvalidInputError(call.fault)
+
     def contains(self, text: str, case_sensitive: bool = False) -> bool:
         """Return whether flattened text contains ``text``."""
 
@@ -738,7 +748,7 @@ class ToolCall(OpenAIObject):
     )
     DSL_FIELD_METADATA: ClassVar[tuple[SurfaceFieldMetadata, ...]] = (
         SurfaceFieldMetadata("id", "string", "Provider-assigned tool-call ID."),
-        SurfaceFieldMetadata("type", "string", "Tool-call type; currently `function`."),
+        SurfaceFieldMetadata("type", "string", "Raw call type; unreadable calls fail field reads."),
         SurfaceFieldMetadata("name", "string", "Exact called function name."),
         SurfaceFieldMetadata("raw_arguments", "string", "Original JSON argument text."),
         SurfaceFieldMetadata(
@@ -768,6 +778,9 @@ class ToolCall(OpenAIObject):
     _arguments_cache: _FrozenDict | None = PrivateAttr(default=None)
     _arguments_error: str | None = PrivateAttr(default=None)
     _call_index: int = PrivateAttr(default=-1)
+
+    def guard_read(self, field: str) -> None:
+        """Hook for rule field access; structurally exact regular calls are readable."""
 
     def _readable_for_rewrite(self) -> bool:
         """Whether a containing message may be handed to a whole-message adapter."""
@@ -829,6 +842,65 @@ class ToolCall(OpenAIObject):
         """Return the canonical tool-result message linked to this call."""
 
         return self._response
+
+
+def call_fault(raw_call: Mapping[str, Any]) -> str | None:
+    """Classify an otherwise structurally valid call without interpreting its arguments."""
+
+    if raw_call.get("type") != "function":
+        return "unsupported tool-call type"
+    function = raw_call.get("function")
+    if isinstance(function, Mapping) and not function.get("name"):
+        return "tool call has no readable function name"
+    return None
+
+
+class UnreadableToolCall(ToolCall):
+    """A preserved call whose rule fields are unreadable, except its transcript position."""
+
+    type: str  # ty: ignore[invalid-attribute-override]
+    _fault: str = PrivateAttr(default="unreadable tool call")
+
+    @property
+    def fault(self) -> str:
+        return f"messages[{self.message_index}].tool_calls[{self._call_index}]: {self._fault}"
+
+    def guard_read(self, field: str) -> None:
+        if field != "message_index":
+            raise InvalidInputError(self.fault)
+
+    def _readable_for_rewrite(self) -> bool:
+        return False
+
+    @property
+    def name(self) -> str:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def raw_arguments(self) -> str:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def arguments(self) -> dict[str, Any]:
+        raise InvalidInputError(self.fault)
+
+    @property
+    def response(self) -> ToolMessage | None:
+        raise InvalidInputError(self.fault)
+
+    def texts(self) -> tuple[tuple[str, str], ...]:
+        raise InvalidInputError(self.fault)
+
+    def argument_texts(self, field: str) -> list[tuple[str, str]]:
+        raise InvalidInputError(self.fault)
+
+    def argument_text(self, field: str) -> str | None:
+        raise InvalidInputError(self.fault)
+
+    def place_texts(self) -> tuple[tuple[str, str], ...]:
+        """Return opaque position text for evidence, without a semantic argument read."""
+
+        return (("raw_arguments", self.function.arguments),)
 
 
 class AssistantMessage(Message):
@@ -1423,6 +1495,8 @@ class Messages(Sequence[MessageType]):
         "_ordinal_set",
         "_max_nesting_depth",
         "_all_calls",
+        "_unreadable_calls",
+        "_unreadable_responses",
         "_ordinals_by_role",
         "_calls_by_name",
         "_responses_by_name",
@@ -1443,6 +1517,8 @@ class Messages(Sequence[MessageType]):
         self._ordinal_set: frozenset[int] = frozenset()
         self._max_nesting_depth = 100
         self._all_calls: tuple[ToolCall, ...] = ()
+        self._unreadable_calls: tuple[UnreadableToolCall, ...] = ()
+        self._unreadable_responses: tuple[ToolMessage, ...] = ()
         self._ordinals_by_role: Mapping[str, tuple[int, ...]] = MappingProxyType({})
         self._calls_by_name: Mapping[str, tuple[ToolCall, ...]] = MappingProxyType({})
         self._responses_by_name: Mapping[str, tuple[ToolMessage, ...]] = MappingProxyType({})
@@ -1507,10 +1583,16 @@ class Messages(Sequence[MessageType]):
                 calls: list[ToolCall] = []
                 for raw_call in raw_message.get("tool_calls", []):
                     function = raw_call["function"]
-                    call_class = registry.get(
-                        (str(raw_call["type"]), str(function["name"])), ToolCall
+                    fault = call_fault(raw_call)
+                    call_class = (
+                        UnreadableToolCall
+                        if fault is not None
+                        else registry.get((str(raw_call["type"]), str(function["name"])), ToolCall)
                     )
-                    calls.append(call_class.model_validate(raw_call, strict=True))
+                    call = call_class.model_validate(raw_call, strict=True)
+                    if fault is not None:
+                        object.__setattr__(call, "_fault", fault)
+                    calls.append(call)
                 if "tool_calls" in raw_message:
                     payload["tool_calls"] = tuple(calls)
                 message_class: type[MessageType] = AssistantMessage
@@ -1593,15 +1675,25 @@ class Messages(Sequence[MessageType]):
         calls_by_name: dict[str, list[ToolCall]] = {}
         responses_by_name: dict[str, list[ToolMessage]] = {}
         all_calls: list[ToolCall] = []
+        unreadable_calls: list[UnreadableToolCall] = []
+        unreadable_responses: list[ToolMessage] = []
         for message in root._items:
             ordinals_by_role.setdefault(message.role, []).append(message.message_index)
             if isinstance(message, AssistantMessage):
                 for call in message.tool_calls:
                     all_calls.append(call)
-                    calls_by_name.setdefault(call.name, []).append(call)
+                    if isinstance(call, UnreadableToolCall):
+                        unreadable_calls.append(call)
+                    else:
+                        calls_by_name.setdefault(call.name, []).append(call)
             elif isinstance(message, ToolMessage):
-                responses_by_name.setdefault(message.name, []).append(message)
+                if isinstance(message._call, UnreadableToolCall):
+                    unreadable_responses.append(message)
+                else:
+                    responses_by_name.setdefault(message.name, []).append(message)
         object.__setattr__(root, "_all_calls", tuple(all_calls))
+        object.__setattr__(root, "_unreadable_calls", tuple(unreadable_calls))
+        object.__setattr__(root, "_unreadable_responses", tuple(unreadable_responses))
         object.__setattr__(
             root,
             "_ordinals_by_role",
@@ -1823,6 +1915,8 @@ class Messages(Sequence[MessageType]):
         view._ordinal_set = frozenset(selected)
         view._max_nesting_depth = self._root._max_nesting_depth
         view._all_calls = self._root._all_calls
+        view._unreadable_calls = self._root._unreadable_calls
+        view._unreadable_responses = self._root._unreadable_responses
         view._ordinals_by_role = self._root._ordinals_by_role
         view._calls_by_name = self._root._calls_by_name
         view._responses_by_name = self._root._responses_by_name
@@ -2055,9 +2149,15 @@ class Messages(Sequence[MessageType]):
         # Prefer selected variants, then clone any linked counterpart outside this selection.
         call_sources: dict[str, ToolCall] = {}
         response_sources: dict[str, ToolMessage] = {}
-        for message in selected.values():
+        for position, message in selected.items():
             yield
-            if not message._readable_for_rewrite():
+            if not message._readable_for_rewrite() and not (
+                isinstance(message, AssistantMessage)
+                and (
+                    position in overrides
+                    or any(call._response is not None for call in message.tool_calls)
+                )
+            ):
                 continue
             if isinstance(message, AssistantMessage):
                 call_sources.update((call.id, call) for call in message.tool_calls)
@@ -2108,6 +2208,16 @@ class Messages(Sequence[MessageType]):
         for position, message in selected.items():
             yield
             if not message._readable_for_rewrite():
+                if isinstance(message, AssistantMessage) and any(
+                    call.id in call_clones for call in message.tool_calls
+                ):
+                    selected[position] = message.model_copy(
+                        update={
+                            "tool_calls": tuple(
+                                call_clones.get(call.id, call) for call in message.tool_calls
+                            )
+                        }
+                    )
                 continue
             if isinstance(message, AssistantMessage) and message.tool_calls:
                 message = message.model_copy(
@@ -3129,6 +3239,32 @@ class Messages(Sequence[MessageType]):
             for call in message.tool_calls
         ]
 
+    def _name_counts(self, *, responses: bool = False) -> Mapping[str, int]:
+        """Compute a requested name aggregate within the canonical value's fault boundary."""
+
+        if responses:
+            self._root._read_call_names()
+        items = self.tool_responses if responses else self.tool_calls
+        counts: dict[str, int] = {}
+        for index, item in enumerate(items):
+            if index % 256 == 0:
+                _raise_if_combine_expired()
+            name = item.name
+            counts[name] = counts.get(name, 0) + 1
+        return MappingProxyType(counts)
+
+    def _read_call_names(self) -> None:
+        for call in self._root._unreadable_calls:
+            _raise_if_combine_expired()
+            if self._contains_root_ordinal(call.message_index):
+                raise InvalidInputError(call.fault)
+
+    def _read_response_names(self) -> None:
+        for response in self._root._unreadable_responses:
+            _raise_if_combine_expired()
+            if self._contains_root_ordinal(response.message_index):
+                _ = response.name
+
     @dsl_function(
         allowed_uses=(Use.CONDITION, Use.FLOW_OPERAND, Use.COMPREHENSION_BODY),
     )
@@ -3141,8 +3277,13 @@ class Messages(Sequence[MessageType]):
 
         candidates = self._root._calls_by_name.get(name, ())
         if self._is_root_view():
-            return bool(candidates)
-        return any(self._contains_root_ordinal(call.message_index) for call in candidates)
+            found = bool(candidates)
+        else:
+            found = any(self._contains_root_ordinal(call.message_index) for call in candidates)
+        if found:
+            return True
+        self._read_call_names()
+        return False
 
     @dsl_function(
         allowed_uses=(Use.CONDITION, Use.FLOW_OPERAND, Use.COMPREHENSION_BODY),
@@ -3164,6 +3305,7 @@ class Messages(Sequence[MessageType]):
     def count_tool_calls(self, name: Annotated[str, DSLParameter(literal_only=True)]) -> int:
         """Count assistant calls to the tool with this exact name."""
 
+        self._read_call_names()
         candidates = self._root._calls_by_name.get(name, ())
         if self._is_root_view():
             return len(candidates)
@@ -3183,6 +3325,7 @@ class Messages(Sequence[MessageType]):
         Use the result as a comprehension collection or count it.
         """
 
+        self._read_call_names()
         candidates = self._root._calls_by_name.get(name, ())
         if self._is_root_view():
             return list(candidates)
@@ -3203,6 +3346,10 @@ class Messages(Sequence[MessageType]):
         results are excluded.
         """
 
+        # Canonical result-by-name lookup first resolves the root's call names,
+        # even when this view contains no result for an unreadable call.
+        self._root._read_call_names()
+        self._read_response_names()
         candidates = self._root._responses_by_name.get(name, ())
         if self._is_root_view():
             return list(candidates)

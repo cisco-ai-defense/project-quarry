@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-15",
+  "compiler_version": "compiler-16",
   "examples": [
     {
       "checks": [],
@@ -3045,7 +3045,7 @@
           "type": "tool_response | null"
         },
         {
-          "description": "Tool-call type; currently `function`.",
+          "description": "Raw call type; unreadable calls fail field reads.",
           "name": "type",
           "type": "string"
         }

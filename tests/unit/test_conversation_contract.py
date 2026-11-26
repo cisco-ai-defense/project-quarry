@@ -225,11 +225,6 @@ _HELLO = {"role": "user", "content": "hello"}
             id="empty-call-id",
         ),
         pytest.param(
-            {"messages": [{"role": "assistant", "tool_calls": [{**_call(), "type": "custom"}]}]},
-            "must use type='function' with a function object",
-            id="custom-call-type",
-        ),
-        pytest.param(
             {
                 "messages": [
                     {
@@ -242,11 +237,6 @@ _HELLO = {"role": "user", "content": "hello"}
             },
             "tool_calls[0].function has unsupported keys: ['id']",
             id="extra-call-function-key",
-        ),
-        pytest.param(
-            {"messages": [{"role": "assistant", "tool_calls": [_call(name="")]}]},
-            "function must have a non-empty string 'name'",
-            id="empty-call-name",
         ),
         pytest.param(
             {
@@ -616,5 +606,17 @@ def test_unreadable_offered_tools_only_fail_the_rule_that_reads_them(tools):
     unused = _scanner().scan_data(data)
     assert unused.is_complete and unused.rule_matches == ["R"]
     read = _scanner('rule "R" condition: has_tool("read_file")').scan_data(data)
+    assert read.completion_state == "incomplete" and read.validation_error is None
+    assert read.failures[0].category.value == "invalid_input"
+
+
+@pytest.mark.parametrize("value", [{**_call(), "type": "custom"}, _call(name="")])
+def test_unreadable_calls_preserve_unused_verdicts_and_fail_name_reads(value):
+    data = {"messages": [{"role": "assistant", "tool_calls": [value]}]}
+    unused = _scanner().scan_data(data)
+    assert unused.is_complete and unused.rule_matches == ["R"]
+    read = _scanner(
+        'rule "R" condition: any c in tool_calls where c.name == "read_file"'
+    ).scan_data(data)
     assert read.completion_state == "incomplete" and read.validation_error is None
     assert read.failures[0].category.value == "invalid_input"

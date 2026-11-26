@@ -376,6 +376,11 @@ def _step(obj, seg: str):
             return obj[int(seg)]
         except (ValueError, IndexError):
             return _MISSING
+    # Host value types opt into semantic field guards. JSON dictionaries were handled
+    # above, and looking on the class avoids evaluating an instance descriptor here.
+    guard = getattr(type(obj), "guard_read", None)
+    if callable(guard):
+        guard(obj, seg)
     allowed = getattr(obj, "_allowed_fields", None)
     if allowed is not None and seg not in allowed:
         return _MISSING
