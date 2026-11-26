@@ -28,6 +28,8 @@ from decimal import Decimal
 from numbers import Real
 from typing import Annotated, Any
 
+from quarry.async_runtime import call_host_sync
+from quarry.integrations.host_dispatch import call_backend
 from quarry.integrations.read_operations import handoff_model_read, model_read
 from quarry.language.metadata import DSLParameter, Use, dsl_function
 from quarry.types import messages as _messages
@@ -42,7 +44,8 @@ async def _classify(ctx, model_name: str, text: str, class_index: int) -> float:
     discards responses rejected by the reader.
     """
     with handoff_model_read():
-        return await _inference_backend(ctx).model_classification(
+        return await call_backend(
+            _inference_backend(ctx).model_classification,
             model_name,
             text,
             read=lambda result: _extract_max_probability(result, class_index=class_index),
@@ -260,7 +263,8 @@ async def llm_score(
         resolved = ctx.resource_manager.resolve_text(constitution)
         conversation = _select_model_input(ctx, selector)
         with handoff_model_read():
-            return await backend.model_text_score(
+            return await call_backend(
+                backend.model_text_score,
                 str(model_name),
                 resolved,
                 conversation,
@@ -286,14 +290,15 @@ async def _chunk_scalar(ctx, backend, scalar: str, model_name: str, constitution
     a new arm here is the runtime half of adding an entry to the compiler's ``_CHUNK_SCALARS``."""
     if scalar == "llm_score":
         with model_read(model_name, "score"), handoff_model_read():
-            return await backend.model_text_score(
+            return await call_backend(
+                backend.model_text_score,
                 model_name,
                 constitution,
                 chunk,
             )
     if scalar == "llm_input_tokens":
         with model_read(model_name, "input_tokens"), handoff_model_read():
-            return await backend.model_input_tokens(model_name, chunk)
+            return await call_backend(backend.model_input_tokens, model_name, chunk)
     raise ModelError(f"unsupported chunked scalar {scalar!r}")
 
 
@@ -340,7 +345,8 @@ async def llm_chunk_reduce(
     # Split the SELECTED input (default conversation() → whole transcript + tools; a Messages
     # selection → that transcript, no tools), not always the whole request.
     with model_read(model_name, "split"), handoff_model_read():
-        chunks = await backend.model_split_conversation(
+        chunks = await call_backend(
+            backend.model_split_conversation,
             str(model_name),
             _select_model_input(ctx, selector),
             int(max_input_tokens),
@@ -384,8 +390,8 @@ async def llm_input_tokens(
     with model_read(model_name, "input_tokens"):
         backend = _inference_backend(ctx)
         with handoff_model_read():
-            return await backend.model_input_tokens(
-                str(model_name), _select_model_input(ctx, selector)
+            return await call_backend(
+                backend.model_input_tokens, str(model_name), _select_model_input(ctx, selector)
             )
 
 
@@ -415,7 +421,8 @@ async def llm_complete(
     with model_read(model_name, "complete"):
         backend = _inference_backend(ctx)
         with handoff_model_read():
-            return await backend.model_text_completion(
+            return await call_backend(
+                backend.model_text_completion,
                 str(model_name),
                 _select_model_input(ctx, selector),
             )
@@ -499,7 +506,9 @@ async def topic_drift(
     backend must return a finite, non-boolean number in [0, 1].
     """
     return _require_drift_backend_result(
-        _topic_prober(ctx).drift_score(intent_baseline(ctx), str(text))
+        await call_host_sync(
+            lambda: _topic_prober(ctx).drift_score(intent_baseline(ctx), str(text))
+        )
     )
 
 
@@ -519,7 +528,7 @@ async def off_topic(
     returns a Python ``bool``.
     """
     return _require_boolean_backend_result(
-        _topic_prober(ctx).off_topic(intent_baseline(ctx), str(text)),
+        await call_host_sync(lambda: _topic_prober(ctx).off_topic(intent_baseline(ctx), str(text))),
         "topic_prober.off_topic",
     )
 
@@ -542,7 +551,7 @@ async def capability_tags(
     classifier whose ``has_tag`` method returns a Python ``bool``.
     """
     return _require_boolean_backend_result(
-        _capability_classifier(ctx).has_tag(str(text), str(tag)),
+        await call_host_sync(lambda: _capability_classifier(ctx).has_tag(str(text), str(tag))),
         "capability_classifier.has_tag",
     )
 
@@ -564,7 +573,11 @@ async def unrequested_action(
     ``bool``.
     """
     return _require_boolean_backend_result(
-        _capability_classifier(ctx).unrequested_capability(str(text), intent_baseline(ctx)),
+        await call_host_sync(
+            lambda: _capability_classifier(ctx).unrequested_capability(
+                str(text), intent_baseline(ctx)
+            )
+        ),
         "capability_classifier.unrequested_capability",
     )
 

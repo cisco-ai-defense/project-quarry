@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from array import array
 from bisect import bisect_right
 from copy import deepcopy
 
+from quarry.async_runtime import call_host
 from quarry.integrations.model_window_input import (
     WindowInput,
     join_window_input,
@@ -168,9 +168,7 @@ async def validate_host_input(value: WindowInput, messages):
 
 async def render_host_input(adapter, config, messages, tools):
     raise_if_evaluation_expired()
-    value = adapter.render_window_input(config, messages, deepcopy(tools))
-    if inspect.isawaitable(value):
-        value = await value
+    value = await call_host(lambda: adapter.render_window_input(config, messages, deepcopy(tools)))
     raise_if_evaluation_expired()
     if type(value) is str:
         original = await join_window_input(messages, tools)

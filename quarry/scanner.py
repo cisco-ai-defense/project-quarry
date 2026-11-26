@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +29,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import orjson
 
+from quarry.async_runtime import call_host_sync, run_engine, run_sync
 from quarry.cache.async_cache import (
     cache_retention,
     current_scan,
@@ -1544,7 +1546,7 @@ class DSLScanner:
         self._external_rule_cache[rule_name] = result
         return result
 
-    def _adapted(
+    async def _adapted(
         self,
         key: str,
         native: Any,
@@ -1575,7 +1577,7 @@ class DSLScanner:
         ):
             raise ConversationValidationError(f"{key!r} exceeds max_total_size")
         _validate_json_tree(native, key, self.limits.max_nesting_depth)
-        converted = adapter.convert(native, wanted)
+        converted = await call_host_sync(lambda: adapter.convert(native, wanted))
         unexpected = sorted(set(converted) - wanted)
         if unexpected:
             raise ValueError(f"returned {', '.join(unexpected)}, which it was not asked for")
@@ -1606,7 +1608,7 @@ class DSLScanner:
         """Scan a single JSON file with loaded rules (sync wrapper)."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
-        return asyncio.run(
+        return run_sync(
             self.scan_data_async(
                 data,
                 file_path,
@@ -1640,6 +1642,29 @@ class DSLScanner:
         """
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        with scan_deadline(deadline_seconds):
+            return await run_engine(
+                partial(
+                    self._scan_data_reported_async,
+                    data,
+                    file_path,
+                    enable_explain,
+                    rules_subset,
+                    deadline_seconds,
+                    logical_reads=logical_reads,
+                )
+            )
+
+    async def _scan_data_reported_async(
+        self,
+        data: dict[str, Any],
+        file_path: Path | None,
+        enable_explain: ExplainLevel,
+        rules_subset: set[str] | None,
+        deadline_seconds: float | None,
+        *,
+        logical_reads: bool,
+    ) -> ScanResult:
         if logical_reads:
             with collect_read_reports() as reports:
                 result = await self._scan_data_with_deadline_async(
@@ -1908,7 +1933,7 @@ class DSLScanner:
                             raw_sections[section] = value[name]
                 else:
                     try:
-                        adapted = self._adapted(key, value, read, data, raw_sections)
+                        adapted = await self._adapted(key, value, read, data, raw_sections)
                     except QuarryTimeoutError:
                         raise
                     except Exception as exc:

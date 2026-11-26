@@ -60,6 +60,7 @@ from quarry.engine.contracts import (
     WitnessTrace,
 )
 from quarry.engine.decision import artifact_parts
+from quarry.engine.dispatch import pause_engine
 from quarry.engine.exceptions import UnsupportedExecution
 from quarry.engine.observations import GroundingReadObserver
 from quarry.engine.oracle import BOOT, Oracle
@@ -1003,7 +1004,7 @@ async def _minimize_witness_async(
         started = time.monotonic()
         matched = await run(subset, out_of_time)
         budget.record(time.monotonic() - started)
-        await asyncio.sleep(0)
+        await pause_engine()
         return matched
 
     # Seed greedy reduction with the derived state-change positions when they reproduce
@@ -1800,7 +1801,7 @@ async def _walk_async(run: _Run, dfa, oracle, transitions=None) -> tuple[bool, l
     for where, is_last in steps:
         _stop_if(run.should_stop)
         if pacer.due():
-            await asyncio.sleep(0)
+            await pause_engine()
         valuation = await _ground_relevant_async(dfa, state, oracle, where, is_last, run)
         next_state = dfa.step(state, valuation, is_last=is_last)
         if transitions is not None:
@@ -1949,7 +1950,7 @@ async def _run_with_capture_async(
     for value in candidates:
         if value is _SKIPPED:
             _stop_if(should_stop)
-            await asyncio.sleep(0)
+            await pause_engine()
             continue
         if isinstance(value, _Pruned):
             candidate_index += 1
@@ -1958,7 +1959,7 @@ async def _run_with_capture_async(
             # then so a long run of pruned candidates still lets the loop and a stop in.
             if candidate_index % _PRUNED_PER_PAUSE == 0:
                 _stop_if(should_stop)
-                await asyncio.sleep(0)
+                await pause_engine()
             continue
         if value is _cap.MORE or runs == _cap.MAX_CAPTURE_VALUES:
             truncated = True
@@ -1967,7 +1968,7 @@ async def _run_with_capture_async(
         if value is None:
             continue
         _stop_if(should_stop)
-        await asyncio.sleep(0)
+        await pause_engine()
         runs += 1
         for tool_index, tool in _tool_bindings(artifact, oracle):
             evaluations: list[AtomEvaluation] | None = [] if trace_builder is not None else None

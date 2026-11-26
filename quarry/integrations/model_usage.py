@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import TypeVar
 
+from quarry.async_runtime import call_host
 from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.safety.timer import (
     QuarryTimeoutError,
@@ -276,13 +277,16 @@ class ModelUsage:
             assert attempt is not None
             return await attempt(remaining)
 
-        if self.rate_limiter is None:
-            return await invoke()
-        budget = _current_model_call_budget.get()
-        if budget is not None:
-            budget.check(budget_alias or model)
-        async with self.rate_limiter.limit(model):
-            return await invoke()
+        async def limited_attempt() -> T:
+            if self.rate_limiter is None:
+                return await invoke()
+            budget = _current_model_call_budget.get()
+            if budget is not None:
+                budget.check(budget_alias or model)
+            async with self.rate_limiter.limit(model):
+                return await invoke()
+
+        return await call_host(limited_attempt)
 
     @staticmethod
     def _remaining(

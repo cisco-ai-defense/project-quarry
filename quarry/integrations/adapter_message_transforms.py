@@ -42,6 +42,7 @@ from quarry.integrations.content_transforms import (
     _shift_segments,
     _TransformMetrics,
 )
+from quarry.integrations.host_dispatch import call_backend, call_backend_sync
 from quarry.integrations.read_operations import (
     transform_batch_read,
     transform_model_read,
@@ -154,10 +155,10 @@ async def apply_adapter_transform(
     with transform_model_read(backend, name, streaming=True):
         if not isinstance(messages, Messages):
             raise TypeError("adapter transform receiver must be Messages")
-        selected = frozenset(backend.transform_parts(name))
+        selected = frozenset(await call_backend_sync(backend.transform_parts, name))
         if not selected:
             await require_readable_media(messages, rewritable_only=True)
-            return await backend.transform_messages(name, messages)
+            return await call_backend(backend.transform_messages, name, messages)
         # Unreadable holders stay opaque in the result. A later field read decides
         # whether they matter; a transform must not read them merely to reach another item.
         readable = messages._view_positions(
@@ -180,7 +181,7 @@ async def apply_adapter_transform(
         batch_enabled = (
             callable(batch_transform)
             and callable(cache_identity)
-            and cache_identity(name) is not None
+            and (await call_backend_sync(cache_identity, name)) is not None
         )
         pacer = Pacer()
         positions = transform_source_positions(backend, name, messages)
@@ -225,7 +226,8 @@ async def apply_adapter_transform(
                             message=message,
                             positions=positions,
                         ):
-                            results = await batch_transform(
+                            results = await call_backend(
+                                batch_transform,
                                 name,
                                 [unit for _, unit in selected_batch],
                                 _message_value=_message_value,
@@ -273,7 +275,7 @@ async def apply_adapter_transform(
                                 index=part_index,
                                 positions=positions,
                             ):
-                                result = await transform_unit(name, unit)
+                                result = await call_backend(transform_unit, name, unit)
                             result = read_transform(keep_transform(result, unit, name), unit)
                         if _on_part is not None:
                             _on_part()

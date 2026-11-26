@@ -25,9 +25,11 @@ import json
 import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from types import MappingProxyType
 from typing import Any
 
+from quarry.async_runtime import run_engine, run_sync
 from quarry.config import QuarryConfig
 from quarry.decision_report import conversation_sha256, explores, scanner_digests, tree_report
 from quarry.engine.contracts import CompiledRuleArtifact
@@ -39,6 +41,8 @@ from quarry.integrations.resources import requirements_from_artifact
 from quarry.language.runtime import surface_names
 from quarry.safety.limits import SafetyLimits, json_size
 from quarry.safety.timer import (
+    EvaluationDeadline,
+    absolute_scan_deadline,
     evidence_deadline,
     raise_if_evaluation_expired,
     remaining_evaluation_time,
@@ -364,7 +368,7 @@ class CompiledPolicy:
         """Execute one conversation without parsing or compiling the rule again."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
-        return asyncio.run(
+        return run_sync(
             self.scan_async(
                 conversation,
                 parameters,
@@ -408,7 +412,7 @@ class CompiledPolicy:
         """Run an ordered batch through this already compiled policy."""
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
-        return asyncio.run(
+        return run_sync(
             self.scan_many_async(
                 conversations,
                 parameters,
@@ -446,13 +450,43 @@ class CompiledPolicy:
         """
         if type(logical_reads) is not bool:
             raise ValueError("logical_reads must be a boolean")
+        with scan_deadline(deadline_seconds, "Policy batch deadline exceeded") as deadline:
+            batch_deadline = deadline
+        # Carry the absolute verdict deadline through the queue, then release it before
+        # the evidence finishers install their separate per-conversation budgets.
+        return await run_engine(
+            partial(
+                self._scan_many_reported_async,
+                conversations,
+                parameters,
+                explain=explain,
+                record_traces=record_traces,
+                batch_deadline=batch_deadline,
+                decision_paths=decision_paths,
+                explore_rate=explore_rate,
+                logical_reads=logical_reads,
+            )
+        )
+
+    async def _scan_many_reported_async(
+        self,
+        conversations: Sequence[dict[str, Any]],
+        parameters: Mapping[str, object] | None = None,
+        *,
+        explain: ExplainLevel = False,
+        record_traces: bool = False,
+        batch_deadline: EvaluationDeadline | None = None,
+        decision_paths: bool = False,
+        explore_rate: float = 0.0,
+        logical_reads: bool = False,
+    ) -> list[ScanResult]:
         if not logical_reads:
             return await self._scan_many_async(
                 conversations,
                 parameters,
                 explain=explain,
                 record_traces=record_traces,
-                deadline_seconds=deadline_seconds,
+                batch_deadline=batch_deadline,
                 decision_paths=decision_paths,
                 explore_rate=explore_rate,
             )
@@ -462,7 +496,7 @@ class CompiledPolicy:
                 parameters,
                 explain=explain,
                 record_traces=record_traces,
-                deadline_seconds=deadline_seconds,
+                batch_deadline=batch_deadline,
                 decision_paths=decision_paths,
                 explore_rate=explore_rate,
             )
@@ -475,7 +509,7 @@ class CompiledPolicy:
         *,
         explain: ExplainLevel = False,
         record_traces: bool = False,
-        deadline_seconds: float | None = None,
+        batch_deadline: EvaluationDeadline | None = None,
         decision_paths: bool = False,
         explore_rate: float = 0.0,
     ) -> list[ScanResult]:
@@ -489,7 +523,7 @@ class CompiledPolicy:
         finishers: list[tuple[int, _DeferredEvidence]] = []
         deferred: list[_DeferredEvidence] = []
         try:
-            with scan_deadline(deadline_seconds, "Policy batch deadline exceeded"):
+            with absolute_scan_deadline(batch_deadline):
                 for index, conversation in enumerate(conversations):
                     remaining = remaining_evaluation_time()
                     if remaining is not None and remaining <= 0:
