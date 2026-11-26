@@ -621,11 +621,11 @@ def _joined_cases(judge: str):
     )
     for case, arguments in _NOT_AN_OBJECT.items():
         yield (
-            f"a-sibling-call-whose-arguments-are-{case}-fails-the-rule",
+            f"a-sibling-call-whose-arguments-are-{case}-has-no-named-arguments",
             newest,
             _after_go(_exec_turn(arguments, _RM)),
-            ([], False),
-            [],
+            (["R"], True),
+            _COMMAND_TEXT,
         )
     for case, arguments in _NOT_ACCEPTED.items():
         yield (
@@ -688,13 +688,13 @@ def _joined_cases(judge: str):
         *nothing,
     )
     yield (
-        "a-filter-that-reads-another-malformed-call-fails-the-rule",
+        "a-filter-with-no-named-arguments-is-false",
         judge.format(
             input='message("user", join([c.name for c in messages[-1].tool_calls '
             'if $risky in messages[-1].tool_calls[0].arguments.*], ","))'
         ),
         _after_go(_exec_turn('{"command": "rm', _RM)),
-        ([], False),
+        ([], True),
         [],
     )
 
@@ -1782,8 +1782,7 @@ async def test_a_judge_of_fixed_messages_is_scored_once_and_reported(tmp_path) -
             ), condition
 
     # A null content or a missing field is no content: that turn or that call is left out, and
-    # an input left with no content makes no call. Arguments that are not a JSON object cannot
-    # be decoded, so the rule fails.
+    # an input left with no content makes no call. Non-object JSON has no named arguments.
     no_command = _after_go(_exec_turn('{"path": "/tmp"}'))
     for judge_input, conversation, outcome, scored in (
         (
@@ -1794,7 +1793,7 @@ async def test_a_judge_of_fixed_messages_is_scored_once_and_reported(tmp_path) -
         ),
         (_FIXED_INPUTS["join"][0], no_command, ([], True), []),
         (_FIXED_INPUTS["two-indexes"][0], no_command, (["R"], True), [_user("go")]),
-        (_FIXED_INPUTS["join"][0], _after_go(_exec_turn('"rm -rf /"')), ([], False), []),
+        (_FIXED_INPUTS["join"][0], _after_go(_exec_turn('"rm -rf /"')), ([], True), []),
     ):
         condition = judge.format(input=judge_input)
         result, adapter, *_ = await _scan_with_path(tmp_path, condition, conversation)

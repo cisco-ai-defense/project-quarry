@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from quarry.engine.atoms import AtomDomain, is_per_tool_static
 from quarry.engine.decision import artifact_parts, reads, reads_all
 from quarry.engine.matchers import field_text
+from quarry.types.exceptions import InvalidInputError
 
 if TYPE_CHECKING:  # only for typing; no runtime import cycle
     from quarry.engine.contracts import ScanRecord, WitnessTrace
@@ -579,7 +580,10 @@ def _event_content(event: ConversationEvent) -> str | None:
     if content is not None:
         return str(content)
     # Tool calls have no ``content``; surface their arguments as the excerpt.
-    args = getattr(src, "arguments", None)
+    try:
+        args = getattr(src, "arguments", None)
+    except InvalidInputError:
+        return getattr(src, "raw_arguments", None)
     if args is not None:
         return str(args)
     return None
@@ -591,7 +595,10 @@ def _tested_text(spec, event: ConversationEvent) -> str | None:
     key = spec.value_expr_key or ""
     path = key.split(":", 1)[1] if key.startswith("field:") else ""
     if path:
-        text = field_text(event.source, path)
+        try:
+            text = field_text(event.source, path)
+        except InvalidInputError:
+            return None
         if text is not None:
             return text
     return _event_content(event)

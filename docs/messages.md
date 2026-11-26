@@ -29,7 +29,15 @@ contain tool calls. A tool response must reference an earlier assistant tool cal
 
 Quarry rejects duplicate tool-call IDs, orphan tool responses, unexpected top-level fields,
 non-finite numbers, and data that exceeds configured safety limits. Tool-call arguments are
-decoded when a rule reads `call.arguments`; malformed JSON then makes that scan incomplete.
+held as raw strings and decoded when a rule reads `call.arguments`. Freeform text, cut-off JSON
+and non-object JSON have no named arguments. Excessive decoded nesting, non-finite numbers and
+integers beyond the interpreter's digit limit fail the reading rule with `invalid_input`.
+Other rules can still match; a scan with a failed rule is incomplete, and guards fail closed.
+Evaluating name-only conditions does not decode argument JSON. Raw size limits still apply
+before any rule runs. Explanations retain raw argument text when decoding is unsafe, without
+changing an otherwise complete rule result.
+`call.raw_arguments` preserves the sender's original string. Models can read raw argument text
+without decoding named fields; alias-specific completion builders may quote it as data.
 
 Messages, tools, and nested JSON values remain immutable during a scan. Serialization returns new
 Python containers. Text, image URL, and input-audio parts retain their OpenAI wire shape.
@@ -84,7 +92,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity advances to 13 with compiled-policy format 9 unchanged. Earlier compiler
+Compiler identity advances to 14 with compiled-policy format 9 unchanged. Earlier compiler
 artifacts are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text

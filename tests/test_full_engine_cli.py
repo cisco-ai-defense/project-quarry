@@ -188,12 +188,12 @@ def test_cli_verbose_reports_progress_on_stderr(tmp_path):
         pytest.param(
             _UNPARSEABLE_ARGUMENTS,
             [],
-            2,
+            1,
+            [{"rule": "Greeting"}],
+            "complete",
             [],
-            "invalid",
-            [],
-            "malformed JSON",
-            id="malformed-tool-arguments-are-invalid",
+            None,
+            id="freeform-arguments-have-no-named-fields",
         ),
         pytest.param(
             {"messages": []},
@@ -331,16 +331,15 @@ def test_cli_human_output_explains_the_match_and_charts_rule_timing(quarry, tmp_
     assert '[3] tool_responses[0]: "echoing TOKEN"' in result.stdout
 
 
-def test_cli_human_output_marks_invalid_tool_arguments_without_partial_matches(quarry, tmp_path):
+def test_cli_human_output_accepts_freeform_arguments(quarry, tmp_path):
     config = _cli_config(tmp_path, _GREETING_RULE, _READS_ARGS_RULE)
     target = _target(tmp_path, _UNPARSEABLE_ARGUMENTS)
 
     result = quarry("scan", "-c", config, "-t", target)
 
-    assert result.returncode == 2
-    assert f"[INVALID] {target}" in result.stdout
-    assert "Invalid/incomplete files:" in result.stdout
-    assert "malformed JSON" in result.stdout
+    assert result.returncode == 1
+    assert f"[MATCH] {target}" in result.stdout
+    assert "malformed JSON" not in result.stdout
     assert "Partial matches" not in result.stdout
 
 
@@ -385,7 +384,7 @@ def test_cli_one_invalid_file_makes_a_directory_scan_exit_two(quarry, tmp_path):
     target = tmp_path / "conversations"
     target.mkdir()
     _target(target, _HELLO, "complete.json")
-    _target(target, _UNPARSEABLE_ARGUMENTS, "invalid.json")
+    _target(target, {"messages": [{"role": "user", "content": 5}]}, "invalid.json")
 
     result = quarry("scan", "-c", config, "-t", target, "-o", "json")
 
@@ -648,3 +647,16 @@ def test_cli_reports_a_typed_collection_output_in_every_format(
     assert result.returncode == 1
     assert [fragment in result.stdout for fragment in present] == [True] * len(present)
     assert [fragment in result.stdout for fragment in absent] == [False] * len(absent)
+
+
+def test_cli_numeric_argument_fault_keeps_other_matches_incomplete(quarry, tmp_path):
+    payload = orjson.loads(orjson.dumps(_UNPARSEABLE_ARGUMENTS))
+    payload["messages"][1]["tool_calls"][0]["function"]["arguments"] = '{"q": NaN}'
+    config = _cli_config(tmp_path, _GREETING_RULE, _READS_ARGS_RULE)
+    result = quarry("scan", "-c", config, "-t", _target(tmp_path, payload), "-o", "json")
+    assert result.returncode == 2
+    [output] = orjson.loads(result.stdout)
+    assert output["completion_state"] == "incomplete"
+    assert output["matches"] == [{"rule": "Greeting"}]
+    assert output["validation_error"] is None
+    assert output["failures"] == [{"category": "invalid_input", "rule_name": "ReadsArgs"}]
