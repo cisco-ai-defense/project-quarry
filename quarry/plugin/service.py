@@ -54,6 +54,7 @@ from quarry.integrations.rate_limiter import LLMRateLimiter
 from quarry.integrations.resources import ResourcePreparationError
 from quarry.language import get_language_spec
 from quarry.plugin.visualization import (
+    VisualizationRenderError,
     build_batch_runtime_attribution,
     build_runtime_attribution,
     build_visualization_bundle,
@@ -948,6 +949,22 @@ class QuarryPlugin:
             )
             return response, None
 
+        try:
+            visualization = build_visualization_bundle(
+                scanner.loaded_rules, scanner.compiled_rules
+            ).to_dict()
+        except VisualizationRenderError as exc:
+            diagnostic = self._exception_diagnostic(exc)
+            response.update(
+                {
+                    "valid": False,
+                    "stage": diagnostic["stage"],
+                    "diagnostics": [diagnostic],
+                    "required_capabilities": self._serialize_requirements(requirements),
+                }
+            )
+            return response, None
+
         response["warnings"].extend(validation_warnings)
         response.update(
             {
@@ -980,9 +997,7 @@ class QuarryPlugin:
                     if len(scanner.compiled_rules) == 1
                     else {}
                 ),
-                "visualization": build_visualization_bundle(
-                    scanner.loaded_rules, scanner.compiled_rules
-                ).to_dict(),
+                "visualization": visualization,
             }
         )
         return response, scanner

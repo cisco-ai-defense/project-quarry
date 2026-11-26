@@ -23,7 +23,6 @@ conversation in it scanned authoritatively.
 
 import asyncio
 import sys
-import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +32,7 @@ import pytest
 from quarry.config import QuarryConfig
 from quarry.core.conversation import Conversation
 from quarry.integrations.model_inference import ModelInferenceBackend
+from quarry.safety import timer as timer_module
 from quarry.safety import validator as validator_module
 from quarry.safety.limits import SafetyLimits
 from quarry.safety.regex_backend import RE2_REGEX
@@ -838,6 +838,10 @@ def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     monkeypatch, fail_on_timeout: bool
 ) -> None:
     # A rule requiring every decoded value must respect the shared inspection deadline.
+    # Advance only the deadline clock during decoding so setup and scheduling cannot
+    # consume this test's budget before it reaches the behavior under inspection.
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(timer_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
     arguments = [f'{{"nonce": {index}}}' for index in range(100)]
     conversation = {
         "messages": [
@@ -860,7 +864,7 @@ def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     def slow_decode(value, *args, **kwargs):
         if isinstance(value, str) and value.startswith('{"nonce":'):
             decoded.append(value)
-            time.sleep(0.015)
+            clock.now += 0.015
         return decode(value, *args, **kwargs)
 
     monkeypatch.setattr(canonical_messages.json, "loads", slow_decode)
@@ -875,6 +879,7 @@ def test_distinct_argument_reads_stop_at_the_inspection_deadline(
     else:
         result = asyncio.run(scanner.scan_data_async(conversation, deadline_seconds=0.05))
     assert 0 < len(decoded) < len(arguments)
+    assert decoded == arguments[:4]
     if not fail_on_timeout:
         assert (result.rule_matches, result.completion_state) == ([], "incomplete")
         assert result.validation_error is None

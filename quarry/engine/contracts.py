@@ -42,10 +42,9 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-25 preserves lexical alias scopes and inner
-# initializers while retaining bounded expansion, eager admission and guarded calls.
-# Compiler-26 permits new-name forward aliases while preserving existing bindings.
-COMPILER_VERSION = "compiler-26"
+# previously produced artifacts. Compiler-27 preserves extraction operation kinds and
+# explicit default bounds in labels alongside new-name forward aliases and existing bindings.
+COMPILER_VERSION = "compiler-27"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64

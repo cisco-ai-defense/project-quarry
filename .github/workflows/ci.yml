@@ -60,7 +60,7 @@ jobs:
   test:
     name: test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +79,6 @@ jobs:
       - name: Sync reviewed dependencies
         run: uv sync --frozen --group dev --extra inference --extra plugin
       - name: Run tests
-        run: uv run --frozen --extra inference --extra plugin pytest
+        run: uv run --frozen --extra inference --extra plugin pytest -n 2
       - name: Run deterministic examples
         run: uv run --frozen --extra inference --extra plugin python scripts/e2e_signature_test.py

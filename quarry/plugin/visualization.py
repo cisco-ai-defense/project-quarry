@@ -35,9 +35,13 @@ from quarry.types.dsl import (
     MapComprehension,
     condition_child_fields,
 )
-from quarry.types.dsl.render import json_value, render_condition
+from quarry.types.dsl.render import ConditionRenderError, json_value, render_condition
 
 VISUALIZATION_SCHEMA_VERSION = 1
+
+
+class VisualizationRenderError(ValueError):
+    """A source graph label could not be rendered within its safety contract."""
 
 
 def _children(node: ConditionNode):
@@ -47,10 +51,12 @@ def _children(node: ConditionNode):
         value = getattr(node, field_name)
         if isinstance(value, ConditionNode):
             yield field_name, value
-        elif isinstance(value, list | tuple):
+        elif type(value) in {list, tuple}:
             for index, child in enumerate(value):
                 if isinstance(child, ConditionNode):
                     yield f"{field_name}[{index}]", child
+        elif isinstance(value, list | tuple):
+            raise VisualizationRenderError("rule condition cannot be rendered safely")
 
 
 def _attributes(node: ConditionNode) -> dict[str, Any]:
@@ -163,6 +169,15 @@ class VisualizationBundle:
 _COMPREHENSIONS = (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension)
 
 
+def _render_label(node: ConditionNode) -> str:
+    """Translate renderer failures into this graph API's bounded value error."""
+
+    try:
+        return render_condition(node)
+    except ConditionRenderError:
+        raise VisualizationRenderError("rule condition cannot be rendered safely") from None
+
+
 def _state_atom_id(node: ConditionNode, direct_atoms: set[str], artifact) -> str | None:
     """Name the single atom whose value is this occurrence's own truth value, if any."""
 
@@ -202,7 +217,7 @@ def build_rule_visualization(rule, artifact=None) -> RuleVisualization:
         nodes[node_index] = VisualizationNode(
             id=node_id,
             node_type=type(node).__name__,
-            label=render_condition(node),
+            label=_render_label(node),
             attributes=_attributes(node),
             atom_ids=tuple(sorted(direct_atoms)),
             subtree_atom_ids=tuple(sorted(subtree_atoms)),

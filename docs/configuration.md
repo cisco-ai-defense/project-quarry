@@ -324,7 +324,7 @@ it raises `QuarryTimeoutError`; otherwise the result is incomplete with a timeou
 Ordinary preparation errors retain their existing classification.
 
 Prepared policies bind registered transforms to their complete reviewed definition. This layer
-uses compiler 26 and compiled-policy format 10. Policies from earlier compiler versions or formats
+uses compiler 27 and compiled-policy format 10. Policies from earlier compiler versions or formats
 must be recompiled from their saved rule source. Format 10 retains source-declared resource
 requirements even when compilation folds away an expression. Reload still checks model
 fingerprints, operation capabilities and transform definitions before any provider dispatch.
