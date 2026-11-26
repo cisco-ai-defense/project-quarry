@@ -110,6 +110,10 @@ overall. A tool response must still follow the selected assistant call it answer
 can be sent to a model. Selections with repeated tool-call IDs or repeated results for one call are
 rejected before model dispatch.
 
+Conflicting variants that both retain the same tool-call or tool-result identity are refused
+when the conflict is found. A text-preserving copy of a tool result, rewritten to an ordinary
+non-tool role, can accompany the original result without duplicating its tool identity.
+
 Constructed messages have stable scan-local identity but no source coordinates. Their text is
 explicitly unmapped unless it was copied through a provenance-preserving field operation.
 `Messages.source_ranges(...)` fails closed when a requested range touches unmapped text. Model
