@@ -528,6 +528,12 @@ class DSLScanner:
         self._link_candidate_functions(rules, active_sources)
         resource_requirements = self._prepare_candidate_resources(rules, resource_manager)
         compiled_rules = self._compile_candidate_rules(rules)
+        for name, artifact in tuple(compiled_rules.items()):
+            declared = ResourceManager(self.config).analyze_rules({name: rules[name]})
+            compiled_rules[name] = replace(
+                artifact,
+                declared_resources={key: frozenset(values) for key, values in declared.items()},
+            )
         compiled_rules = {
             name: label_called_rule_artifact(artifact, rules[name])
             for name, artifact in compiled_rules.items()

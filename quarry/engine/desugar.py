@@ -35,11 +35,12 @@ from dataclasses import dataclass, replace
 from quarry.engine import core as C
 from quarry.engine.budget import charge
 from quarry.engine.diagnostics import UnsupportedConstruct
-from quarry.engine.extension_surfaces import EVENT_SURFACES
+from quarry.engine.extension_surfaces import EVENT_SURFACES, STATIC_SURFACES
 from quarry.language.runtime import surface_names
 from quarry.types.dsl import (
     AllComprehension,
     AnyComprehension,
+    Assignment,
     BinaryOp,
     FieldAccess,
     FilterComprehension,
@@ -61,6 +62,7 @@ from quarry.types.dsl.traversal import condition_child_fields, iter_condition_ch
 # it: an expansion step copies and walks the whole body outside the budgeted walkers. Eight
 # groups load in under 3 seconds; ten spend 15 seconds before the budget would reject them.
 _MAX_HOISTED_PARTS = 8
+_MAX_ALIAS_EXPANSION_NODES = 100_000
 _NESTED_CHUNKS = (
     "chunked scoring is a whole-conversation question and cannot be nested inside another "
     "comprehension; write it as its own top-level term"
@@ -69,6 +71,66 @@ _FLOW_FUNCTIONS = ("called_tool", "called_tools", "user_said", "assistant_said")
 ORDERS_INPUT_ITEMS = "orders input items"
 # Reserved binder for a public rule's check over a messages value.
 COMPOSED_CHECK = "\x00composed"
+
+
+def _check_alias_expansion(parts) -> None:
+    """Count executable occurrences without walking shared DAG branches exponentially."""
+
+    sizes: dict[int, int] = {}
+    active: set[int] = set()
+    total = 0
+    for root in parts:
+        pending = [(root, False)]
+        while pending:
+            node, expanded = pending.pop()
+            key = id(node)
+            if key in sizes:
+                continue
+            if not expanded:
+                if key in active:
+                    raise UnsupportedConstruct("alias expansion contains cyclic syntax")
+                active.add(key)
+                pending.append((node, True))
+                children = tuple(iter_condition_children(node))
+                if len(children) > _MAX_ALIAS_EXPANSION_NODES:
+                    raise UnsupportedConstruct("alias expansion has too many condition nodes")
+                pending.extend((child, False) for child in reversed(children))
+                continue
+            size = 1 + sum(sizes[id(child)] for child in iter_condition_children(node))
+            if size > _MAX_ALIAS_EXPANSION_NODES:
+                raise UnsupportedConstruct(
+                    f"alias expansion exceeds {_MAX_ALIAS_EXPANSION_NODES:,} condition-node "
+                    "occurrences; split the rule"
+                )
+            sizes[key] = size
+            active.remove(key)
+        total += sizes[id(root)]
+        if total > _MAX_ALIAS_EXPANSION_NODES:
+            raise UnsupportedConstruct(
+                f"alias expansion exceeds {_MAX_ALIAS_EXPANSION_NODES:,} condition-node "
+                "occurrences; split the rule"
+            )
+    # Substitution and duplicate checks visit occurrences, even when they share a node.
+    charge(total)
+
+
+def _without_check_bodies(node):
+    """Treat a called rule's body as its own rule when checking outer model nesting."""
+
+    if isinstance(node, (AnyComprehension, AllComprehension)) and node.variable.startswith(
+        COMPOSED_CHECK
+    ):
+        return _without_check_bodies(node.collection)
+    changes = {}
+    for name in condition_child_fields(node):
+        value = getattr(node, name)
+        if hasattr(value, "__dataclass_fields__"):
+            rewritten = _without_check_bodies(value)
+            if rewritten is not value:
+                changes[name] = rewritten
+        elif isinstance(value, (list, tuple)):
+            changes[name] = type(value)(_without_check_bodies(item) for item in value)
+    return replace(node, **changes) if changes else node
 
 
 @dataclass(frozen=True)
@@ -169,10 +231,10 @@ class Desugarer:
             and not isinstance(node, FlowOp)
             and node.operator in ("and", "or")
         ):
-            alias = self._t.scalar_alias(node.left)
-            if alias is not None and node.operator == "and":
-                var, expr = alias
-                return self.cond(self._t.substitute_identifier(node.right, var, expr), scope)
+            if node.operator == "and":
+                parts = self._unaliased(node, scope)
+                if parts is not None:
+                    return C.conj([self.cond(part, scope) for part in parts])
             left, right = self.cond(node.left, scope), self.cond(node.right, scope)
             return C.conj([left, right]) if node.operator == "and" else C.disj([left, right])
         if isinstance(node, UnaryOp) and node.operator == "not":
@@ -223,6 +285,53 @@ class Desugarer:
         (var,) = reads
         binding = _lookup(scope, var)
         return C.Pred(node, binding.var, binding.surface)
+
+    def _unaliased(self, node, scope=()) -> list | None:
+        """Inline aliases without changing earlier reads of names already in scope."""
+
+        parts: list = []
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, BinaryOp) and current.operator == "and":
+                parts.append(current.right)
+                pending.append(current.left)
+            else:
+                parts.append(current)
+        parts.reverse()
+        if not any(self._t.scalar_alias(part) is not None for part in parts):
+            return None
+        _check_alias_expansion(parts)
+        # Expand from the right so a later declaration cannot capture names in
+        # an earlier alias's value when that value is inserted at a later use.
+        index = len(parts) - 1
+        while index >= 0:
+            alias = self._t.scalar_alias(parts[index])
+            if alias is None:
+                index -= 1
+                continue
+            var, expr = alias
+            del parts[index]
+            if any(isinstance(part, Assignment) and part.variable == var for part in parts):
+                raise UnsupportedConstruct(
+                    f"`as {var}` names two values in one `and`; give each its own name"
+                )
+            # New names may be used before their declaration in this chain. A
+            # shadowing alias keeps the meaning of preceding reads and initializers.
+            visible = set(surface_names()) | {binding.name for binding in scope} | {"params"}
+            visible |= {
+                surface.partition(".")[0]
+                for surface in EVENT_SURFACES.get() | STATIC_SURFACES.get()
+            }
+            if self._value_var is not None:
+                visible.add(self._value_var)
+            first = index if var in visible else 0
+            parts[first:] = [
+                self._t.substitute_identifier(part, var, expr) for part in parts[first:]
+            ]
+            _check_alias_expansion(parts)
+            index -= 1
+        return parts
 
     def join(self, node, scope) -> C.Formula | None:
         """``test contains bound`` as one strategy-neutral relation between scoped elements."""
@@ -286,8 +395,9 @@ class Desugarer:
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
             chunk = self._bind(node.variable, "\x00chunks", C.Events("\x00chunks"))
             return C.ChunkQuant(q, chunk.var, node.collection, self.cond(node.condition, (chunk,)))
-        if self._t.contains_model_call(node.condition):
-            self._check_model_comprehension(node, scope)
+        outer = _without_check_bodies(node.condition)
+        if self._t.contains_model_call(outer):
+            self._check_model_comprehension(replace(node, condition=outer), scope)
         if self._t.is_tools(node.collection):
             binding = self._bind(node.variable, "tools", C.Events("tools"))
             body = self.cond(node.condition, (*scope, binding))

@@ -319,10 +319,15 @@ before inheritance fanout is charged. Templates are load-time configuration only
 resolution, models use the same strict validation and immutable runtime representation as fully
 written-out aliases.
 
+An inspection timeout during conversation preparation follows `fail_on_timeout`: when enabled,
+it raises `QuarryTimeoutError`; otherwise the result is incomplete with a timeout failure.
+Ordinary preparation errors retain their existing classification.
+
 Prepared policies bind registered transforms to their complete reviewed definition. This layer
-uses compiler 12 and compiled-policy format 9. Policies from earlier compiler versions or formats
-must be recompiled from their saved rule source. Format 9 records transform resource requirements;
-compiler 12 applies occurrence-specific message selection and rewrite admission.
+uses compiler 26 and compiled-policy format 10. Policies from earlier compiler versions or formats
+must be recompiled from their saved rule source. Format 10 retains source-declared resource
+requirements even when compilation folds away an expression. Reload still checks model
+fingerprints, operation capabilities and transform definitions before any provider dispatch.
 
 Adapter diagnostics omit host exception messages and arbitrary exception details. Known retry
 and refusal codes are retained so model accounting and recovery still apply.

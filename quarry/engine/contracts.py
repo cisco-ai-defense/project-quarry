@@ -42,9 +42,10 @@ if TYPE_CHECKING:
     from quarry.engine.witness import ModelResultEvidence
 
 # Bump when compilation or admission semantics change in a way that must invalidate
-# previously produced artifacts. Compiler-23 tracks parameter use across public calls and
-# removes child artifacts that no executable automaton reads after lowering.
-COMPILER_VERSION = "compiler-23"
+# previously produced artifacts. Compiler-25 preserves lexical alias scopes and inner
+# initializers while retaining bounded expansion, eager admission and guarded calls.
+# Compiler-26 permits new-name forward aliases while preserving existing bindings.
+COMPILER_VERSION = "compiler-26"
 
 # Bound compiler-owned public-call graphs before expansion and at wire boundaries.
 MAX_NESTED_RULE_DEPTH = 64
@@ -224,6 +225,9 @@ class CompiledRuleArtifact:
     closed_conditions: dict[str, ClosedPlan] = field(default_factory=dict)
     # A public rule call compiles its condition as a nested rule over selected messages.
     split_checks: dict[str, CompiledRuleArtifact] = field(default_factory=dict)
+    # Source declarations survive constant folding so prepared-policy reload preserves
+    # load-time resource admission without adding runtime work.
+    declared_resources: dict[str, frozenset] = field(default_factory=dict)
     # A universal/absence claim must be explained over the original complete input.
     full_trace_proof: bool = False
     decision_tree: DecisionTree | None = None
