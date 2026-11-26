@@ -117,6 +117,26 @@ class ScanResponses:
             self._release_callbacks.setdefault(namespace, callback)
             return self._retention_owner
 
+    def _cleanup_callback(
+        self,
+        generation: int | None,
+        namespace: object,
+        callback: Callable[[object], None] | None = None,
+    ) -> Callable[[object], None] | None:
+        """Find or atomically claim one native resource's cleanup in this generation.
+
+        Callers construct candidates and dispose losing candidates outside this lock.
+        The registered callback is the sole authoritative owner until the last lease.
+        """
+        if self.pid != os.getpid():
+            return None
+        with self._lock:
+            if not self._leases or generation != self._generation:
+                return None
+            if callback is None:
+                return self._release_callbacks.get(namespace)
+            return self._release_callbacks.setdefault(namespace, callback)
+
     def _reset_after_fork(self) -> None:
         self._lock = threading.Lock()
         self._leases = 0

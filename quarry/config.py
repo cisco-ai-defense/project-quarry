@@ -122,6 +122,8 @@ _INFERENCE_MODEL_FIELDS = frozenset(
         "description",
         "adapter",
         "model",
+        "revision",
+        "windows",
         "endpoint",
         "aws_profile",
         "region",
@@ -139,6 +141,8 @@ _LIST_OR_MAPPING = object()
 _MODEL_TEMPLATE_SCHEMA: dict[str, object] = {
     "adapter": str,
     "model": str,
+    "revision": str,
+    "windows": {"unit": str, "size": int, "step": int, "scope": str, "renderer": str},
     "endpoint": str,
     "aws_profile": str,
     "region": str,
@@ -182,6 +186,12 @@ class InputTokensConfig:
 
 _MIN_EXPLANATION_TOKENS = 16
 _MAX_EXPLANATION_TOKENS = 4096
+
+
+def _model_revision(value: object) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ValueError("model revision must be a non-empty string or null")
+    return value
 
 
 def _input_token_limit(value: object) -> int | None:
@@ -273,6 +283,31 @@ class CompleteConfig:
 
 
 @dataclass(frozen=True)
+class ModelWindowsConfig:
+    """Generic overlapping model cuts, with no product-specific role policy."""
+
+    unit: str
+    size: int
+    step: int | None = None
+    scope: str = "all"
+    renderer: str = "join"
+
+    def __post_init__(self) -> None:
+        if self.unit not in ("characters", "tokens"):
+            raise ValueError("windows unit must be 'characters' or 'tokens'")
+        if type(self.size) is not int or self.size <= 0:
+            raise ValueError("windows size must be a positive integer")
+        if self.step is None:
+            object.__setattr__(self, "step", self.size)
+        if type(self.step) is not int or not 0 < self.step <= self.size:
+            raise ValueError("windows step must be a positive integer no larger than size")
+        if self.scope not in ("all", "last_turn"):
+            raise ValueError("windows scope must be 'all' or 'last_turn'")
+        if self.renderer not in ("join", "json", "host"):
+            raise ValueError("windows renderer must be 'join', 'json', or 'host'")
+
+
+@dataclass(frozen=True)
 class InferenceModelConfig:
     """Provider settings and optional operation settings for one model."""
 
@@ -287,6 +322,13 @@ class InferenceModelConfig:
     classify: ClassifyConfig | None = None
     spans: SpanConfig | None = None
     complete: CompleteConfig | None = None
+    revision: str | None = field(default=None, metadata={"cache_omit_none": True})
+    windows: ModelWindowsConfig | None = field(default=None, metadata={"cache_omit_none": True})
+
+    def __post_init__(self) -> None:
+        _model_revision(self.revision)
+        if self.windows is not None and not isinstance(self.windows, ModelWindowsConfig):
+            raise ValueError("windows must be a ModelWindowsConfig or None")
 
     def identity_dict(self) -> dict[str, object]:
         """Canonical model configuration, retaining pre-explanation policy identity.
@@ -296,6 +338,10 @@ class InferenceModelConfig:
         """
 
         document = asdict(self)
+        if self.revision is None:
+            document.pop("revision")
+        if self.windows is None:
+            document.pop("windows")
         for operation in ("score", "classify", "spans", "complete"):
             section = document[operation]
             if section is not None and section.get("max_input_tokens") is None:
@@ -1212,6 +1258,9 @@ def _validate_resolved_model_semantics(name: str, data: dict, *, template: bool)
 
     owner = f"Model template {name!r}" if template else f"Inference model {name!r}"
     try:
+        _model_revision(data.get("revision"))
+        if data.get("windows") is not None:
+            _parse_model_windows(data["windows"], owner=f"{owner} windows")
         if data.get("tokens") is not None:
             _parse_input_tokens(
                 name,
@@ -1462,6 +1511,16 @@ def _parse_inference_model(
         )
     if category is not None and (not isinstance(category, str) or not category.strip()):
         raise ValueError(f"Inference model '{model_name}' category must be a non-empty string")
+    try:
+        revision = _model_revision(
+            _configured_environment_value(
+                _model_revision(data.get("revision")),
+                owner,
+                resolve_environment=resolve_environment,
+            )
+        )
+    except ValueError as exc:
+        raise ConfigurationError(f"{owner} revision must be a non-empty string or null") from exc
     adapter = (
         _required_string(data, "adapter", owner) if "adapter" in data else DEFAULT_INFERENCE_ADAPTER
     )
@@ -1496,7 +1555,29 @@ def _parse_inference_model(
         classify=classify,
         spans=spans,
         complete=complete,
+        revision=revision,
+        windows=_parse_model_windows(data["windows"], owner=f"{owner} windows")
+        if data.get("windows") is not None
+        else None,
     )
+
+
+def _parse_model_windows(value: object, *, owner: str) -> ModelWindowsConfig:
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{owner} must be a mapping")
+    _reject_unknown_fields(value, {"unit", "size", "step", "scope", "renderer"}, owner)
+    if "unit" not in value or "size" not in value:
+        raise ConfigurationError(f"{owner} requires unit and size")
+    try:
+        return ModelWindowsConfig(
+            unit=value["unit"],
+            size=value["size"],
+            step=value.get("step"),
+            scope=value.get("scope", "all"),
+            renderer=value.get("renderer", "join"),
+        )
+    except ValueError as exc:
+        raise ConfigurationError(f"{owner}: {exc}") from exc
 
 
 def _parse_complete_config(

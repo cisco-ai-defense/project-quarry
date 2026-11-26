@@ -340,6 +340,26 @@ def source_part_mapping_for(
     return tuple(parts), located and cursor == end
 
 
+def _native_range_key(source: ContentSourceRange) -> tuple | None:
+    """Index only closed scalar coordinates; extensions retain list equality semantics."""
+    if type(source) is not ContentSourceRange:
+        return None
+    values = (
+        source.message_index,
+        source.part_index,
+        source.start,
+        source.end,
+        source.message_start,
+        source.message_end,
+    )
+    if any(
+        type(value) is not int and not (index == 1 and value is None)
+        for index, value in enumerate(values)
+    ):
+        return None
+    return values
+
+
 def source_mapping_for(
     segments: tuple[ProvenanceSegment, ...],
     start: int,
@@ -362,7 +382,8 @@ def source_mapping_for(
     if end > output_end:
         raise ValueError("transformed range is outside message content")
     ranges: list[ContentSourceRange] = []
-    range_set: set[ContentSourceRange] = set()
+    current_values: dict[tuple, int] = {}
+    indexed = True
     covered = start
     unmapped = False
     work = 0
@@ -407,6 +428,10 @@ def source_mapping_for(
             )
         for source in sources:
             charge_work()
+            key = _native_range_key(source) if indexed else None
+            if indexed and key is None:
+                indexed = False
+                current_values.clear()
             last = ranges[-1] if ranges else None
             if (
                 last is not None
@@ -415,7 +440,15 @@ def source_mapping_for(
                 and last.end == source.start
                 and last.message_end == source.message_start
             ):
-                merged = ContentSourceRange(
+                if indexed:
+                    previous = _native_range_key(last)
+                    assert previous is not None
+                    count = current_values[previous] - 1
+                    if count:
+                        current_values[previous] = count
+                    else:
+                        del current_values[previous]
+                ranges[-1] = ContentSourceRange(
                     last.message_index,
                     last.part_index,
                     last.start,
@@ -423,12 +456,15 @@ def source_mapping_for(
                     last.message_start,
                     source.message_end,
                 )
-                range_set.discard(last)
-                ranges[-1] = merged
-                range_set.add(merged)
-            elif source not in range_set:
+                if indexed:
+                    merged = _native_range_key(ranges[-1])
+                    assert merged is not None
+                    current_values[merged] = current_values.get(merged, 0) + 1
+            elif key not in current_values if indexed else source not in ranges:
                 ranges.append(source)
-                range_set.add(source)
+                if indexed:
+                    assert key is not None
+                    current_values[key] = current_values.get(key, 0) + 1
     if covered < end:
         unmapped = True
     return tuple(ranges), unmapped

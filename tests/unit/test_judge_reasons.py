@@ -387,6 +387,9 @@ def test_disabled_explanations_preserve_preexisting_compiled_policy_identity(tmp
     scanner = _scanner(tmp_path, adapter, models={"judge": _model(explanation=False)})
     model = scanner.config.models["judge"]
     old = asdict(model)
+    # Later optional identity extensions were absent from the historical mapping too.
+    for setting in ("revision", "windows"):
+        assert old.pop(setting) is None
     old["score"].pop("explanation_max_tokens")
     # These later optional limits also did not exist in the historical mapping.
     for operation in ("score", "classify", "spans", "complete"):

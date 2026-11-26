@@ -177,6 +177,118 @@ A required adapter method that is missing fails during rule preparation rather t
 
 Each scan has a deadline, model-call budget, and scan-local cache. Adapters must honor cancellation and timeouts in their own clients. The runnable [model example](../examples/model-inference/) uses a deterministic local adapter without network access.
 
+## Generic model windows
+
+An application adapter can classify overlapping character or token windows and decode spans
+against the full selected input. Configure `windows` on a classifier or span alias:
+
+```yaml
+models:
+  window_classifier:
+    adapter: application_windows
+    model: synthetic-window-model
+    revision: "synthetic-v1"
+    windows:
+      unit: tokens
+      size: 256
+      step: 128
+      scope: last_turn
+      renderer: join
+    classify:
+      class_index: 0
+      max_input_tokens: 512
+```
+
+The application registers `application_windows` with `ModelInferenceBackend`. Window support
+must be declared by that adapter; adding this configuration does not give an ordinary provider
+adapter a tokenizer or span decoder.
+
+| Setting | Contract |
+|---|---|
+| `unit` | Required: `characters` uses Python character offsets; `tokens` uses exact host token IDs. |
+| `size` | Required positive integer. Token size counts content tokens before preserved endpoints. |
+| `step` | Positive integer no larger than size; defaults to size. |
+| `scope` | `all` by default, or `last_turn` for the renderer's last selected-message interval. No role is chosen implicitly. |
+| `renderer` | `join` by default, `json`, or `host`. |
+
+Model templates can supply these settings. Child mappings override individual settings;
+`windows: null` removes an inherited window declaration. The optional `revision` is a nonempty
+string identifying the configured model version. It changes request and prepared-policy
+identities. The application adapter remains responsible for selecting that provider version.
+Omitting both settings preserves ordinary model behavior and request identities.
+
+`join` joins selected message content with newlines. `json` serializes selected messages with
+conservative coordinates for syntax and non-content fields. Both preserve selection order and
+send offered tools separately as serialized context. `last_turn` refers to the last selected
+message, including its serialized object for JSON; it does not silently select a user role.
+Empty rendered content or an empty last-turn interval makes no encoder, classifier, or decoder
+request. Ordinary model operations without windows retain their existing empty-message behavior.
+
+### Window adapter methods
+
+Declare `window_units` as a native set, frozenset, list, or tuple containing the supported units.
+The following methods receive the parsed model configuration:
+
+| Method | Result |
+|---|---|
+| `classify_window_batch(config, batches, context, *, timeout=None)` | One response with `.chunks`, containing one probability vector per requested window. |
+| `encode_window_input(config, text, context, last_turn, *, timeout=None)` | Required for token windows: `TokenEncoding` from `quarry.integrations.model_windows`. |
+| `decode_window_spans(config, raw, source, windows, threshold, *, encoding=None, token_scores=None)` | Required for spans: a sequence of scored `Span` values bound to the supplied full `SourceText`. |
+| `window_token_counts(config, batches, context, *, timeout=None)` | Required when character windows have `max_input_tokens`: one nonnegative integer count per window, including context. |
+| `render_window_input(config, messages, tools)` | Required for `renderer: host`: `WindowInput` or an opaque string; may be asynchronous. |
+
+`TokenEncoding` contains detached native token IDs, optional `prefix_token` and `suffix_token`
+flags, an optional half-open `last_turn` token interval, and `context_tokens`. Each endpoint flag
+preserves exactly one token at that end in every batch. Equal IDs at different positions remain
+distinct. Windows retain their positions in the full encoding. Counts and input limits include
+preserved endpoints and context before classifier dispatch.
+
+The optional `character_offsets` table has one entry per token: a half-open interval in the full
+rendered text, or `None` when the token has no characters. Nonempty intervals must be ordered;
+overlap is allowed. Endpoint tokens cannot claim nonempty text. Zero-width entries add no text
+coverage. Without this table, token counts remain available but Quarry cannot infer character
+coordinates from token IDs.
+
+For token-head support, declare `supports_token_head = True` and accept the keyword
+`token_head=False` in both the classification and span-decoding methods. The response's
+`token_head` has one row per window, one entry per requested token, and a probability vector per
+entry. Quarry validates the entire selected class before invoking the decoder; every selected
+value must be a finite number in `[0, 1]`. Other classes do not establish the selected class's
+validity. Token-window spans require this support. An ordinary non-window adapter may opt in
+through the same declaration and keyword on `classify_messages` and `decode_spans`; older
+adapter signatures continue to work without that keyword.
+
+Quarry requests a token head for a selected span operation and physically compatible classifier
+reads planned for the same input. Compatible aliases may share the raw provider reply while
+retaining their own thresholds and class selections. Different inputs, tools, revisions, or
+window settings remain separate. Legacy `model_score` and `model_scan` field reads participate
+when they send the equivalent single user message. Custom response readers still run for each
+logical read; their return values are not memoized as model scores.
+
+Decode character spans using `CharacterWindow.span(...)` or the supplied `SourceText.span(...)`.
+For token spans, use positions in the full encoding and the host's actual character mapping;
+token indices are not character offsets. Keep the geometry returned by the source and add the
+score or label. Quarry rejects spans that change their bound source, coordinates, or precision.
+Copied text retains original provenance; authored text stays constructed and unmapped. Text
+derived from media can retain part context without inventing image character positions.
+
+An explicit host rendering uses `WindowInput` from `quarry.integrations.model_window_input`.
+Its `SourceText` origin must be a bounded, acyclic graph of native `Place` and `Derived` nodes
+covering only the selected input. An opaque string receives enclosing coordinates rather than
+invented fine offsets. Host last-turn rendering must provide an explicit interval.
+
+Window preparation and measurements are bounded and owned by the active scan or its deferred
+evidence. Encodings and head-bearing replies have a fixed five-minute reuse limit and remain
+subject to cache entry and byte limits. Hard bounds include one million encoding tokens,
+10,000 windows, four million units of overlapping window work, and four million rendered input
+and context characters. The configured comprehension limit can reduce the window count further.
+Normal call budgets, rate limits, deadlines, cancellation, and logical-read attribution apply.
+
+With explain enabled, direct classification reports the maximum window probability and the first
+window attaining it, with bounded coordinate summaries. Arithmetic and aggregate conditions
+keep their own deciding value. Summaries contain no input text, token IDs, or raw provider reply.
+Unavailable token-to-character mapping is reported as unavailable; it is not guessed.
+
 ## Data egress
 
 A model operation can send selected messages, tools, and policy text to the configured endpoint. Review provider retention, logging, TLS, redirects, and credentials before enabling model rules. Keep conversation content and text parameters out of logs and errors.

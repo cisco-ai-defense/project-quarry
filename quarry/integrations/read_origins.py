@@ -266,13 +266,24 @@ class ReadOriginProjection:
             self._nodes[identity] = node
 
     def ranges(self, content: object, origin: object) -> tuple[ReadInterval, ...]:
+        length = self.prepare(content, origin)
+        return self.window_ranges(origin, 0, length)
+
+    def prepare(self, content: object, origin: object) -> int:
+        """Validate one full input once before projecting disjoint selected windows."""
         texts = self.parts(content)
         length = sum(map(len, texts))
         self._build(origin)
         root = self._nodes[id(origin)]
         if self.registry.fingerprint_window(texts, 0, length) != self._hash(root, 0, length):
             raise ValueError("logical input origin text does not match its source")
-        pending = [(origin, 0, length)]
+        return length
+
+    def window_ranges(self, origin: object, start: int, end: int) -> tuple[ReadInterval, ...]:
+        root = self._nodes[id(origin)]
+        if not 0 <= start <= end <= root.length:
+            raise ValueError("logical input window is outside its source")
+        pending = [(origin, start, end)]
         result = []
         while pending:
             current, start, end = pending.pop()
@@ -297,8 +308,8 @@ class ReadOriginProjection:
             elif type(current) is Derived:
                 tasks = []
                 position = start
-                for index in range(0, len(current.runs), RUN_FIELDS):
-                    low, high, source, begin, _, _ = current.runs[index : index + RUN_FIELDS]
+                for fields in current._touched(start, end):
+                    low, high, source, begin, _, _ = fields
                     low, high = max(start, low), min(end, high)
                     if low >= high:
                         continue
@@ -310,7 +321,7 @@ class ReadOriginProjection:
                                 low,
                             )
                         )
-                    run_start = current.runs[index]
+                    run_start = fields[0]
                     tasks.append(
                         (current.sources[source], begin + low - run_start, begin + high - run_start)
                     )

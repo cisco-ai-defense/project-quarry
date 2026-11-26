@@ -101,7 +101,15 @@ def _feed(update: Callable[[bytes], object], value: Any) -> None:
             update(b"c")
             _feed(update, f"{kind.__module__}.{kind.__qualname__}")
             fields = dataclasses.fields(value)
-            _feed(update, {field.name: getattr(value, field.name) for field in fields})
+            values = {}
+            for field in fields:
+                item = getattr(value, field.name)
+                # An absent optional extension can explicitly retain its pre-field
+                # identity. Any supplied value still participates in the key.
+                if item is None and field.metadata.get("cache_omit_none") is True:
+                    continue
+                values[field.name] = item
+            _feed(update, values)
         else:
             raise TypeError(f"{type(value).__name__} is not a cache input")
 

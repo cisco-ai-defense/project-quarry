@@ -64,6 +64,8 @@ from quarry.integrations.content_transforms import (
     compiled_content_transform,
 )
 from quarry.integrations.message_readability import require_model_messages
+from quarry.integrations.model_head_plan import head_input, head_plan_active
+from quarry.integrations.model_window_evidence import capture_window_result
 from quarry.integrations.read_operations import (
     current_model_read,
     expression_transform_read,
@@ -136,6 +138,8 @@ class ModelExpressionTrace:
     judge_reasons: list[tuple[int, str, str]] = field(default_factory=list)
     omitted_judge_reasons: int = 0
     trim_omissions: tuple[int, int] | None = None
+    window_calls: list[tuple[int, str, dict]] = field(default_factory=list)
+    omitted_window_calls: int = 0
 
     def add_judge_reason(self, ordinal: int, alias: str, reason: str) -> None:
         """Retain reasons in evaluation order with one shared bound for calls and chunks."""
@@ -2082,6 +2086,12 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
             return MISSING
         try:
             with handoff_model_read():
+                if head_plan_active():
+                    names = _message_free_bindings(expression.children[0]) - bindings.keys()
+                    with head_input(expression.children[0], names):
+                        return await _dispatch_model_call(
+                            expression, alias, operation, arguments, context, trace
+                        )
                 return await _dispatch_model_call(
                     expression, alias, operation, arguments, context, trace
                 )
@@ -2172,7 +2182,21 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
 
     observation = current_model_read()
     if observation is not None:
-        observation.messages(arguments[0])
+        from quarry.integrations.model_inference import ModelInferenceBackend
+
+        window_owned = False
+        if operation in {"classify", "spans"} and isinstance(backend, ModelInferenceBackend):
+            method_name = (
+                "model_classify_messages" if operation == "classify" else "model_span_messages"
+            )
+            method = getattr(backend, method_name)
+            window_owned = (
+                backend._model(alias).windows is not None
+                and isinstance(method, MethodType)
+                and method.__func__ is getattr(ModelInferenceBackend, method_name)
+            )
+        if not window_owned:
+            observation.messages(arguments[0])
         if operation == "score":
             observation.value("constitution", arguments[1], slot="constitution")
             tools = arguments[2] if len(arguments) > 2 else None
@@ -2182,7 +2206,11 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
                 if operation in {"classify", "complete", "input_tokens"} and len(arguments) > 1
                 else None
             )
-        if tools is not None and (type(tools) not in (tuple, list) or len(tools)):
+        if (
+            not window_owned
+            and tools is not None
+            and (type(tools) not in (tuple, list) or len(tools))
+        ):
             observation.tools(tools)
         if operation == "split" and len(arguments) > 3 and arguments[3] is not None:
             observation.messages(arguments[3], slot="context")
@@ -2219,15 +2247,21 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         return result
     if operation == "classify":
         messages, *optional = arguments
-        result = _finite(
-            await backend.model_classify_messages(
-                alias,
-                messages,
-                optional[0] if optional else None,
-                timeout=context.limits.rule_timeout,
+        with capture_window_result(trace is not None) as window:
+            result = _finite(
+                await backend.model_classify_messages(
+                    alias,
+                    messages,
+                    optional[0] if optional else None,
+                    timeout=context.limits.rule_timeout,
+                )
             )
-        )
         _record_call(trace, context, expression, alias, operation, arguments, result)
+        if trace is not None and window is not None and window.value is not None:
+            if len(trace.window_calls) == 8:
+                trace.window_calls.pop(0)
+                trace.omitted_window_calls += 1
+            trace.window_calls.append((len(trace.calls) - 1, alias, window.value))
         return result
     if operation == "spans":
         messages, threshold = arguments
@@ -2344,7 +2378,7 @@ def build_model_result_evidence(
     arguments.extend(
         dict.fromkeys(argument for _, _, projected, _ in trace.calls for argument in projected)
     )
-    score_summary = None
+    score_summary: dict[str, Any] | None = None
     if trace.split_scores is not None:
         matches = (
             [
@@ -2423,6 +2457,31 @@ def build_model_result_evidence(
     if aggregate:
         operation = "boolean_expression" if message_aggregate else "numeric_expression"
         expression_value = matched if message_aggregate else expression_value
+    if trace.window_calls and not aggregate:
+        operands = (
+            expression.children if expression is not None and expression.kind == "compare" else ()
+        )
+        direct = (
+            len(trace.calls) == 1
+            and sum(
+                node.kind == "model_call" and str(node.value).endswith("\x1fclassify")
+                for node in operands
+            )
+            == 1
+        )
+        latest = trace.window_calls[-1]
+        if direct and latest[0] == len(trace.calls) - 1 and score_summary is None:
+            operation = "classify"
+            score_summary = {"windows": latest[2]}
+        else:
+            if score_summary is None:
+                score_summary = {}
+                operation = "numeric_expression"
+            score_summary["window_calls"] = [
+                {"call": ordinal, "model": alias, "windows": value}
+                for ordinal, alias, value in trace.window_calls
+            ]
+            score_summary["omitted_window_calls"] = trace.omitted_window_calls
     return ModelResultEvidence.bounded(
         operation=operation,
         models=models,
