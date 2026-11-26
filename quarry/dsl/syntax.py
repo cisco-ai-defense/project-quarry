@@ -189,6 +189,7 @@ SYNTAX_EXCLUSIONS = (
     SyntaxExclusion("not_expr", "not_a_public_form"),
     SyntaxExclusion("null_literal", "not_a_public_form"),
     SyntaxExclusion("number_literal", "not_a_public_form"),
+    SyntaxExclusion("negative_number_literal", "not_a_public_form"),
     SyntaxExclusion("postfix", "not_a_public_form"),
     SyntaxExclusion("primary", "not_a_public_form"),
     SyntaxExclusion("product_expr", "not_a_public_form"),

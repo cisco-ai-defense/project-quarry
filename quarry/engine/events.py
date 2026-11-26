@@ -353,11 +353,26 @@ def build_events(context: ScanContext) -> tuple[ConversationEvent, ...]:
     conv = context.conversation
     # Build the per-surface identity→ordinal maps ONCE, then O(1) membership per event
     # (was an O(N) linear scan per event → O(N²) build).
-    surface_index = _build_surface_index(conv)
+    surface_lists = {surface: getattr(conv, surface) for surface in surface_names(domain="event")}
+    occurrence_indices: dict[str, dict[int, list[int]]] = {}
+    for surface, items in surface_lists.items():
+        by_identity: dict[int, list[int]] = {}
+        for ordinal, item in enumerate(items):
+            by_identity.setdefault(id(item), []).append(ordinal)
+        occurrence_indices[surface] = by_identity
+    consumed: dict[tuple[str, int], int] = {}
     events: list[ConversationEvent] = []
     for position, obj in context.timeline:
         kind = _kind_of(obj)
-        surface_tags, ordinals = _surface_membership(obj, surface_index)
+        ordinals = {}
+        for surface, by_identity in occurrence_indices.items():
+            positions = by_identity.get(id(obj), ())
+            key = surface, id(obj)
+            occurrence = consumed.get(key, 0)
+            if occurrence < len(positions):
+                ordinals[surface] = positions[occurrence]
+                consumed[key] = occurrence + 1
+        surface_tags = frozenset(ordinals)
         msg_index = getattr(obj, "message_index", position)
         events.append(
             ConversationEvent(

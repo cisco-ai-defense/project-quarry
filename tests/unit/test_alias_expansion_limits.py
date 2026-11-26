@@ -81,12 +81,22 @@ def test_false_prefix_does_not_bypass_collection_admission(tmp_path, with_alias,
         require_rules=False,
     )
     prefix = "false and (user_messages as ns) and " if with_alias else "false and "
-    with pytest.raises(RuleValidationError, match="non-surface collection"):
-        DSLScanner(
-            replace(
-                cfg, quarry_rule_texts=('rule "Guarded" condition: ' + prefix + "(" + clause + ")",)
-            )
+    configured = replace(
+        cfg, quarry_rule_texts=('rule "Guarded" condition: ' + prefix + "(" + clause + ")",)
+    )
+    if clause in {
+        'any m in messages.transform("strip") where true',
+        'all m in messages.transform("strip") where true',
+    }:
+        # Computed message collections are now admitted. Their enclosing false
+        # prefix still controls the verdict; unknown/scalar sources below remain invalid.
+        result = DSLScanner(configured).scan_data(
+            {"messages": [{"role": "user", "content": " synthetic "}]}
         )
+        assert result.is_complete and result.rule_matches == []
+        return
+    with pytest.raises(RuleValidationError, match="non-surface collection"):
+        DSLScanner(configured)
 
 
 def test_valid_folded_model_input_keeps_runtime_short_circuiting(tmp_path):

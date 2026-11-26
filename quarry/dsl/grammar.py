@@ -89,7 +89,7 @@ DSL_GRAMMAR = r"""
 
     primary: function_call | string_position | string_count | string_set_expr | STRING_VAR -> string_var_ref | IDENTIFIER -> identifier | "(" expr ")" | value | comprehension
     atom: primary postfix* (wildcard_postfix wildcard_method?)?
-    value: STRING -> string_literal | NUMBER -> number_literal | array | "true" -> true_literal | "false" -> false_literal | "null" -> null_literal
+    value: STRING -> string_literal | NUMBER -> number_literal | "-" NUMBER -> negative_number_literal | array | "true" -> true_literal | "false" -> false_literal | "null" -> null_literal
     array: "[" [value ("," value)*] "]"
 
     // Comparison operators

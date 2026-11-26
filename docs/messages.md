@@ -138,7 +138,7 @@ overlap. Exceeding 4,000,000 range work units raises an evaluation error and lea
 incomplete. Preparation yields for cancellation and checks the active evaluation deadline.
 A failed or cancelled split cancels and joins its owned token probes before returning, including
 when its caller repeats cancellation while probe cleanup is still running.
-Compiler identity is 26 with compiled-policy format 10. Earlier compiler versions and formats
+Compiler identity is 28 with compiled-policy format 11. Earlier compiler versions and formats
 are explicitly refused; recompile their saved rule sources before loading them.
 
 Empty parts have no effect. Source-backed parts must share one source; explicitly constructed text
@@ -171,6 +171,12 @@ message sequence into the model input. For example, with a configured `normalize
 model("judge").classify(
     [item.transform("normalized") if item.role == "tool" else item for item in messages])
 ```
+
+Outside a model-input position, each projection remains one map entry. For example,
+`[messages.transform("normalized") for item in messages]` has one entry per source item;
+each entry is a message collection. Bare `len()` and `count()` measure those entries,
+and indexing or slicing selects entries without merging them. A quantifier evaluates
+the messages combined from its selected entries, as a model-input conversion does.
 
 Maps can also construct text messages from selected message fields, tool calls, or offered tools.
 The optional `if` filter runs before the projection, so excluded items are not transformed or
@@ -268,4 +274,18 @@ budget. Exceeding either budget rejects the generation.
 When a called rule orders messages with another event source, the supplied timeline must also
 order the selected conversation. Reordered, repeated or constructed selections that cannot be
 projected onto that timeline fail the rule rather than inventing an ordering. Rules that do not
-read such an ordering keep their ordinary selected-conversation behavior.
+read such an ordering keep their ordinary selected-conversation behavior. Computed message
+conditions use the same projection checks when they order selected messages with declared
+input items. A missing or invalid required timeline leaves the rule incomplete.
+
+Computed child frames keep separate value-cache keys while sharing their rule's live-value
+entry and byte limits, including values under construction. Finished and cancelled frames
+release their storage. Requested child explanations have a separate 32 MiB retention budget;
+exhausting it omits details without changing the verdict. A policy may contain at most 256
+computed child plans, with at most 16 computed frames along a nesting path.
+Snapshot admission also has a 4,096-reference work limit per child; reaching it omits
+optional child details while preserving the verdict.
+
+Decision reports include the models and text resources used by a computed source or child
+condition. Changing a model or text changes its decision-node identity; moving only a model's
+serving location changes the path's configuration digest while preserving the node identity.

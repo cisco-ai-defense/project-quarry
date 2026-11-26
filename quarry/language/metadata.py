@@ -117,6 +117,12 @@ TYPE_CONVERSIONS: tuple[tuple[PublicType, PublicType, str], ...] = (
         "`any m in messages`, is the model input that holds only that message. A message the "
         "conversation does not have is an empty model input, which makes no model call.",
     ),
+    (
+        "collection<model_input>",
+        "model_input",
+        "A message-valued map becomes one model input by combining its entries in written "
+        "order. Counting or indexing the map still addresses its entries.",
+    ),
 )
 RESOURCE_GROUPS: tuple[ResourceGroup, ...] = (
     "model",

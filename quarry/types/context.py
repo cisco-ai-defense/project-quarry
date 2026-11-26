@@ -22,16 +22,18 @@ from typing import Any
 
 import orjson
 
-from quarry.cache.message_values import MessageValueMemo
+from quarry.cache.message_values import MessageValueBudget, MessageValueMemo
 from quarry.core.conversation import Conversation
 from quarry.safety.limits import SafetyLimits
 from quarry.types.exceptions import ConversationValidationError
-from quarry.types.messages import Message, Messages, ToolCall, ToolCallTypeRegistry
+from quarry.types.messages import Message, Messages, ToolCall, ToolCallTypeRegistry, calls_of
 
 # Offending items named individually inside ONE limit's detail string before it collapses to a
 # count. Bounds the error: a 10,000-message conversation that breaches a limit on every message
 # must not build a 10,000-clause message. This caps items WITHIN a violation, not the number of
 # violations reported — every breached limit is always named.
+MAX_VALUE_EVIDENCE_BYTES = 32 * 1024 * 1024
+
 _MAX_REPORTED_ITEMS = 5
 _EXACT_CONTAINER_ERROR = (
     "conversation contains an overridable dict/list subclass; "
@@ -279,6 +281,9 @@ class ScanContext:
         # Map comprehension filters are memoized by item within one rule evaluation.
         self.map_filter_results: dict = {}
         self.message_value_memo = MessageValueMemo()
+        self.value_evidence_budget = [24]
+        self.value_evidence_memory = MessageValueBudget(MAX_VALUE_EVIDENCE_BYTES)
+        self.deferred_value_evidence = []
 
     def _enforce_limits(
         self,
@@ -431,7 +436,28 @@ class ScanContext:
         new_ctx.evaluation_warnings = []
         new_ctx.map_filter_results = {}
         new_ctx.message_value_memo = MessageValueMemo()
+        new_ctx.value_evidence_budget = [24]
+        new_ctx.value_evidence_memory = MessageValueBudget(MAX_VALUE_EVIDENCE_BYTES)
+        new_ctx.deferred_value_evidence = []
         return new_ctx
+
+    def for_messages(self, messages: Messages) -> "ScanContext":
+        """A rule-owned child frame over the selected objects and original tool envelope."""
+        context = self.copy()
+        context.conversation = Conversation._with_messages(self.conversation, messages)
+        context._timeline_cache = None
+        context.message_value_memo = MessageValueMemo(self.message_value_memo.budget)
+        context.value_evidence_budget = self.value_evidence_budget
+        context.value_evidence_memory = self.value_evidence_memory
+        context.deferred_value_evidence = self.deferred_value_evidence
+        return context
+
+    def close_message_values(self) -> None:
+        """Drop request-owned caches and unused explanation factories after evidence work."""
+        self.message_value_memo.close()
+        for holder in self.deferred_value_evidence:
+            holder.discard()
+        self.deferred_value_evidence.clear()
 
     @property
     def timeline(self) -> list[tuple[int, Message | ToolCall]]:
@@ -457,19 +483,13 @@ class ScanContext:
         timeline: list[tuple[int, Message | ToolCall]] = []
         position = 0
 
-        tool_calls_by_msg: dict[int, list[ToolCall]] = {}
-        for tc in self.conversation.tool_calls:
-            tool_calls_by_msg.setdefault(tc.message_index, []).append(tc)
-
         for msg in self.conversation.messages:
-            raw_idx = msg.message_index
             timeline.append((position, msg))
             position += 1
 
-            # A tool call is emitted right after its owning message.
-            if raw_idx in tool_calls_by_msg:
-                for tc in tool_calls_by_msg[raw_idx]:
-                    timeline.append((position, tc))
-                    position += 1
+            # A tool call is emitted right after its owning assistant message.
+            for tc in calls_of(msg):
+                timeline.append((position, tc))
+                position += 1
 
         return timeline

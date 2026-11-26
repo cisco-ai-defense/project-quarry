@@ -25,6 +25,8 @@ module decides only structure.
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields, replace
@@ -51,12 +53,16 @@ from quarry.engine.budget import (
 from quarry.engine.captures import CaptureBind, CapturePlan, CaptureTest, ElementPlan
 from quarry.engine.contracts import (
     COMPILER_VERSION,
+    MAX_COMPUTED_CONDITION_DEPTH,
+    MAX_COMPUTED_CONDITIONS,
     ClosedPlan,
     CompiledRuleArtifact,
+    ComputedConditionPlan,
     DecisionTree,
     FlowCandidate,
     FlowRequirement,
     TreeNode,
+    validate_child_artifact_limits,
 )
 from quarry.engine.decision import Parts, boot_diagram_is_decided, reads
 from quarry.engine.desugar import (
@@ -121,6 +127,9 @@ class _Tables:
 
     def lists_spans(self, node, scope=None) -> bool:
         return self._f.lists_spans(node, scope)
+
+    def contains_real_model_call(self, node) -> bool:
+        return self._f._contains_model_call(node, service_only=True)
 
     def model_calls(self, node):
         """Return the model calls in the node."""
@@ -313,6 +322,156 @@ class _Tables:
         if isinstance(coll, MapComprehension):
             raise UnsupportedConstruct(k._MAP_COMPREHENSION_FORM)
         raise UnsupportedConstruct(f"comprehension over non-surface collection {coll!r}")
+
+    def message_value(self, node, scope=()) -> C.MessageValue:
+        """Resolve a non-surface source once into bounded, typed message-value data."""
+        value = self._maybe_message_value(node, scope)
+        if value is None:
+            raise UnsupportedConstruct("a computed message collection must produce Messages")
+        return value
+
+    def _maybe_message_value(self, node, scope=(), *, convert_groups=True) -> C.MessageValue | None:
+        """Leave ordinary scalar size expressions to their existing compiler routes."""
+        from quarry.engine.atoms import (
+            validate_constructed_message_graph,
+            validate_model_expression,
+            validate_transform_expression_graph,
+        )
+        from quarry.engine.compiler import Scope, _convert
+        from quarry.types.adapter_transforms import adapter_transform_reference_parts
+        from quarry.types.transforms import MAX_TRANSFORM_CHAIN, ContentTransform
+
+        model_scope = Scope()
+        for binding in scope:
+            model_scope = model_scope.bind(binding.name, binding.surface)
+        try:
+            expression, result_type = self._f._lower_model_expression(node, model_scope)
+        except UnsupportedConstruct:
+            if isinstance(node, MapComprehension):
+                raise UnsupportedConstruct(self._k._MAP_COMPREHENSION_FORM) from None
+            raise
+        if not convert_groups:
+            if result_type == "Messages[]":
+                return None
+            if result_type in {"Message", "AssistantMessage"}:
+                raise UnsupportedConstruct(
+                    "a whole message has several texts; measure its content field"
+                )
+        expression, result_type = _convert(expression, result_type, {"Messages"})
+        if result_type != "Messages":
+            return None
+        validate_model_expression(expression)
+        validate_constructed_message_graph(expression)
+        validate_transform_expression_graph(
+            expression,
+            maximum=MAX_TRANSFORM_CHAIN,
+            validate_plan=ContentTransform.from_canonical_json,
+            validate_reference=adapter_transform_reference_parts,
+        )
+        names = set()
+        pending = [(expression, frozenset())]
+        while pending:
+            part, local = pending.pop()
+            if part.kind == "binding" and part.value not in local:
+                names.add(part.value)
+            for index, child in enumerate(part.children):
+                child_local = local
+                if (
+                    part.kind
+                    in {
+                        "map",
+                        "message_map",
+                        "message_select",
+                        "split_any",
+                        "span_any",
+                        "span_all",
+                        "span_filter",
+                    }
+                    and index
+                ):
+                    child_local = local | {part.value}
+                pending.append((child, child_local))
+        variables = tuple(binding.var for binding in scope if binding.name in names)
+        identity = repr(expression.content_key()).encode("utf-8", "surrogatepass")
+        surface = next(
+            (binding.surface for binding in scope if binding.var in variables), "messages"
+        )
+        return C.MessageValue(
+            hashlib.sha256(identity).hexdigest(), expression, variables, node, surface
+        )
+
+    def check_value_body(self, node, value: C.MessageValue) -> None:
+        """A value body may read that value and ordinary hoistable root facts."""
+        original = render_condition(cast(ConditionNode, value.syntax))
+
+        def visit(current, in_flow=False):
+            charge(1)
+            if _same_value_syntax(current, value.syntax, original):
+                return
+            if isinstance(current, AnyComprehension) and current.variable.startswith(
+                COMPOSED_CHECK
+            ):
+                visit(current.collection, in_flow)
+                return
+            in_flow = in_flow or isinstance(current, FlowOp)
+            if isinstance(current, FunctionCall) and current.name in {
+                "called_tool",
+                "called_tools",
+                "user_said",
+                "assistant_said",
+            }:
+                if in_flow:
+                    raise UnsupportedConstruct(
+                        "a temporal value condition cannot read the original conversation"
+                    )
+                return
+            if (
+                isinstance(current, Identifier)
+                and current.name in self._k._EVENT_SURFACES
+                and current.name not in EVENT_SURFACES.get()
+            ) or (
+                isinstance(current, FunctionCall)
+                and current.name in {*self._k._EVENT_SURFACES, *self._k._ACCESSORS}
+            ):
+                raise UnsupportedConstruct(
+                    "a computed message condition must read its own value as its conversation"
+                )
+            for field_name in condition_child_fields(current):
+                child = getattr(current, field_name)
+                for item in child if isinstance(child, list | tuple) else (child,):
+                    if isinstance(item, ConditionNode):
+                        visit(item, in_flow)
+
+        visit(node)
+
+    def message_value_size(self, node, scope):
+        """A non-surface len/count source, retaining evaluation even for a constant result."""
+        k = self._k
+        if not isinstance(node, BinaryOp) or node.operator not in k._COMPARISONS:
+            return None
+        call, number, _ = k._Compiler._split_scalar(node.left, node.right)
+        if (
+            call is None
+            or number is None
+            or call.name not in {"len", "count"}
+            or len(call.args) != 1
+        ):
+            return None
+        if isinstance(call.args[0], FilterComprehension):
+            return None
+        if self.is_chunked(call.args[0]):
+            return None
+        if self.is_size(node):
+            return None
+        try:
+            self.resolve_collection(call.args[0])
+            return None
+        except UnsupportedConstruct:
+            pass
+        value = self._maybe_message_value(call.args[0], scope, convert_groups=False)
+        if value is None:
+            return None
+        return value
 
     def is_size(self, node) -> bool:
         """Return whether the node is a size comparison."""
@@ -546,9 +705,13 @@ class _Lowerer:
                 # The comprehension (or call) the quantifier comes from owns its gate, filter
                 # and body atoms, as when lowering walked the rule's syntax.
                 with self._f.activate_source(getattr(coll, "src", None)):
+                    if isinstance(coll, C.Events) and coll.value is not None:
+                        return self.computed(f, coll.value, at)
                     return self.quant(f, at) if isinstance(f, C.Quant) else self.count(f, at)
-            case C.Size(node):
+            case C.Size(node, value):
                 with self._f.activate_source(node):
+                    if value is not None:
+                        return self.computed(f, value, at)
                     return self._f._count_collection_macro(node)
             case C.ToolsExists(var, body, q, src):
                 self._f.has_static = True
@@ -581,6 +744,8 @@ class _Lowerer:
                 return self.bound.at
             case C.Closed(body):
                 return self.closed_atom(body)
+            case C.Parent(body):
+                return self.closed_atom(body)
         raise TypeError(f)
 
     def closed_atom(self, body: C.Formula) -> T.Formula:
@@ -593,6 +758,80 @@ class _Lowerer:
         atom = self._lower_closed(body)
         self._closed_atoms[id(body)] = (body, atom)
         return atom
+
+    def computed(self, formula: C.Formula, value: C.MessageValue, at: str | None) -> T.Formula:
+        """Compile the complete value condition with the ordinary child-frame compiler."""
+        if len(value.variables) > 1:
+            raise UnsupportedConstruct("a computed message source can read one bound element")
+        if value.variables:
+            self._require_current(value.variables[0], at)
+        family = getattr(self._f, "_computed_family", None)
+        if family is None:
+            family = self._f._computed_family = _ComputedFamily()
+        family.plans += 1
+        if family.plans > MAX_COMPUTED_CONDITIONS or family.depth >= MAX_COMPUTED_CONDITION_DEPTH:
+            raise UnsupportedConstruct("computed message conditions exceed their graph limit")
+        child_probes: list[FlowProbe] = []
+        child_ordering: list[FlowOp] = []
+        child_core = _rebase_value_core(
+            formula, value, self._f, probes_out=child_probes, ordering_out=child_ordering
+        )
+        family.depth += 1
+        try:
+            result, limited, _ = _attempt(
+                self._f.rule,
+                None,
+                True,
+                self._f._response_schemas,
+                self._f._transforms,
+                core_override=child_core,
+                probes_override=child_probes,
+                ordering_override=child_ordering,
+                aliases=self._f._node_aliases,
+                family=family,
+                nested=True,
+            )
+        finally:
+            family.depth -= 1
+        if not result.ok:
+            reason = "; ".join(d.message for d in result.diagnostics.errors)
+            if limited:
+                raise DFAConstructionLimit(reason)
+            raise UnsupportedConstruct(reason)
+        artifact = result.artifact
+        assert artifact is not None
+        self._f.used_parameters.update(spec.name for spec in artifact.parameter_schema)
+        pending = [value.expression]
+        calls_model = False
+        while pending:
+            node = pending.pop()
+            if node.kind == "parameter":
+                self._f.used_parameters.add(str(node.value))
+            calls_model |= node.kind in {"model_call", "legacy_call", "model_transform"}
+            pending.extend(node.children)
+        cost = max(
+            (spec.cost for spec in artifact.atom_specs.values()),
+            key=lambda cost: cost.rank,
+            default=Cost.PURE,
+        )
+        if calls_model:
+            cost = Cost.LLM
+        spec = self._f._intern_atom(
+            make_atom(
+                domain=AtomDomain.EVENT if value.variables else AtomDomain.STATIC,
+                selector=value.surface if value.variables else "messages",
+                value_expr_key=f"computed_messages:{value.key}:{artifact.dfa_hash}",
+                predicate="external",
+                cost=cost,
+                detector="computed_messages",
+                evidence_policy="model",
+            )
+        )
+        self._f.computed_conditions[spec.atom_id] = ComputedConditionPlan(
+            value.expression, artifact
+        )
+        self._f.has_static |= not value.variables
+        return T.Atom(spec.atom_id)
 
     def _lower_closed(self, body: C.Formula) -> T.Formula:
         outer, self._past = self._past, _Past()
@@ -1361,6 +1600,148 @@ def _plan_joins(f: C.Formula, candidate: str | None) -> C.Formula:
     return f
 
 
+@dataclass
+class _ComputedFamily:
+    """One aggregate child-plan bound shared by the complete compile attempt."""
+
+    plans: int = 0
+    depth: int = 0
+
+
+def _same_value_syntax(node, source, rendered: str) -> bool:
+    if type(node) is not type(source):
+        return False
+    for discriminator in ("name", "operator", "operation"):
+        if getattr(node, discriminator, None) != getattr(source, discriminator, None):
+            return False
+    return render_condition(node) == rendered
+
+
+def _rebase_value_core(
+    formula: C.Formula,
+    source: C.MessageValue,
+    factory,
+    *,
+    probes_out: list[FlowProbe] | None = None,
+    ordering_out: list[FlowOp] | None = None,
+) -> C.Formula:
+    """Resolve explicit reads of the selected value to the child frame, before lowering."""
+    from quarry.engine.atoms import ModelExpression
+
+    aliases = factory._node_aliases
+    tables = _Tables(factory)
+    indexed_variables = itertools.count()
+    flow_sources: set[int] = set()
+    rebased_flow_sources: dict[int, FlowOp] = {}
+    rendered = render_condition(cast(ConditionNode, source.syntax))
+
+    def syntax(node):
+        charge(1)
+        if _same_value_syntax(node, source.syntax, rendered):
+            return aliases.derive(Identifier("messages"), node)
+        changes = {}
+        for name in condition_child_fields(node):
+            value = getattr(node, name)
+            if isinstance(value, ConditionNode):
+                rewritten = syntax(value)
+            elif isinstance(value, list | tuple):
+                items = [
+                    syntax(item) if isinstance(item, ConditionNode) else item for item in value
+                ]
+                rewritten = items if isinstance(value, list) else tuple(items)
+            else:
+                continue
+            if rewritten is not value:
+                changes[name] = rewritten
+        return aliases.derive(replace(node, **changes), node) if changes else node
+
+    def flow_source(node):
+        if id(node) not in rebased_flow_sources:
+            rebased_flow_sources[id(node)] = syntax(node)
+        return rebased_flow_sources[id(node)]
+
+    def expression(node):
+        if node.content_key() == source.expression.content_key():
+            return ModelExpression("messages")
+        return replace(node, children=tuple(expression(child) for child in node.children))
+
+    def message_value(value):
+        if value.key == source.key:
+            return None
+        transformed = expression(value.expression)
+        key = hashlib.sha256(
+            repr(transformed.content_key()).encode("utf-8", "surrogatepass")
+        ).hexdigest()
+        return replace(value, key=key, expression=transformed, syntax=syntax(value.syntax))
+
+    def collection(coll):
+        if not isinstance(coll, C.Events) or coll.value is None:
+            return coll
+        return replace(coll, value=message_value(coll.value))
+
+    def core(node):
+        charge(1)
+        changes = {}
+        for descriptor in fields(node):
+            name = descriptor.name
+            value = getattr(node, name)
+            if isinstance(value, C.Rel) and value.source is not None:
+                flow_sources.add(id(value.source))
+                changes[name] = replace(value, source=flow_source(value.source))
+            if isinstance(value, C.Formula):
+                changes[name] = core(value)
+            elif (
+                isinstance(value, tuple) and value and all(isinstance(p, C.Formula) for p in value)
+            ):
+                changes[name] = tuple(core(part) for part in value)
+            elif name == "coll":
+                changes[name] = collection(value)
+            elif name == "value" and isinstance(value, C.MessageValue):
+                changes[name] = message_value(value)
+            elif name in {"node", "collection"} and isinstance(value, ConditionNode):
+                changes[name] = syntax(value)
+        rewritten = replace(node, **changes) if changes else node
+        if isinstance(rewritten, C.Static) and not tables.contains_model_call(rewritten.node):
+            indexed = tables.indexed_read(rewritten.node)
+            if indexed is not None:
+                surface, index = indexed
+                var = f"\x00value_index{next(indexed_variables)}"
+                return C.Quant(
+                    "exists",
+                    var,
+                    C.Events(surface, index=index, src=rewritten.node),
+                    None,
+                    C.Pred(tables.drop_index(rewritten.node, source_name(var)), var, surface),
+                )
+        return rewritten
+
+    rebased = core(formula)
+    if probes_out is not None:
+
+        def alternative(alt):
+            updates = {"body": core(alt.body)}
+            if isinstance(alt, _EventAlt):
+                updates["coll"] = collection(alt.coll)
+            return replace(alt, **updates)
+
+        for probe in factory._flow_probes:
+            if id(probe.source) in flow_sources:
+                probes_out.append(
+                    replace(
+                        probe,
+                        source=flow_source(probe.source),
+                        candidates=tuple(alternative(alt) for alt in probe.candidates),
+                        static_body=None if probe.static_body is None else core(probe.static_body),
+                        static_sustained=tuple(core(body) for body in probe.static_sustained),
+                    )
+                )
+    if ordering_out is not None:
+        ordering_out.extend(
+            flow_source(node) for node in factory._ordering_sources if id(node) in flow_sources
+        )
+    return rebased
+
+
 def compile_core(
     rule,
     *,
@@ -1388,6 +1769,17 @@ def compile_core(
     def attempt_budget() -> WorkBudget:
         return parent_budget if parent_budget is not None else WorkBudget(max_work)
 
+    def checked(result):
+        if result.artifact is not None:
+            try:
+                validate_child_artifact_limits(result.artifact)
+            except ValueError as exc:
+                result.diagnostics.error(
+                    str(exc), ErrorCategory.UNSUPPORTED, SourceRef(rule_name=result.rule_name)
+                )
+                return replace(result, artifact=None)
+        return result
+
     result, limited, candidates = _compile(
         rule, attempt_budget(), None, decompose, response_schemas, transforms
     )
@@ -1401,14 +1793,14 @@ def compile_core(
         if parent_budget is not None:
             parent_budget.check()
     if not limited:
-        return result
+        return checked(result)
     retries = attempt_budget()
     for var in candidates:
         retry, _, _ = _compile(rule, retries, var, False, response_schemas, transforms)
         if parent_budget is not None:
             parent_budget.check()
         if retry.ok:
-            return retry
+            return checked(retry)
     return result
 
 
@@ -1531,6 +1923,13 @@ def _attempt(
     decompose: bool,
     response_schemas: Mapping[str, str] | None,
     transforms: Mapping[str, TransformConfig] | None,
+    *,
+    core_override: C.Formula | None = None,
+    probes_override: list[FlowProbe] | None = None,
+    ordering_override: list[FlowOp] | None = None,
+    aliases=None,
+    family: _ComputedFamily | None = None,
+    nested: bool = False,
 ):
     """One compilation, with ``bind`` decided per candidate when given. Returns the result,
     whether it failed at a construction limit, and the elements a retry may decide per
@@ -1541,6 +1940,9 @@ def _attempt(
     from quarry.engine.compiler import CompileResult, _Compiler, reject_unguarded_refusal_reads
 
     c = _Compiler(rule, response_schemas, transforms)
+    c._computed_family = family or _ComputedFamily()
+    if aliases is not None:
+        c._node_aliases = aliases
     source = SourceRef(rule_name=c.rule_name)
     condition = getattr(rule, "condition", None)
     if condition is None:
@@ -1578,12 +1980,23 @@ def _attempt(
         reject_unguarded_refusal_reads(condition)
         flow_probes: list[FlowProbe] = []
         ordering_sources: list[FlowOp] = []
-        c, semantic_core = _desugar(
-            condition, c, probes_out=flow_probes, ordering_out=ordering_sources
-        )
+        if core_override is None:
+            c, semantic_core = _desugar(
+                condition, c, probes_out=flow_probes, ordering_out=ordering_sources
+            )
+        else:
+            semantic_core = core_override
+            flow_probes.extend(probes_override or ())
+            ordering_sources.extend(ordering_override or ())
+        c._flow_probes = tuple(flow_probes)
+        c._ordering_sources = tuple(ordering_sources)
         execution = _execution_core(c, semantic_core)
         split_root = decompose and bind is None and not c._capture_var
-        collect_plan = c.compile_collect(rule.collect) if getattr(rule, "collect", None) else None
+        collect_plan = (
+            c.compile_collect(rule.collect)
+            if not nested and getattr(rule, "collect", None)
+            else None
+        )
         lowerer = _Lowerer(c, mixed_clock_possible=mixed_clock_possible)
         try:
             if bind is not None:
@@ -1605,6 +2018,11 @@ def _attempt(
                 ) from None
             split_root = False
             c = _Compiler(rule, response_schemas, transforms)
+            c._computed_family = family or _ComputedFamily()
+            c._flow_probes = tuple(flow_probes)
+            c._ordering_sources = tuple(ordering_sources)
+            if aliases is not None:
+                c._node_aliases = aliases
             if collect_plan is not None:
                 collect_plan = c.compile_collect(rule.collect)
             lowerer = _Lowerer(c, mixed_clock_possible=mixed_clock_possible)
@@ -1642,7 +2060,7 @@ def _attempt(
         return CompileResult(c.rule_name, None, c.diagnostics), False, []
 
     unused_parameters = sorted(set(c.parameters) - c.used_parameters)
-    if unused_parameters:
+    if unused_parameters and not nested:
         c.diagnostics.error(
             "declared parameters are not used: " + ", ".join(unused_parameters),
             ErrorCategory.REFERENCE,
@@ -1657,12 +2075,16 @@ def _attempt(
 
     by_id = {s.atom_id: s for s in c.atoms.specs}
 
-    def cheapest_first(atom_id: str) -> tuple[int, bool]:
+    def cheapest_first(atom_id: str) -> tuple[int, bool, bool]:
         # The executor's grounding order: by cost, a check decided by an evaluation of its
         # own after the plain checks of its cost. The root's guard tests its checks in this
         # order, so walking it grounds only checks a cheapest-first loop would ground.
         spec = by_id[atom_id]
-        return spec.cost.rank, atom_id in lowerer.closed or atom_id in c.tool_quantifiers
+        return (
+            spec.cost.rank,
+            atom_id in c.computed_conditions,
+            atom_id in lowerer.closed or atom_id in c.tool_quantifiers,
+        )
 
     try:
         dfa = automaton(pattern, tuple(lowerer._past.defs), cheapest_first if split_root else None)
@@ -1745,13 +2167,18 @@ def _attempt(
         temporal=c.temporal,
         notes=tuple(notes),
         capture_plan=capture_plan,
-        parameter_schema=tuple(getattr(rule, "parameters", ())),
+        parameter_schema=tuple(
+            spec
+            for spec in getattr(rule, "parameters", ())
+            if not nested or spec.name in c.used_parameters
+        ),
         collect_plan=collect_plan,
         tool_quantifiers=c.tool_quantifiers,
         closed_conditions=closed_conditions,
         split_checks={
             atom_id: check for atom_id, check in c.split_checks.items() if atom_id in retained_atoms
         },
+        computed_conditions=c.computed_conditions,
         full_trace_proof=full_trace_proof,
         decision_tree=decision_tree,
     )

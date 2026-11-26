@@ -149,6 +149,37 @@ def _model_scalar(value: Any) -> str | int | float | bool | None:
     return _excerpt(str(value))
 
 
+@dataclass
+class DeferredValueEvidence:
+    """Resolve bounded, explicitly requested child details after the verdict deadline.
+
+    The factory owns runtime references only until the first resolution. Decision records
+    discard this holder entirely, so excerpts never enter their independently stored data.
+    """
+
+    factory: Callable[[], dict[str, Any]] | None = field(repr=False)
+    value: dict[str, Any] | None = field(default=None, repr=False)
+    release: Callable[[], None] | None = field(default=None, repr=False)
+
+    def discard(self) -> None:
+        """Release an unused runtime snapshot without reading any of its message fields."""
+        self.factory = None
+        if self.release is not None:
+            release, self.release = self.release, None
+            release()
+
+    def resolve(self) -> dict[str, Any] | None:
+        if self.factory is not None:
+            factory, self.factory = self.factory, None
+            try:
+                self.value = factory()
+            except Exception:
+                self.value = {"unavailable": True}
+            finally:
+                self.discard()
+        return self.value
+
+
 @dataclass(frozen=True)
 class ModelResultEvidence:
     """One bounded model-derived boolean atom retained for explain output."""
@@ -176,6 +207,10 @@ class ModelResultEvidence:
     # Logical calls include calls without a reason, so composed evidence can rebase
     # retained ordinals without guessing from the bounded reason list. Omitted by to_dict.
     _call_count: int = field(default=0, repr=False, compare=False)
+
+    # Runtime-only explanation payload; deliberately excluded from to_dict and path records.
+    value_details: DeferredValueEvidence | None = field(default=None, compare=False, repr=False)
+    omitted_value_details: bool = False
 
     @classmethod
     def bounded(
@@ -370,6 +405,8 @@ def describe_atom(spec) -> str:
     semantics = _describe_semantics(spec)
     number = _describe_number(spec.number)
 
+    if spec.detector == "computed_messages":
+        return "condition over a computed message selection"
     if spec.model_expression is not None or predicate in ("external", "model_scan", "model_score"):
         detector = spec.detector or "external"
         argument = f'"{spec.detector_arg}", ' if spec.detector_arg else ""
@@ -560,10 +597,12 @@ class RuleEvidence:
     omitted_steps: int = 0
     atoms: tuple[AtomEvidence, ...] = ()
     omitted_atoms: int = 0
+    value_conditions: tuple[dict[str, Any], ...] = ()
+    omitted_value_conditions: int = 0
 
     def to_dict(self, node_ids: Mapping[str | None, str] | None = None) -> dict[str, Any]:
         """Return the stable JSON-ready rule evidence shape."""
-        return {
+        result = {
             "rule_name": self.rule_name,
             "matched": self.matched,
             "reason": self.reason,
@@ -576,6 +615,10 @@ class RuleEvidence:
             "atoms": [atom.to_dict(node_ids) for atom in self.atoms],
             "omitted_atoms": self.omitted_atoms,
         }
+        if self.value_conditions or self.omitted_value_conditions:
+            result["value_conditions"] = list(self.value_conditions)
+            result["omitted_value_conditions"] = self.omitted_value_conditions
+        return result
 
 
 def _event_content(event: ConversationEvent) -> str | None:
@@ -855,6 +898,25 @@ def build_evidence(
     ordered = sorted(atoms, key=lambda atom: rank[atom.status])
     retained = tuple(ordered[:_MAX_OBSERVED_ATOMS])
     retained_results = model_results[:_MODEL_RESULTS_LIMIT]
+    values = []
+    seen_values = set()
+    omitted_values = 0
+    for entry in record.entries:
+        evidence = entry[-1]
+        if not isinstance(evidence, ModelResultEvidence):
+            continue
+        if evidence.omitted_value_details:
+            omitted_values += 1
+        if evidence.value_details is None:
+            continue
+        holder = evidence.value_details
+        if id(holder) in seen_values:
+            continue
+        seen_values.add(id(holder))
+        if len(values) < _MAX_OBSERVED_ATOMS:
+            details = holder.resolve()
+            if details is not None:
+                values.append({"atom_id": entry[0], **details})
     return RuleEvidence(
         rule_name=rule_name,
         matched=matched,
@@ -867,4 +929,6 @@ def build_evidence(
         omitted_steps=omitted_steps,
         atoms=retained,
         omitted_atoms=len(atoms) - len(retained),
+        value_conditions=tuple(values),
+        omitted_value_conditions=omitted_values + max(0, len(seen_values) - len(values)),
     )
