@@ -247,7 +247,9 @@ _MODEL_FIELD_TYPES: dict[str, dict[str, str]] = {
         "arguments": "object",
         "message_index": "int",
         "function": "ToolCallFunction",
+        "response": "ToolResponse",
     },
+    "ToolResponse": {"result": "string", "content": "string", "name": "string"},
     "ToolCallFunction": {"name": "string", "arguments": "string"},
     # `tool_calls` reads as missing on a message that is not an assistant message.
     "Message": {
@@ -706,6 +708,8 @@ class _Compiler:
         ``ChunkQuant`` leaves): a chunked-scoring comprehension or count, a model check, a
         system-prompt test, a collection-count macro or a top-level function."""
         scope = Scope()
+        if self.local_call_condition(node):
+            return self._model_predicate_atom(node, scope)
         if isinstance(node, AnyComprehension) and node.variable.startswith(COMPOSED_CHECK):
             return self.compile_composed_check(node, scope)
         if not (self._contains_model_call(node) or self._reads_spans(node)):
@@ -1476,6 +1480,8 @@ class _Compiler:
         return T.Atom(self._intern_atom(spec).atom_id)
 
     def compile_step(self, node, surface: str, scope: Scope) -> T.Formula:
+        if self.local_call_condition(node):
+            return self._model_predicate_atom(node, scope, surface, event_bound=True)
         if isinstance(node, (AnyComprehension, AllComprehension)) and self.lists_spans(
             node.collection, scope
         ):
@@ -2079,6 +2085,55 @@ class _Compiler:
 
         return name
 
+    @staticmethod
+    def local_call_collection(node) -> bool:
+        """Recognize a message-owned source without reclassifying global call surfaces."""
+        while isinstance(node, FilterComprehension) or (
+            isinstance(node, FunctionCall) and node.name == "_slice" and node.args
+        ):
+            node = node.collection if isinstance(node, FilterComprehension) else node.args[0]
+        return (
+            isinstance(node, FieldAccess)
+            and node.fields == ["tool_calls"]
+            and not (isinstance(node.base, Identifier) and node.base.name == "messages")
+        )
+
+    @classmethod
+    def local_call_condition(cls, node) -> bool:
+        """Keep local value questions as leaves of the enclosing temporal condition."""
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, FunctionCall) and current.name in _EXTERNAL_FUNCS:
+                # Legacy calls own their model-input validation and diagnostics.
+                continue
+            if isinstance(current, (AnyComprehension, AllComprehension)):
+                if cls.local_call_collection(current.collection):
+                    return True
+                continue
+            if cls.local_call_aggregate(current):
+                return True
+            if (
+                isinstance(current, FunctionCall)
+                and current.name == "_index"
+                and current.args
+                and cls.local_call_collection(current.args[0])
+            ):
+                return True
+            pending.extend(iter_condition_children(current))
+        return False
+
+    @classmethod
+    def local_call_aggregate(cls, node) -> bool:
+        if isinstance(node, (AnyComprehension, AllComprehension, FilterComprehension)):
+            return cls.local_call_collection(node.collection)
+        return (
+            isinstance(node, FunctionCall)
+            and node.name in {"len", "count"}
+            and len(node.args) == 1
+            and cls.local_call_collection(node.args[0])
+        )
+
     def _lower_model_expression(
         self,
         node,
@@ -2168,6 +2223,8 @@ class _Compiler:
                 value, value_type = self._lower_model_expression(node.args[0], scope)
                 if value_type == "Messages[]":
                     return ModelExpression("length", None, (value,)), "int"
+                if value_type == "ToolCall[]" and self.local_call_collection(node.args[0]):
+                    return ModelExpression("call_count", None, (value,)), "int"
             if node.name == "_transform":
                 if len(node.args) != 2:
                     raise UnsupportedConstruct("messages.transform() takes one literal name")
@@ -2274,7 +2331,7 @@ class _Compiler:
                 return ModelExpression("text_ref", name), "TextRef"
             if node.name == "_slice" and len(node.args) == 3:
                 base, base_type = self._lower_model_expression(node.args[0], scope)
-                if base_type not in {"Messages", "Messages[]"}:
+                if base_type not in {"Messages", "Messages[]", "ToolCall[]"}:
                     raise UnsupportedConstruct("only Messages values can be sliced for a model")
                 start = self._model_slice_bound(node.args[1])
                 stop = self._model_slice_bound(node.args[2])
@@ -2338,7 +2395,46 @@ class _Compiler:
             return self._lower_span_quantifier(node, scope), "bool"
 
         if isinstance(node, FilterComprehension):
+            if self.local_call_collection(node.collection):
+                if (node.output_variable or node.variable) != node.variable:
+                    raise UnsupportedConstruct("a local call filter must retain its bound item")
+                source, source_type = self._lower_model_expression(node.collection, scope)
+                if source_type != "ToolCall[]":
+                    raise UnsupportedConstruct("a local call filter needs message-owned calls")
+                predicate, predicate_type = self._lower_model_expression(
+                    node.condition, scope.bind(node.variable, _MAP_ITEM_SURFACE, "ToolCall")
+                )
+                if predicate_type != "bool":
+                    raise UnsupportedConstruct("a local call filter must be Boolean")
+                return ModelExpression(
+                    "call_filter", node.variable, (source, predicate)
+                ), source_type
             return self._lower_message_selection(node, scope)
+
+        if isinstance(node, (AnyComprehension, AllComprehension)) and self.local_call_collection(
+            node.collection
+        ):
+            source, source_type = self._lower_model_expression(node.collection, scope)
+            if source_type != "ToolCall[]":
+                raise UnsupportedConstruct("a local call quantifier needs message-owned calls")
+            if (
+                isinstance(node, AllComprehension)
+                and not isinstance(node.collection, FilterComprehension)
+                and self._contains_model_call(node.condition, service_only=True)
+            ):
+                raise UnsupportedConstruct(
+                    "model calls are not supported inside all comprehensions"
+                )
+            body, body_type = self._lower_model_expression(
+                node.condition, scope.bind(node.variable, _MAP_ITEM_SURFACE, "ToolCall")
+            )
+            if body_type != "bool":
+                raise UnsupportedConstruct("a local call quantifier body must be Boolean")
+            return ModelExpression(
+                "call_any" if isinstance(node, AnyComprehension) else "call_all",
+                node.variable,
+                (source, body),
+            ), "bool"
 
         if isinstance(node, ModelCall):
             if node.result_type.endswith("[]") and not allow_collection_source:
@@ -2717,7 +2813,9 @@ class _Compiler:
                 continue
             root = _field_root_name(field_node)
             if root is None or scope.resolve_element(root) != _MAP_ITEM_SURFACE:
-                continue
+                _, base_type, fields = self._model_field_parts(field_node, scope)
+                if base_type != "ToolCall" or fields[:1] != ["arguments"]:
+                    continue
             value, _ = self._lower_model_expression(field_node, scope)
             wanted = None if value_node.value is None else str(value_node.value)
             test = ModelExpression("text_equals", wanted, (value,))
@@ -2730,6 +2828,10 @@ class _Compiler:
         decoded object, and ``c.arguments.*`` or a list value is one value on each line."""
 
         lowered, lowered_type = self._lower_model_expression(node, scope)
+        if isinstance(node, FieldAccess) and lowered_type in _STEP_TEXT_TYPES:
+            _base, base_type, fields = self._model_field_parts(node, scope)
+            if base_type == "ToolCall" and fields[:1] == ["arguments"]:
+                return ModelExpression("field_text", None, (lowered,)), "string"
         root = _field_root_name(node) if isinstance(node, FieldAccess) else None
         if root is None or scope.resolve_element(root) != _MAP_ITEM_SURFACE:
             return lowered, lowered_type
@@ -2795,6 +2897,9 @@ class _Compiler:
                 return ModelExpression("span_text", fields[0], (base,))
             if base_type == "ToolCall":
                 path = ".".join(fields)
+                if fields in (["response", "result"], ["response", "content"]):
+                    response = ModelExpression("field", "response", (base,))
+                    return ModelExpression("span_text", fields[-1], (response,))
                 if path == "raw_arguments" or path.startswith("arguments."):
                     return ModelExpression("span_text", path, (base,))
         value, value_type = self._lower_model_expression(node, scope)
@@ -4390,6 +4495,8 @@ class _Compiler:
 
         if isinstance(node, FunctionCall) and node.name == "join":
             return self._lower_join(node, scope)
+        if isinstance(node, FilterComprehension) and self.local_call_collection(node.collection):
+            raise UnsupportedConstruct("unsupported model expression FilterComprehension")
         return self._lower_model_text(node, scope)
 
     def _lower_join(self, node: FunctionCall, scope: Scope) -> tuple[ModelExpression, str]:

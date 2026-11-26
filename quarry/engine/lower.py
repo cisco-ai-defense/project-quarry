@@ -125,6 +125,12 @@ class _Tables:
     def reads_spans(self, node) -> bool:
         return self._k._Compiler._reads_spans(node)
 
+    def local_call_condition(self, node) -> bool:
+        return self._f.local_call_condition(node)
+
+    def local_call_aggregate(self, node) -> bool:
+        return self._f.local_call_aggregate(node)
+
     def lists_spans(self, node, scope=None) -> bool:
         return self._f.lists_spans(node, scope)
 
@@ -386,6 +392,9 @@ class _Tables:
                         "span_any",
                         "span_all",
                         "span_filter",
+                        "call_filter",
+                        "call_any",
+                        "call_all",
                     }
                     and index
                 ):

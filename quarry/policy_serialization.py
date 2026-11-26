@@ -676,6 +676,35 @@ def _atom_from_wire(raw: object, index: int) -> AtomSpec:
             for turn in _list(value["constructed_input"], f"{name}.constructed_input")
         )
         kwargs["model_expression"] = model_expression
+        if model_expression is not None:
+            free = set()
+            local_calls = False
+            pending = [(model_expression, frozenset())]
+            while pending:
+                node, bound = pending.pop()
+                local_calls |= node.kind in {"call_count", "call_filter", "call_any", "call_all"}
+                if node.kind == "binding" and node.value not in bound:
+                    free.add(node.value)
+                for index, child in enumerate(node.children):
+                    local = bound
+                    if index and node.kind in {
+                        "map",
+                        "message_map",
+                        "message_select",
+                        "split_any",
+                        "span_filter",
+                        "span_any",
+                        "span_all",
+                        "call_filter",
+                        "call_any",
+                        "call_all",
+                    }:
+                        local = bound | {node.value}
+                    pending.append((child, local))
+            if local_calls and (
+                len(free) > 1 or bool(free) != (kwargs["domain"] is AtomDomain.EVENT)
+            ):
+                raise ValueError("local call bindings must match the current-event domain")
         return AtomSpec(**kwargs)
     except (TypeError, ValueError) as exc:
         raise _fail(f"{name} is incompatible with format_version {FORMAT_VERSION}") from exc
@@ -1284,7 +1313,15 @@ def _check_computed_source(
             free_bindings.add(expression.value)
         for index, child in enumerate(expression.children):
             local = bound
-            if index and expression.kind in {"map", "message_map", "message_select", "split_any"}:
+            if index and expression.kind in {
+                "map",
+                "message_map",
+                "message_select",
+                "split_any",
+                "call_filter",
+                "call_any",
+                "call_all",
+            }:
                 local = bound | {expression.value}
             pending.append((child, local))
     spec = artifact.atom_specs[atom_id]
