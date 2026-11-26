@@ -747,6 +747,10 @@ class _Lowerer:
                     return self._f.compile_closed(node)
             case C.Same(of_var=of_var):
                 raise NeedsBinding(of_var)
+            case C.Join(bound_var=bound_var):
+                # Flow preflight sees the semantic join before an execution strategy
+                # binds its elements. Its per-event probe cannot decide that join.
+                raise NeedsBinding(bound_var)
             case C.AtCandidate(var):
                 self._require_current(var, at)
                 assert self.bound is not None

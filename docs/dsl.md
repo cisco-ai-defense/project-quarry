@@ -90,6 +90,10 @@ Flow operators read the finite conversation trace. `A after B` requires a witnes
 
 `until` sustains its left condition until the right condition occurs. A text capture referenced on the sustained side is rejected at load time because it may need a different value at each event. Capture outside the sustained condition or on the release side.
 
+The release operand can contain nested message comprehensions that join locally bound
+fields. These joins retain the ordinary ordering and shared-timeline checks in plain,
+explained, and reloaded-policy scans.
+
 ```text
 rule "Read then send"
 condition:
