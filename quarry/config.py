@@ -343,13 +343,31 @@ def _frozen_mapping(value: Mapping) -> Mapping:
 
 @dataclass(frozen=True)
 class ModelCacheConfig:
-    """Bounds for the process-wide result cache."""
+    """Shared result-table bounds and per-scan reuse policy."""
 
     ttl_seconds: float = RESULT_CACHE_TTL_SECONDS
     max_entries: int = RESULT_CACHE_MAX_ENTRIES
     max_bytes: int = RESULT_CACHE_MAX_BYTES
+    retention: str = "process"
+    reusable_categories: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.retention) is not str or self.retention not in {"process", "scan"}:
+            raise ConfigurationError("model_cache.retention must be 'process' or 'scan'")
+        categories = {"model_responses", "token_counts", "local_transforms", "probes"}
+        if (
+            type(self.reusable_categories) not in (list, tuple)
+            or len(self.reusable_categories) > len(categories)
+            or any(
+                type(name) is not str or name not in categories for name in self.reusable_categories
+            )
+            or len(set(self.reusable_categories)) != len(self.reusable_categories)
+        ):
+            raise ConfigurationError(
+                "model_cache.reusable_categories must name unique model_responses, "
+                "token_counts, local_transforms or probes categories"
+            )
+        object.__setattr__(self, "reusable_categories", tuple(self.reusable_categories))
         if (
             isinstance(self.ttl_seconds, bool)
             or not isinstance(self.ttl_seconds, int | float)
@@ -370,6 +388,16 @@ class ModelCacheConfig:
         ):
             raise ConfigurationError("model_cache.max_bytes must be a positive integer")
 
+    def retention_for(self, category: str) -> str:
+        if type(category) is not str or category not in {
+            "model_responses",
+            "token_counts",
+            "local_transforms",
+            "probes",
+        }:
+            raise ConfigurationError("unknown model-cache result category")
+        return "process" if category in self.reusable_categories else self.retention
+
 
 def _parse_model_cache(document: dict) -> ModelCacheConfig:
     data = document.get("model_cache")
@@ -377,12 +405,18 @@ def _parse_model_cache(document: dict) -> ModelCacheConfig:
         return ModelCacheConfig()
     if not isinstance(data, dict):
         raise ConfigurationError("model_cache must be a mapping")
-    _reject_unknown_fields(data, {"ttl_seconds", "max_entries", "max_bytes"}, "model_cache")
+    _reject_unknown_fields(
+        data,
+        {"ttl_seconds", "max_entries", "max_bytes", "retention", "reusable_categories"},
+        "model_cache",
+    )
     defaults = ModelCacheConfig()
     return ModelCacheConfig(
         ttl_seconds=data.get("ttl_seconds", defaults.ttl_seconds),
         max_entries=data.get("max_entries", defaults.max_entries),
         max_bytes=data.get("max_bytes", defaults.max_bytes),
+        retention=data.get("retention", defaults.retention),
+        reusable_categories=data.get("reusable_categories", defaults.reusable_categories),
     )
 
 

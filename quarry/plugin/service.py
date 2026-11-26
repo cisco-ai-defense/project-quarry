@@ -636,9 +636,9 @@ class QuarryPlugin:
     ) -> dict[str, Any]:
         """Compile one rule once and scan one conversation or an ordered batch.
 
-        A model call this server already made with the same model and input, within
-        ``model_cache.ttl_seconds`` of its last use, is not made again, whichever scan made
-        it.
+        With default process retention, a model call this server already made with the
+        same model and input, within ``model_cache.ttl_seconds`` of its last use, is reused.
+        Scan retention releases completed entries after their last active scan owner closes.
 
         ``visualize`` adds the static source graph once under ``compilation`` and a
         runtime-only ``visualization`` overlay; without it neither is recorded or returned.

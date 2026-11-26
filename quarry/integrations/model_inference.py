@@ -41,7 +41,7 @@ from urllib.parse import urljoin, urlsplit
 
 import orjson
 
-from quarry.cache.async_cache import result_cache
+from quarry.cache.async_cache import cache_retention, result_cache
 from quarry.cache.constants import REFUSAL_TTL_SECONDS
 from quarry.cache.keys import input_key, object_identity
 from quarry.config import InferenceModelConfig, QuarryConfig, ScoreConfig
@@ -2416,6 +2416,7 @@ class ModelInferenceBackend:
                             key,
                             shared_request,
                             retry_on=_starters_limit,
+                            retention=cache_retention("local_transforms", self.config.model_cache),
                             timeout=provider_timeout,
                         )
                         try:
@@ -2436,6 +2437,7 @@ class ModelInferenceBackend:
                     local_request,
                     alone=True,
                     retry_on=_starters_limit,
+                    retention=cache_retention("local_transforms", self.config.model_cache),
                     timeout=provider_timeout,
                 )
                 return read_transform(kept, snapshot)
@@ -2564,6 +2566,10 @@ class ModelInferenceBackend:
                         request,
                         budget=model_id,
                         retry_on=_starters_limit,
+                        retention=cache_retention(
+                            "token_counts" if method == "tokenize" else "model_responses",
+                            self.config.model_cache,
+                        ),
                         timeout=provider_timeout,
                     )
             except TimeoutError as exc:
