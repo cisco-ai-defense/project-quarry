@@ -24,6 +24,14 @@ from functools import cache
 from typing import Any, get_args, get_type_hints
 
 from quarry.types.dsl.base import ConditionNode
+from quarry.types.dsl.comprehensions import (
+    AllComprehension,
+    AnyComprehension,
+    FilterComprehension,
+    MapComprehension,
+)
+
+COMPREHENSION_TYPES = (AnyComprehension, AllComprehension, FilterComprehension, MapComprehension)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,3 +150,13 @@ def walk_condition_nodes(root: ConditionNode | None) -> Iterator[ConditionNode]:
 
     for visit in walk_condition_visits(root):
         yield visit.node
+
+
+def binding_comprehensions(
+    visit: ConditionVisit,
+) -> Iterator[AnyComprehension | AllComprehension | FilterComprehension | MapComprehension]:
+    """Comprehensions whose element is bound at this AST visit."""
+    path = (*visit.ancestors, visit.node)
+    for node, child in zip(path, path[1:], strict=False):
+        if isinstance(node, COMPREHENSION_TYPES) and child is not node.collection:
+            yield node

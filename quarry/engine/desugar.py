@@ -67,6 +67,8 @@ _NESTED_CHUNKS = (
 )
 _FLOW_FUNCTIONS = ("called_tool", "called_tools", "user_said", "assistant_said")
 ORDERS_INPUT_ITEMS = "orders input items"
+# Reserved binder for a public rule's check over a messages value.
+COMPOSED_CHECK = "\x00composed"
 
 
 @dataclass(frozen=True)
@@ -268,6 +270,17 @@ class Desugarer:
     def comprehension(self, node, scope) -> C.Formula:
         """Desugar a comprehension node into a core formula."""
         q = "exists" if isinstance(node, AnyComprehension) else "forall"
+        if node.variable.startswith(COMPOSED_CHECK):
+            reads = self.reads(node.collection, scope)
+            if len(reads) > 1:
+                raise UnsupportedConstruct(
+                    "a rule call reads one enclosing item, not "
+                    + ", ".join(f"`{name}`" for name in sorted(reads))
+                )
+            if reads:
+                binding = _lookup(scope, next(iter(reads)))
+                return C.Pred(node, binding.var, binding.surface)
+            return C.Static(node)
         if self._t.is_special_collection(node):
             if scope:
                 raise UnsupportedConstruct(_NESTED_CHUNKS)
