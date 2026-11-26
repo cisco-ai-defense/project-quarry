@@ -27,6 +27,7 @@ a public function, surface, or grammar form.
 | `outermost(spans: collection<span>) -> collection<span>` | Keep spans that no other span in the list contains, in text order. |
 | `refused(value: boolean \| number \| string \| message) -> boolean` | Return whether a `model("alias").score(...)` or `.complete(...)` call in `value` was refused. |
 | `text_ref(name: string) -> text_reference` | Refer to configured policy text by its exact resource name. |
+| `trim(messages: model_input, size: integer = null, context: model_input = null, from: string = "end", cut_keep: string = "start") -> model_input` | Select one oldest/newest bounded input for score, classify, complete or spans. |
 | `union(first: collection<span>, second: collection<span>) -> collection<span>` | Combine two span lists in text order, keeping equal spans once. |
 | `add_message(role: string, content: string) -> model_input` | Append one allowlisted text message to an immutable model input. |
 | `assistant_said(text: string, case_sensitive: boolean = false) -> boolean` | Return whether any assistant message contains the supplied text. |
@@ -352,6 +353,25 @@ being mistaken for the policy itself.
 - `name`: must be written directly in the rule
 
 Examples: [examples/model-inference.rule](examples/model-inference.rule) (requires a configured backend)
+
+### `trim`
+
+`trim(messages: model_input, size: integer = null, context: model_input = null, from: string = "end", cut_keep: string = "start") -> model_input`
+
+Rule syntax: `trim(messages[, size][, context=messages][, from="end"|"start"][, cut_keep="start"|"none"])`
+
+Select one oldest/newest bounded input for score, classify, complete or spans.
+
+A written size uses the split tokenizer's message units. Without a size the
+consuming operation requires max_input_tokens and counts its request framing,
+score policy and offered tools. Context is kept at the front with native origins.
+cut_keep="start" admits a fitting text prefix at the cut; "none" keeps whole messages.
+
+- `size`: minimum: 1
+- `from`: choices: end, start
+- `cut_keep`: choices: start, none
+
+Examples: [examples/operation-input-trim.rule](examples/operation-input-trim.rule) (requires a configured backend)
 
 ### `union`
 

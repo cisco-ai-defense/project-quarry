@@ -3444,6 +3444,61 @@ class ModelInferenceBackend:
             read=count,
         )
 
+    async def model_trim_messages(
+        self,
+        model_id: str,
+        operation: str,
+        messages: Messages,
+        size: int | None,
+        *,
+        context: Messages | None = None,
+        direction: str = "end",
+        cut_keep: str = "start",
+        constitution: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        timeout: float | None = None,
+    ):
+        """Select one input using written split units or its operation's request limit."""
+        from quarry.integrations.input_trim import trim_messages
+
+        if operation not in {"score", "classify", "complete", "spans"}:
+            raise ValueError("trim requires a consuming model operation")
+        await require_model_messages(messages, standalone=False)
+        if context is not None:
+            await require_model_messages(context, standalone=False)
+        implicit = size is None
+        if implicit:
+            section = getattr(self._model(model_id), operation)
+            size = None if section is None else section.max_input_tokens
+            if size is None:
+                raise ConfigurationError(
+                    f"Inference model '{model_id}' {operation} needs max_input_tokens for trim()"
+                )
+
+        async def count(selected):
+            with model_read(model_id, "input_tokens") as observation:
+                record_model_input(selected, tools=tools if implicit else None)
+                wire = selected.to_openai_messages()
+                offered = _tool_dicts(tools) if implicit else []
+                if implicit and operation == "score":
+                    if constitution is None:
+                        raise ValueError("trim score requires its policy text")
+                    if observation is not None:
+                        observation.value("constitution", constitution, slot="constitution")
+                    wire = self._score_request(model_id, constitution, wire, offered, None)
+                    offered = []  # The score builder already rendered its offered tools.
+                return await self._count_messages(
+                    model_id,
+                    wire,
+                    offered,
+                    key=("trim", operation if implicit else "written", wire, offered),
+                    timeout=timeout,
+                )
+
+        return await trim_messages(
+            messages, size, context=context, direction=direction, cut_keep=cut_keep, count=count
+        )
+
     async def model_split_messages(
         self,
         model_id: str,

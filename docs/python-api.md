@@ -161,3 +161,5 @@ payload = judge.to_dict()  # {"score": 0.8, "reason": "..."} or reason=None
 ```
 
 The score is calibrated exactly as in `model_score_messages`; both methods share the same request cache. The reason is present only when the configured alias enables `score.explanation` and its adapter returns a valid reason. Neither absent reasons nor float-only adapters imply an error. Refused, malformed and failed calls raise the existing model errors and never return a successful judge result. See [model-inference.md](model-inference.md#optional-judge-explanations) for limits and safe handling of untrusted generated text.
+
+For operation-aware model input limits, see [input trimming](input-trim.md).

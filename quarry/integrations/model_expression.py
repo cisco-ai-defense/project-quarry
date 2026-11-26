@@ -134,6 +134,7 @@ class ModelExpressionTrace:
     # Explicit user-facing explanations only; never provider private reasoning.
     judge_reasons: list[tuple[int, str, str]] = field(default_factory=list)
     omitted_judge_reasons: int = 0
+    trim_omissions: tuple[int, int] | None = None
 
     def add_judge_reason(self, ordinal: int, alias: str, reason: str) -> None:
         """Retain reasons in evaluation order with one shared bound for calls and chunks."""
@@ -1863,8 +1864,14 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
     before its refusal propagates.
     """
 
+    if trace is not None:
+        # A prior empty trim has no dispatched call to consume its omission counts. Keep
+        # each model operation's evidence local so a later untrimmed sibling cannot inherit it.
+        trace.trim_omissions = None
     alias, operation = str(expression.value).split("\x1f", 1)
     with model_read(alias, operation) as observation:
+        trimmed = bool(expression.children and expression.children[0].kind == "trim")
+        children = expression.children[1:] if trimmed else expression.children
         arguments = [
             await evaluate_model_expression(
                 child,
@@ -1874,11 +1881,72 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
                 trace=trace,
                 regex_backend=regex_backend,
             )
-            for child in expression.children
+            for child in children
         ]
+        if trimmed and not any(argument is MISSING for argument in arguments):
+            selected = expression.children[0]
+
+            async def operand(child):
+                return (
+                    None
+                    if child.kind == "absent"
+                    else await evaluate_model_expression(
+                        child,
+                        context,
+                        event=event,
+                        bindings=bindings,
+                        trace=trace,
+                        regex_backend=regex_backend,
+                    )
+                )
+
+            values = [await operand(selected.children[0]), None, None]
+            if values[0] is not MISSING and values[0]:
+                values[2] = await operand(selected.children[2])
+                if values[2] is not MISSING:
+                    size_expression = selected.children[1]
+                    values[1] = (
+                        None
+                        if size_expression.kind == "absent"
+                        else await _evaluate_trim_size(
+                            size_expression, context, event, bindings, regex_backend
+                        )
+                    )
+            if any(value is MISSING for value in values) or not values[0]:
+                arguments.insert(
+                    0, values[0] if values[0] is not MISSING and not values[0] else MISSING
+                )
+            else:
+                backend = context.resource_manager.inference_backend
+                if backend is None:
+                    raise RuntimeError("model inference backend is not initialized")
+                settings = str(selected.value).split("\x1f")
+                tools = (
+                    arguments[1]
+                    if operation == "score" and len(arguments) > 1
+                    else arguments[0]
+                    if operation in {"classify", "complete"} and arguments
+                    else None
+                )
+                result = await backend.model_trim_messages(
+                    alias,
+                    operation,
+                    *values[:2],
+                    context=values[2],
+                    direction=settings[2],
+                    cut_keep=settings[3],
+                    constitution=arguments[0] if operation == "score" else None,
+                    tools=tools,
+                    timeout=context.limits.rule_timeout,
+                )
+                arguments.insert(0, result.messages)
+                if trace is not None:
+                    trace.trim_omissions = (result.omitted_messages, result.omitted_characters)
         if any(argument is MISSING for argument in arguments):
             if observation is not None:
                 observation.not_sent()
+            if trimmed and operation == "spans":
+                return _empty_trim_spans(alias, context)
             return MISSING
         if isinstance(arguments[0], Messages) and not arguments[0]:
             # An input with no message (a message that does not exist, or a message() chain
@@ -1886,6 +1954,8 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
             if observation is not None:
                 observation.messages(arguments[0])
                 observation.not_sent()
+            if trimmed and operation == "spans":
+                return _empty_trim_spans(alias, context)
             return MISSING
         try:
             with handoff_model_read():
@@ -1904,6 +1974,64 @@ async def _evaluate_model_call(expression, context, event, bindings, trace, rege
                 _record_call(trace, context, expression, alias, operation, arguments, None)
                 trace.refusals.append((alias, operation, str(exc.details.get("reason"))))
             raise
+
+
+MAX_TRIM_ARITHMETIC_WORK = 4_000_000
+
+
+async def _evaluate_trim_size(expression, context, event, bindings, regex_backend, remaining=None):
+    """Bound operands before arithmetic, including untrusted tokenizer count results."""
+    raise_if_evaluation_expired()
+    if remaining is None:
+        remaining = [MAX_TRIM_ARITHMETIC_WORK]
+
+    def charge(amount):
+        remaining[0] -= amount
+        if remaining[0] < 0:
+            raise ValueError("trim() token arithmetic exceeds its work bound")
+
+    charge(1)
+    if expression.kind in {"+", "-", "*"}:
+        left, right = [
+            await _evaluate_trim_size(child, context, event, bindings, regex_backend, remaining)
+            for child in expression.children
+        ]
+        charge(
+            left.bit_length() * right.bit_length()
+            if expression.kind == "*"
+            else left.bit_length() + right.bit_length()
+        )
+        value = (
+            left + right
+            if expression.kind == "+"
+            else left - right
+            if expression.kind == "-"
+            else left * right
+        )
+    else:
+        # Budget counts remain physical/logical reads, but an unvalidated count must not
+        # enter explanation JSON before this bounded integer admission.
+        value = await evaluate_model_expression(
+            expression,
+            context,
+            event=event,
+            bindings=bindings,
+            trace=None,
+            regex_backend=regex_backend,
+        )
+    if type(value) is not int:
+        raise ValueError("trim() token arithmetic requires integers")
+    charge(value.bit_length())
+    return value
+
+
+def _empty_trim_spans(alias, context):
+    return CollectionResult(
+        output_type="span_collection",
+        category=context.resource_manager.config.models[alias].category,
+        source=ProducerRef(kind="model", name=alias, run_id=str(uuid.uuid4())),
+        items=(),
+    )
 
 
 async def _dispatch_model_call(expression, alias, operation, arguments, context, trace) -> Any:
@@ -1983,12 +2111,15 @@ async def _dispatch_model_call(expression, alias, operation, arguments, context,
         if not isinstance(messages, Messages):
             raise TypeError("model().spans() input must be Messages")
         messages.assert_self_contained()
-        return await backend.model_span_messages(
+        result = await backend.model_span_messages(
             alias,
             messages,
             threshold,
             timeout=context.limits.rule_timeout,
         )
+        if trace is not None and trace.trim_omissions is not None:
+            _record_call(trace, context, expression, alias, operation, arguments, len(result.items))
+        return result
     if operation == "complete":
         messages, *optional = arguments
         # With a response schema the result also carries its JSON content as `.json`.
@@ -2056,9 +2187,20 @@ def _record_call(trace, context, expression, alias, operation, arguments, result
         projected.append(("max_input_tokens", arguments[1]))
         projected.append(("overlap", overlap or 0))
         projected.append(("context_supplied", split_context is not None))
+    elif operation == "spans":
+        projected.append(("threshold", arguments[1]))
     else:
         tools_index = 2 if operation == "score" else 1
         projected.append(("tools_supplied", len(arguments) > tools_index))
+    if trace.trim_omissions is not None:
+        omitted_messages, omitted_characters = trace.trim_omissions
+        projected.extend(
+            (
+                ("trim_omitted_messages", omitted_messages),
+                ("trim_omitted_characters", omitted_characters),
+            )
+        )
+        trace.trim_omissions = None
     trace.calls.append((alias, operation, tuple(projected), result))
     # Pieces belong to the call that just consumed them; a later, unrelated call must not
     # inherit them.

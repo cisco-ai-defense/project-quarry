@@ -388,6 +388,10 @@ def test_disabled_explanations_preserve_preexisting_compiled_policy_identity(tmp
     model = scanner.config.models["judge"]
     old = asdict(model)
     old["score"].pop("explanation_max_tokens")
+    # These later optional limits also did not exist in the historical mapping.
+    for operation in ("score", "classify", "spans", "complete"):
+        if old[operation] is not None:
+            assert old[operation].pop("max_input_tokens") is None
     assert model.identity_dict() == old
     without_location = {
         k: v for k, v in old.items() if k not in {"endpoint", "aws_profile", "region"}

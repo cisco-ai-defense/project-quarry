@@ -1,5 +1,5 @@
 {
-  "compiler_version": "compiler-28",
+  "compiler_version": "compiler-29",
   "examples": [
     {
       "checks": [],
@@ -333,6 +333,15 @@
       "id": "example:model-spans",
       "requires_backend": true,
       "rule_path": "examples/model-spans.rule"
+    },
+    {
+      "checks": [],
+      "covered_item_ids": [
+        "compiler_form:trim"
+      ],
+      "id": "example:operation-input-trim",
+      "requires_backend": true,
+      "rule_path": "examples/operation-input-trim.rule"
     },
     {
       "checks": [
@@ -1372,6 +1381,101 @@
       "source": "quarry.types.text_resources.TextRef",
       "summary": "Refer to configured policy text by its exact resource name.",
       "syntax": null
+    },
+    {
+      "allowed_uses": [],
+      "compiler_tags": [],
+      "deprecated": false,
+      "description": "Select one oldest/newest bounded input for score, classify, complete or spans.\n\nA written size uses the split tokenizer's message units. Without a size the\nconsuming operation requires max_input_tokens and counts its request framing,\nscore policy and offered tools. Context is kept at the front with native origins.\ncut_keep=\"start\" admits a fitting text prefix at the cut; \"none\" keeps whole messages.",
+      "id": "compiler_form:trim",
+      "implicit_receiver_count": 0,
+      "kind": "compiler_form",
+      "name": "trim",
+      "parameters": [
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "messages",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "integer"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": 1,
+          "name": "size",
+          "required": false,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "model_input"
+          ],
+          "allowed_values": [],
+          "default": null,
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "context",
+          "required": false,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [
+            "end",
+            "start"
+          ],
+          "default": "end",
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "from",
+          "required": false,
+          "variadic": false
+        },
+        {
+          "accepted_types": [
+            "string"
+          ],
+          "allowed_values": [
+            "start",
+            "none"
+          ],
+          "default": "start",
+          "field_only": false,
+          "literal_only": false,
+          "maximum": null,
+          "minimum": null,
+          "name": "cut_keep",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "replacement": null,
+      "resource_group": null,
+      "return_type": "model_input",
+      "signature": "trim(messages: model_input, size: integer = null, context: model_input = null, from: string = \"end\", cut_keep: string = \"start\") -> model_input",
+      "source": "quarry.engine.compiler._Compiler._bind_trim",
+      "summary": "Select one oldest/newest bounded input for score, classify, complete or spans.",
+      "syntax": "trim(messages[, size][, context=messages][, from=\"end\"|\"start\"][, cut_keep=\"start\"|\"none\"])"
     },
     {
       "allowed_uses": [
