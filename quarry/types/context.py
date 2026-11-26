@@ -22,6 +22,7 @@ from typing import Any
 
 import orjson
 
+from quarry.cache.immediate_values import MAX_IMMEDIATE_BYTES, ImmediateValueMemo
 from quarry.cache.message_values import MessageValueBudget, MessageValueMemo
 from quarry.core.conversation import Conversation
 from quarry.safety.limits import SafetyLimits
@@ -225,6 +226,9 @@ def preflight_conversation_total_size(
 @dataclass
 class ScanContext:
     """Context for rule evaluation."""
+
+    _immediate_values: ImmediateValueMemo | None = None
+    _immediate_budget: MessageValueBudget | None = None
 
     def __init__(
         self,
@@ -447,6 +451,9 @@ class ScanContext:
         context.conversation = Conversation._with_messages(self.conversation, messages)
         context._timeline_cache = None
         context.message_value_memo = MessageValueMemo(self.message_value_memo.budget)
+        if self._immediate_budget is None:
+            self._immediate_budget = MessageValueBudget(MAX_IMMEDIATE_BYTES)
+        context._immediate_budget = self._immediate_budget
         context.value_evidence_budget = self.value_evidence_budget
         context.value_evidence_memory = self.value_evidence_memory
         context.deferred_value_evidence = self.deferred_value_evidence
@@ -455,6 +462,8 @@ class ScanContext:
     def close_message_values(self) -> None:
         """Drop request-owned caches and unused explanation factories after evidence work."""
         self.message_value_memo.close()
+        if self._immediate_values is not None:
+            self._immediate_values.close()
         for holder in self.deferred_value_evidence:
             holder.discard()
         self.deferred_value_evidence.clear()

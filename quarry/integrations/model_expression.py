@@ -26,13 +26,15 @@ import uuid
 from bisect import bisect_right
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from itertools import accumulate
 from types import MethodType
 from typing import Any, cast
 
+from quarry.cache.immediate_values import MAX_IMMEDIATE_BYTES, ImmediateValueMemo
 from quarry.cache.keys import input_key
-from quarry.cache.message_values import BindingIdentity
+from quarry.cache.message_values import BindingIdentity, MessageValueBudget
 from quarry.engine.atoms import (
     MAX_CONSTRUCTED_MESSAGES,
     MAX_CONSTRUCTED_TEXT_CHARACTERS,
@@ -71,6 +73,7 @@ from quarry.integrations.read_operations import (
     handoff_transform_read,
     model_read,
 )
+from quarry.integrations.read_usage import capture_read_usage
 from quarry.safety.timer import raise_if_evaluation_expired
 from quarry.types.adapter_transforms import (
     adapter_transform_reference,
@@ -102,6 +105,93 @@ _ITEM_TEXTS = "\x00item_texts"
 _CONSTRUCTION_SCOPE = "\x00construction_scope"
 _READ_CONSTRUCTION_SCOPE = "\x00read_construction_scope"
 _BINDING_SCOPES = "\x00binding_scopes"
+_FILTER_IMMEDIATES: ContextVar[frozenset[int] | None] = ContextVar(
+    "quarry_filter_immediates", default=None
+)
+_IMMEDIATE_ROOTS = frozenset(
+    {
+        "call_count",
+        "call_any",
+        "call_all",
+        "length",
+        "field",
+        "index",
+        "field_text",
+        "join",
+        "span_count",
+        "span_covered",
+        "span_any",
+        "span_all",
+        "text_equals",
+        "conditional",
+        "not",
+        "and",
+        "or",
+        "+",
+        "-",
+        "*",
+        "compare",
+        "string_compare",
+    }
+)
+_PURE_FILTER_KINDS = _IMMEDIATE_ROOTS | frozenset(
+    {
+        "literal",
+        "absent",
+        "messages",
+        "message_view",
+        "tools",
+        "input_state",
+        "binding",
+        "string_patterns",
+        "string_spans",
+        "view_spans",
+        "place_of",
+        "span_filter",
+        "outermost",
+        "union",
+        "extract_windows",
+        "transform",
+        "concat",
+        "message_select",
+        "message_map",
+        "flatten_messages",
+        "as_messages",
+        "slice",
+        "message",
+        "add_message",
+        "call_filter",
+        "map",
+    }
+)
+_LOCAL_BINDERS = frozenset(
+    {
+        "map",
+        "message_map",
+        "message_select",
+        "span_any",
+        "span_all",
+        "span_filter",
+        "call_filter",
+        "call_any",
+        "call_all",
+    }
+)
+_LITERAL_FILTER_KINDS = frozenset(
+    {
+        "literal",
+        "absent",
+        "conditional",
+        "not",
+        "and",
+        "or",
+        "+",
+        "-",
+        "*",
+        "compare",
+        "string_compare",
+    }
+)
 
 
 @dataclass
@@ -299,7 +389,120 @@ async def scoped_model_expression(expression, context, *, event=None, **kwargs):
             lease.close()
 
 
-async def evaluate_model_expression(
+async def _filter_immediate_plan(expression, *, pure_kinds=_PURE_FILTER_KINDS):
+    """Find closed pure operands without evaluating any of their input values.
+
+    Free names are intrinsic to each subtree: an item's field never becomes a
+    reusable value because an ancestor happens to bind that name. A whole inner
+    comprehension can be closed, with its source still using the outer scope.
+    Unknown and host operations form barriers, including their argument building.
+    """
+    pending = [(expression, False)]
+    visiting = set()
+    analysed = {}
+    eligible = set()
+    pacer = Pacer()
+    while pending:
+        raise_if_evaluation_expired()
+        if pacer.due():
+            await asyncio.sleep(0)
+        node, ready = pending.pop()
+        key = id(node)
+        if key in analysed:
+            continue
+        if (
+            type(node) is not ModelExpression
+            or type(node.kind) is not str
+            or node.kind not in pure_kinds
+            or type(node.value) not in (str, int, float, bool, type(None))
+            or type(node.children) is not tuple
+        ):
+            analysed[key] = False, frozenset()
+            continue
+        if not ready:
+            if key in visiting:
+                # Compiled expressions are acyclic; malformed direct IR cannot
+                # make optional classification loop or admit an unsound value.
+                return frozenset()
+            visiting.add(key)
+            pending.append((node, True))
+            pending.extend((child, False) for child in reversed(node.children))
+        else:
+            visiting.remove(key)
+            pure = True
+            names = {node.value} if node.kind == "binding" else set()
+            for index, child in enumerate(node.children):
+                child_pure, child_names = analysed[id(child)]
+                pure = pure and child_pure
+                if node.kind in _LOCAL_BINDERS and index:
+                    names.update(child_names - {node.value})
+                else:
+                    names.update(child_names)
+            analysed[key] = pure, frozenset(names)
+            if pure and not names and node.children and node.kind in _IMMEDIATE_ROOTS:
+                eligible.add(key)
+    raise_if_evaluation_expired()
+    return frozenset(eligible)
+
+
+async def _literal_filter_immediate_plan(expression):
+    # Registered ToolCall types can execute semantic guards and properties while
+    # reading an otherwise closed native value. Only literal-derived work is
+    # proven independent of those required callbacks without reading the inputs.
+    return await _filter_immediate_plan(expression, pure_kinds=_LITERAL_FILTER_KINDS)
+
+
+def _immediate_scalar(value):
+    return value is MISSING or type(value) in (str, int, float, bool, type(None))
+
+
+def _immediate_memo(context):
+    memo = getattr(context, "_immediate_values", MISSING)
+    if memo is MISSING:
+        return None
+    if memo is None:
+        budget = context._immediate_budget
+        if budget is None:
+            budget = context._immediate_budget = MessageValueBudget(MAX_IMMEDIATE_BYTES)
+        memo = context._immediate_values = ImmediateValueMemo(budget)
+    return memo
+
+
+def _replay_immediate_trace(trace, data):
+    if trace is not None:
+        _, fields, pieces = data
+        trace.expression_value, trace.operator, trace.threshold = fields
+        trace.input_pieces.extend(dict(piece) for piece in pieces)
+
+
+async def _evaluate_filter(expression, context, *, plans=None, repeatable=True, **kwargs):
+    if not repeatable:
+        return await evaluate_model_expression(expression, context, **kwargs)
+    plan = None if plans is None else plans.get(id(expression))
+    if plan is None:
+        memo = _immediate_memo(context)
+        classify = (
+            _literal_filter_immediate_plan
+            if getattr(context, "tool_call_types", None)
+            else _filter_immediate_plan
+        )
+        plan = (
+            await memo.eligible(expression, classify)
+            if memo is not None
+            else await classify(expression)
+        )
+        if plans is not None:
+            plans[id(expression)] = plan
+    if not plan:
+        return await evaluate_model_expression(expression, context, **kwargs)
+    token = _FILTER_IMMEDIATES.set(plan)
+    try:
+        return await evaluate_model_expression(expression, context, **kwargs)
+    finally:
+        _FILTER_IMMEDIATES.reset(token)
+
+
+async def _evaluate_filter_operand(
     expression: ModelExpression,
     context,
     *,
@@ -308,9 +511,96 @@ async def evaluate_model_expression(
     trace: ModelExpressionTrace | None = None,
     regex_backend: RegexBackend | None = None,
 ) -> Any:
+    """Reuse closed immediate filter values before reading their operands again."""
+    backend = regex_backend or PURE_REGEX
+    active = _FILTER_IMMEDIATES.get()
+    if active and id(expression) in active:
+        memo = _immediate_memo(context)
+        if memo is not None:
+            cached = memo.get(expression, backend)
+            if cached is not None:
+                _replay_immediate_trace(trace, cached)
+                return cached[0]
+            own_trace = ModelExpressionTrace()
+            with capture_read_usage() as usage:
+                value = await _evaluate_uncached_model_expression(
+                    expression,
+                    context,
+                    event=event,
+                    bindings=bindings,
+                    trace=own_trace,
+                    regex_backend=backend,
+                )
+            raise_if_evaluation_expired()
+            fields = own_trace.expression_value, own_trace.operator, own_trace.threshold
+            pieces = tuple(tuple(piece.items()) for piece in own_trace.input_pieces)
+            data = value, fields, pieces
+            _replay_immediate_trace(trace, data)
+            if all(_immediate_scalar(item) for item in (value, *fields)) and all(
+                type(key) is str and _immediate_scalar(item)
+                for piece in pieces
+                for key, item in piece
+            ):
+                await memo.keep(
+                    expression, backend, data, None if usage is None else usage.result()
+                )
+            return value
+    if active and expression.kind not in _PURE_FILTER_KINDS:
+        # A nested filter may opt in again, but a host call's own input building
+        # and every required host reader retain their existing evaluation path.
+        token = _FILTER_IMMEDIATES.set(None)
+        try:
+            return await _evaluate_uncached_model_expression(
+                expression,
+                context,
+                event=event,
+                bindings=bindings,
+                trace=trace,
+                regex_backend=backend,
+            )
+        finally:
+            _FILTER_IMMEDIATES.reset(token)
+    return await _evaluate_uncached_model_expression(
+        expression,
+        context,
+        event=event,
+        bindings=bindings,
+        trace=trace,
+        regex_backend=backend,
+    )
+
+
+async def _evaluate_uncached_model_expression(expression, context, **kwargs):
+    return await evaluate_model_expression(expression, context, _skip_immediate=True, **kwargs)
+
+
+async def evaluate_model_expression(
+    expression: ModelExpression,
+    context,
+    *,
+    event=None,
+    bindings: dict[str, Any] | None = None,
+    trace: ModelExpressionTrace | None = None,
+    regex_backend: RegexBackend | None = None,
+    _skip_immediate: bool = False,
+) -> Any:
     """Evaluate one compiler-validated expression against the active scan context."""
 
     regex_backend = regex_backend or PURE_REGEX
+    active = _FILTER_IMMEDIATES.get()
+    if (
+        not _skip_immediate
+        and active
+        and (id(expression) in active or expression.kind not in _PURE_FILTER_KINDS)
+    ):
+        return await _evaluate_filter_operand(
+            expression,
+            context,
+            event=event,
+            bindings=bindings,
+            trace=trace,
+            regex_backend=regex_backend,
+        )
     environment = bindings or {}
     kind = expression.kind
 
@@ -420,24 +710,36 @@ async def evaluate_model_expression(
             raise TypeError("a span filter requires a span collection")
         _check_span_limit(context, len(spans.items), "span filter input")
         survivors = []
+        immediate_plans = {}
         for item in spans.items:
             if await _span_filter_holds(
-                expression, item.value, context, event, environment, trace, regex_backend
+                expression,
+                item.value,
+                context,
+                event,
+                environment,
+                trace,
+                regex_backend,
+                plans=immediate_plans,
+                repeatable=len(spans.items) > 1,
             ):
                 survivors.append(item)
         return replace(spans, items=tuple(survivors))
     if kind in {"span_any", "span_all"}:
         source, predicate = expression.children
         wanted = kind == "span_any"
+        immediate_plans = {}
         variable = str(expression.value)
         async for span in _stream_quantifier_spans(
             source, context, event, environment, trace, regex_backend
         ):
             raise_if_evaluation_expired()
             held = truth(
-                await evaluate_model_expression(
+                await _evaluate_filter(
                     predicate,
                     context,
+                    plans=immediate_plans,
+                    repeatable=True,
                     event=event,
                     bindings={**environment, variable: span},
                     trace=trace,
@@ -1081,6 +1383,7 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
     )
     can_check_body_first = first_paid < len(filters) and not model_expression_requires_model(body)
     output = []
+    immediate_plans = {}
     pacer = Pacer()
     for position, item in enumerate(items):
         raise_if_evaluation_expired()
@@ -1104,7 +1407,16 @@ async def _evaluate_local_calls(expression, context, event, environment, trace, 
                     expression,
                     position,
                 )
-            value = await evaluate(node, bindings)
+            value = await _evaluate_filter(
+                node,
+                context,
+                plans=immediate_plans,
+                repeatable=len(items) > 1,
+                event=event,
+                bindings=bindings,
+                trace=trace,
+                regex_backend=regex_backend,
+            )
             if value is not MISSING and type(value) is not bool:
                 raise TypeError("a local call predicate must be Boolean")
             return value is True
@@ -1172,6 +1484,7 @@ async def _evaluate_message_selection(
     output_count = output_characters = 0
     constructed_keys: set[tuple[str, object]] = set()
     constructed_characters = 0
+    immediate_plans = {}
     pacer = Pacer()
     for position, item in enumerate(source):
         raise_if_evaluation_expired()
@@ -1197,9 +1510,11 @@ async def _evaluate_message_selection(
             )
         memo = getattr(context, "message_value_memo", None)
         try:
-            predicate = await evaluate_model_expression(
+            predicate = await _evaluate_filter(
                 expression.children[1],
                 context,
+                plans=immediate_plans,
+                repeatable=len(source) > 1,
                 event=event,
                 bindings=item_environment,
                 trace=trace,
@@ -1601,7 +1916,9 @@ async def _evaluate_string_spans(expression, context, event, environment, trace,
     )
 
 
-async def _span_filter_holds(expression, span, context, event, environment, trace, regex_backend):
+async def _span_filter_holds(
+    expression, span, context, event, environment, trace, regex_backend, *, plans, repeatable
+):
     _, local, model = expression.children
     scope = {**environment, str(expression.value): span}
     for test in (local, model):
@@ -1609,8 +1926,15 @@ async def _span_filter_holds(expression, span, context, event, environment, trac
             continue
         raise_if_evaluation_expired()
         if not truth(
-            await evaluate_model_expression(
-                test, context, event=event, bindings=scope, trace=trace, regex_backend=regex_backend
+            await _evaluate_filter(
+                test,
+                context,
+                plans=plans,
+                repeatable=repeatable,
+                event=event,
+                bindings=scope,
+                trace=trace,
+                regex_backend=regex_backend,
             )
         ):
             return False
@@ -1637,8 +1961,9 @@ async def _stream_quantifier_spans(
             yield span
         return
     if kind == "span_filter":
+        plans = {}
         async for span in _stream_quantifier_spans(children[0], *arguments, ordered=ordered):
-            if await _span_filter_holds(expression, span, *arguments):
+            if await _span_filter_holds(expression, span, *arguments, plans=plans, repeatable=True):
                 yield span
         return
     if kind == "union" and _can_stream_in_order(expression):
@@ -2510,6 +2835,7 @@ async def _evaluate_model_text(expression, context, event, bindings, trace, rege
     item_trace = None if trace is None else ModelExpressionTrace()
     passed = _filter_results(context, keep, variable, regex_backend)
     values = []
+    immediate_plans = {}
     pacer = Pacer()
     for position, item in enumerate(source):
         # The items are synchronous work, so stop at the rule deadline and let other tasks run.
@@ -2530,7 +2856,19 @@ async def _evaluate_model_text(expression, context, event, bindings, trace, rege
         if known is not None and known[0] is item:
             passes = known[1]
         else:
-            passes = await evaluate(keep, scope, item_trace) is True
+            passes = (
+                await _evaluate_filter(
+                    keep,
+                    context,
+                    plans=immediate_plans,
+                    repeatable=len(source) > 1,
+                    event=event,
+                    bindings=scope,
+                    trace=item_trace,
+                    regex_backend=regex_backend,
+                )
+                is True
+            )
             if passed is not None:
                 passed[id(item)] = (item, passes)
         if passes:
